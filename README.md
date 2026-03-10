@@ -1,2 +1,2 @@
 # Cluely
-Cluely variant designed to craft strong answers to behavioral interview questions based on user context.
+Cluely integration designed to automatically generate fully formatted, ready-to-work tickets directly into athe team's engineering board.
