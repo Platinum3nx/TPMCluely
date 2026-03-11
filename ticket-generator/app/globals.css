@@ -1,48 +1,13 @@
 @import "tailwindcss";
 
-:root {
-  --background: #050505;
-  --foreground: #e0e0e0;
-  --surface: #0d0d0d;
-  --surface-hover: #151515;
-  --border: #1a1a1a;
-  --border-bright: #2a2a2a;
-  --accent: #00ff88;
-  --accent-dim: #00cc6a;
-  --accent-glow: rgba(0, 255, 136, 0.15);
-  --accent-glow-strong: rgba(0, 255, 136, 0.3);
-  --cyan: #00d4ff;
-  --cyan-dim: rgba(0, 212, 255, 0.1);
-  --muted: #555;
-  --muted-light: #888;
-  --danger: #ff4444;
-  --warning: #ffaa00;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-surface: var(--surface);
-  --color-surface-hover: var(--surface-hover);
-  --color-border: var(--border);
-  --color-border-bright: var(--border-bright);
-  --color-accent: var(--accent);
-  --color-accent-dim: var(--accent-dim);
-  --color-accent-glow: var(--accent-glow);
-  --color-accent-glow-strong: var(--accent-glow-strong);
-  --color-cyan: var(--cyan);
-  --color-cyan-dim: var(--cyan-dim);
-  --color-muted: var(--muted);
-  --color-muted-light: var(--muted-light);
-  --color-danger: var(--danger);
-  --color-warning: var(--warning);
-  --font-sans: var(--font-inter), sans-serif;
-  --font-mono: var(--font-jetbrains-mono), monospace;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: #09090b;
+  color: #fafafa;
   font-family: var(--font-sans);
   min-height: 100vh;
 }
@@ -52,8 +17,8 @@ body::before {
   content: '';
   position: fixed;
   inset: 0;
-  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-  background-size: 24px 24px;
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 32px 32px;
   pointer-events: none;
   z-index: 0;
 }
@@ -64,26 +29,28 @@ body::before {
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--surface);
+  background: #18181b;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-bright);
+  background: #27272a;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--muted);
+  background: #3f3f46;
 }
 
 /* Textarea styling */
 textarea {
-  font-family: var(--font-jetbrains-mono), monospace;
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 /* Animations */
 @keyframes fadeInUp {
   from {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -91,31 +58,18 @@ textarea {
   }
 }
 
-@keyframes pulse-glow {
-  0%, 100% {
-    box-shadow: 0 0 8px var(--accent-glow);
-  }
-  50% {
-    box-shadow: 0 0 20px var(--accent-glow-strong);
-  }
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
 }
 
-@keyframes scan-line {
-  0% { top: -4px; }
-  100% { top: 100%; }
-}
-
-@keyframes blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .animate-fade-in-up {
   animation: fadeInUp 0.4s ease-out forwards;
-}
-
-.animate-pulse-glow {
-  animation: pulse-glow 2s ease-in-out infinite;
 }
 
 .ticket-card {
@@ -125,6 +79,16 @@ textarea {
 
 /* Selection styling */
 ::selection {
-  background: var(--accent-glow-strong);
-  color: var(--accent);
+  background: rgba(139, 92, 246, 0.3);
+  color: #c4b5fd;
+}
+
+/* Focus ring utility */
+.focus-ring {
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.focus-ring:focus {
+  outline: none;
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.15), 0 0 20px rgba(124, 58, 237, 0.05);
 }

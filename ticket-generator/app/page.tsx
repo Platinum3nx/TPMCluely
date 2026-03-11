@@ -8,16 +8,16 @@ export default function Home() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadingText, setLoadingText] = useState("Initializing...");
+  const [loadingText, setLoadingText] = useState("Initializing…");
   const ticketsRef = useRef<HTMLDivElement>(null);
 
   const loadingMessages = [
-    "Parsing transcript...",
-    "Identifying engineering tasks...",
-    "Extracting acceptance criteria...",
-    "Assigning team members...",
-    "Generating tickets...",
-    "Formatting output...",
+    "Parsing transcript…",
+    "Identifying engineering tasks…",
+    "Extracting acceptance criteria…",
+    "Classifying ticket types…",
+    "Generating tickets…",
+    "Formatting output…",
   ];
 
   const handleGenerate = async () => {
@@ -27,12 +27,11 @@ export default function Home() {
     setError(null);
     setTickets([]);
 
-    // Cycle through loading messages
     let msgIdx = 0;
     const interval = setInterval(() => {
       msgIdx = (msgIdx + 1) % loadingMessages.length;
       setLoadingText(loadingMessages[msgIdx]);
-    }, 2000);
+    }, 2200);
 
     try {
       const res = await fetch("/api/generate", {
@@ -49,7 +48,6 @@ export default function Home() {
 
       setTickets(data.tickets);
 
-      // Scroll to tickets on mobile
       setTimeout(() => {
         ticketsRef.current?.scrollIntoView({ behavior: "smooth" });
       }, 100);
@@ -62,63 +60,65 @@ export default function Home() {
   };
 
   return (
-    <div className="relative z-10 min-h-screen">
+    <div className="relative z-10 min-h-screen flex flex-col">
       {/* Header */}
-      <header className="border-b border-[#1a1a1a] bg-[#050505]/80 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-[1600px] mx-auto px-6 h-14 flex items-center justify-between">
+      <header className="border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-xl sticky top-0 z-50">
+        <div className="max-w-[1600px] mx-auto px-6 lg:px-8 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-2 h-2 rounded-full bg-[#00ff88] animate-pulse" />
-            <h1 className="font-mono text-sm font-semibold tracking-wider text-[#e0e0e0]">
-              TICKET<span className="text-[#00ff88]">::</span>GEN
+            <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-violet-600/15 border border-violet-500/20">
+              <svg className="w-3.5 h-3.5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+              </svg>
+            </div>
+            <h1 className="font-semibold text-sm tracking-tight text-zinc-100">
+              Ticket Generator
             </h1>
-            <span className="text-[10px] font-mono text-[#555] border border-[#1a1a1a] rounded px-1.5 py-0.5">
-              v1.0
+            <span className="text-[10px] font-mono text-zinc-600 border border-zinc-800 rounded-md px-1.5 py-0.5 bg-zinc-900">
+              v2.0
             </span>
           </div>
-          <div className="flex items-center gap-4">
-            <span className="text-[10px] font-mono text-[#555]">
-              powered by <span className="text-[#00d4ff]">gemini</span>
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-zinc-500 hidden sm:inline">
+              powered by Gemini
             </span>
-            <div className="flex gap-1.5">
-              <div className="w-2.5 h-2.5 rounded-full bg-[#ff4444]/60" />
-              <div className="w-2.5 h-2.5 rounded-full bg-[#ffaa00]/60" />
-              <div className="w-2.5 h-2.5 rounded-full bg-[#00ff88]/60" />
-            </div>
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="max-w-[1600px] mx-auto px-6 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-[calc(100vh-5rem)]">
+      <main className="flex-1 max-w-[1600px] w-full mx-auto px-6 lg:px-8 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 min-h-[calc(100vh-7rem)]">
+
           {/* LEFT PANEL — Transcript Input */}
           <div className="flex flex-col">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <span className="text-[#00ff88] font-mono text-xs">▸</span>
-                <h2 className="text-xs font-mono tracking-widest text-[#555] uppercase">
-                  Transcript Input
-                </h2>
-              </div>
-              <span className="text-[10px] font-mono text-[#555]">
-                {transcript.length > 0
-                  ? `${transcript.split(/\s+/).filter(Boolean).length} words`
-                  : "empty"}
-              </span>
+            <div className="flex items-center gap-2 mb-4">
+              <div className="w-1 h-4 rounded-full bg-violet-500" />
+              <label
+                htmlFor="transcript-input"
+                className="text-sm font-medium text-zinc-300 tracking-tight"
+              >
+                Raw Meeting Transcript
+              </label>
             </div>
 
-            <div className="flex-1 relative group">
+            <div className="flex-1 relative">
               <textarea
                 id="transcript-input"
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
-                placeholder={`Paste your meeting transcript here...\n\nExample:\n\nPM: Alright team, let's discuss the auth issues.\nSarah: The login endpoint is getting rate-limited...\nAlex: I can handle the rate limiter implementation.\nPM: Great. We also need to fix the session timeout bug...`}
-                className="w-full h-full min-h-[400px] lg:min-h-0 bg-[#0d0d0d] border border-[#1a1a1a] rounded-lg p-4 text-sm text-[#e0e0e0] placeholder-[#333] resize-none focus:outline-none focus:border-[#00ff88]/30 focus:shadow-[0_0_20px_rgba(0,255,136,0.05)] transition-all duration-300 leading-relaxed"
+                placeholder={`Paste your meeting transcript here…\n\nExample:\n\nPM: Let's talk about the auth issues from last sprint.\nSarah: The login endpoint is getting rate-limited under load…\nAlex: I can handle the rate limiter. Redis-backed, sliding window.\nPM: Great. We also need to fix the session timeout bug…`}
+                className="w-full h-full min-h-[420px] lg:min-h-0 bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-zinc-100 placeholder-zinc-600 resize-none focus-ring transition-all duration-200 leading-relaxed"
               />
-              {/* Scan line effect on focus */}
-              <div className="absolute inset-0 pointer-events-none opacity-0 group-focus-within:opacity-100 transition-opacity">
-                <div className="absolute left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-[#00ff88]/20 to-transparent" style={{ animation: 'scan-line 3s linear infinite' }} />
-              </div>
+            </div>
+
+            {/* Word Count */}
+            <div className="flex items-center justify-between mt-3">
+              <span className="text-[11px] text-zinc-600 font-mono">
+                {transcript.length > 0
+                  ? `${transcript.split(/\s+/).filter(Boolean).length} words`
+                  : "No content"}
+              </span>
             </div>
 
             {/* Generate Button */}
@@ -126,46 +126,31 @@ export default function Home() {
               id="generate-button"
               onClick={handleGenerate}
               disabled={loading || !transcript.trim()}
-              className={`mt-4 w-full py-3 rounded-lg font-mono text-sm tracking-wider transition-all duration-300 cursor-pointer ${
+              className={`mt-4 w-full py-3.5 rounded-xl font-medium text-sm tracking-wide transition-all duration-300 cursor-pointer ${
                 loading
-                  ? "bg-[#0d0d0d] border border-[#00ff88]/20 text-[#00ff88]/60"
+                  ? "bg-violet-600/60 border border-violet-500/40 text-violet-200"
                   : !transcript.trim()
-                  ? "bg-[#0d0d0d] border border-[#1a1a1a] text-[#333] cursor-not-allowed"
-                  : "bg-[#00ff88]/10 border border-[#00ff88]/30 text-[#00ff88] hover:bg-[#00ff88]/15 hover:border-[#00ff88]/50 hover:shadow-[0_0_30px_rgba(0,255,136,0.1)] active:scale-[0.99]"
+                  ? "bg-zinc-900 border border-zinc-800 text-zinc-600 cursor-not-allowed"
+                  : "bg-violet-600 border border-violet-500 text-white hover:bg-violet-500 hover:shadow-lg hover:shadow-violet-500/20 active:scale-[0.99]"
               }`}
             >
               {loading ? (
-                <span className="flex items-center justify-center gap-2">
-                  <svg
-                    className="w-4 h-4 animate-spin"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                    />
+                <span className="flex items-center justify-center gap-2.5">
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
                   {loadingText}
                 </span>
               ) : (
-                "[ GENERATE TICKETS ]"
+                "Generate Tickets"
               )}
             </button>
 
             {/* Error display */}
             {error && (
-              <div className="mt-3 p-3 rounded-lg bg-[#ff4444]/5 border border-[#ff4444]/20 text-[#ff4444] text-xs font-mono">
-                <span className="text-[#ff4444]/60">error: </span>
+              <div className="mt-3 p-3 rounded-xl bg-rose-500/5 border border-rose-500/20 text-rose-400 text-xs font-mono">
+                <span className="text-rose-500/60">error: </span>
                 {error}
               </div>
             )}
@@ -173,36 +158,38 @@ export default function Home() {
 
           {/* RIGHT PANEL — Generated Tickets */}
           <div ref={ticketsRef} className="flex flex-col">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <span className="text-[#00d4ff] font-mono text-xs">▸</span>
-                <h2 className="text-xs font-mono tracking-widest text-[#555] uppercase">
+                <div className="w-1 h-4 rounded-full bg-emerald-500" />
+                <h2 className="text-sm font-medium text-zinc-300 tracking-tight">
                   Generated Tickets
                 </h2>
               </div>
               {tickets.length > 0 && (
-                <span className="text-[10px] font-mono text-[#00ff88] bg-[#00ff88]/10 px-2 py-0.5 rounded-full">
+                <span className="text-[11px] font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full">
                   {tickets.length} tickets
                 </span>
               )}
             </div>
 
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+            <div className="flex-1 space-y-4 overflow-y-auto pr-1">
               {tickets.length > 0 ? (
                 tickets.map((ticket, i) => (
                   <TicketCard key={i} ticket={ticket} index={i} />
                 ))
               ) : (
-                <div className="flex flex-col items-center justify-center h-full min-h-[400px] lg:min-h-0 border border-[#1a1a1a] border-dashed rounded-lg">
-                  <div className="text-center">
-                    <div className="text-[#1a1a1a] text-6xl mb-4 font-mono">
-                      { }
+                <div className="flex flex-col items-center justify-center h-full min-h-[420px] lg:min-h-0 border border-zinc-800 border-dashed rounded-xl bg-zinc-900/30">
+                  <div className="text-center px-6">
+                    <div className="w-12 h-12 rounded-xl bg-zinc-800/50 border border-zinc-700/50 flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-6 h-6 text-zinc-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                      </svg>
                     </div>
-                    <p className="text-[#333] text-sm font-mono mb-1">
-                      No tickets generated yet
+                    <p className="text-zinc-400 text-sm font-medium mb-1">
+                      No tickets yet
                     </p>
-                    <p className="text-[#222] text-xs font-mono">
-                      Paste a transcript and hit generate
+                    <p className="text-zinc-600 text-xs leading-relaxed">
+                      Paste a meeting transcript and click Generate Tickets
                     </p>
                   </div>
                 </div>

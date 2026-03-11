@@ -1,25 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const SYSTEM_PROMPT = `You are a highly competent Technical Product Manager with deep experience in agile software development and engineering team management.
+const SYSTEM_PROMPT = `You are a ruthless technical project manager. Analyze this raw meeting transcript, extract actionable engineering tasks, and return the data as a strict JSON array of objects.
 
-Your task: Analyze the meeting transcript provided by the user. Identify all engineering tasks, feature requests, bug fixes, and technical debt items discussed.
+Each object in the array must have exactly these keys:
+- "title": string — a concise, actionable ticket title
+- "description": string — include context from the meeting (who raised it, why it matters, technical details discussed)
+- "acceptance_criteria": array of strings — specific, testable acceptance criteria
+- "type": string — exactly one of "Bug", "Feature", or "Task"
 
-For each identified task, create a well-structured ticket. You must return a strict JSON array of objects (no markdown, no code fences, just raw JSON). Each object must have these exact fields:
-
-- "title": A concise, actionable ticket title (e.g., "Implement rate limiting on /api/auth endpoint")
-- "description": A detailed description that includes context from the meeting discussion. Mention who raised the issue, why it matters, and any technical details discussed.
-- "acceptance_criteria": An array of strings, each being a specific, testable acceptance criterion (e.g., ["Rate limiter allows max 100 requests per minute per IP", "Returns 429 status code when limit exceeded", "Logs rate limit violations to monitoring dashboard"])
-- "assignee_name": The name of the person who was assigned or volunteered for this task during the meeting. If no one was explicitly assigned, use "Unassigned".
-
-Guidelines:
-- Extract 3-8 tickets from a typical meeting transcript
-- Be specific and actionable in titles — avoid vague descriptions
-- Acceptance criteria should be testable and measurable
-- Include relevant technical context from the discussion in descriptions
-- If a deadline or priority was mentioned, include it in the description
-
-Return ONLY the JSON array. No additional text, no markdown formatting.`;
+Rules:
+- Extract 3-8 tickets depending on the transcript length
+- Be specific and actionable — no vague titles
+- Each acceptance criterion must be testable and measurable
+- Include relevant technical context from the discussion
+- Return ONLY the JSON array. No markdown, no code fences, no extra text.`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -56,12 +51,10 @@ export async function POST(request: NextRequest) {
 
     const responseText = result.response.text();
 
-    // Parse the JSON - Gemini with responseMimeType: "application/json" should return clean JSON
     let tickets;
     try {
       tickets = JSON.parse(responseText);
     } catch {
-      // Try to extract JSON from the response if it has extra text
       const jsonMatch = responseText.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         tickets = JSON.parse(jsonMatch[0]);
@@ -81,14 +74,26 @@ export async function POST(request: NextRequest) {
       acceptance_criteria: Array.isArray(t.acceptance_criteria)
         ? t.acceptance_criteria.map(String)
         : [String(t.acceptance_criteria || "TBD")],
-      assignee_name: String(t.assignee_name || "Unassigned"),
+      type: ["Bug", "Feature", "Task"].includes(String(t.type))
+        ? String(t.type)
+        : "Task",
     }));
 
     return NextResponse.json({ tickets: validatedTickets });
   } catch (error) {
     console.error("Error generating tickets:", error);
-    const message =
-      error instanceof Error ? error.message : "An unexpected error occurred";
+    let message = "An unexpected error occurred";
+    if (error instanceof Error) {
+      // Extract clean message from verbose Gemini SDK errors
+      if (error.message.includes("429")) {
+        message = "Gemini API rate limit exceeded. Please wait a minute and try again.";
+      } else if (error.message.includes("401") || error.message.includes("403")) {
+        message = "Invalid Gemini API key. Check your .env.local file.";
+      } else {
+        // Take just the first sentence
+        message = error.message.split(". ")[0] + ".";
+      }
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
