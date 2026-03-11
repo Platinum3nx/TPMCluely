@@ -1,13 +1,7 @@
 "use client";
 
-import { useState } from "react";
-
-export interface Ticket {
-  title: string;
-  description: string;
-  acceptance_criteria: string[];
-  type: "Bug" | "Feature" | "Task";
-}
+import { useEffect, useMemo, useState } from "react";
+import type { Ticket } from "@/lib/shared/tickets";
 
 interface TicketCardProps {
   ticket: Ticket;
@@ -35,7 +29,27 @@ const TYPE_STYLES: Record<string, { border: string; dot: string; badge: string }
 export default function TicketCard({ ticket, index }: TicketCardProps) {
   const [pushing, setPushing] = useState(false);
   const [pushed, setPushed] = useState(false);
+  const [issueUrl, setIssueUrl] = useState<string | null>(null);
   const [pushError, setPushError] = useState<string | null>(null);
+  const storageKey = useMemo(
+    () => `linear-issue:${ticket.idempotency_key}`,
+    [ticket.idempotency_key]
+  );
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) {
+        return;
+      }
+
+      const parsed = JSON.parse(raw) as { issueUrl?: string };
+      setPushed(true);
+      setIssueUrl(typeof parsed.issueUrl === "string" && parsed.issueUrl.length > 0 ? parsed.issueUrl : null);
+    } catch {
+      localStorage.removeItem(storageKey);
+    }
+  }, [storageKey]);
 
   const handlePushToLinear = async () => {
     setPushing(true);
@@ -48,13 +62,26 @@ export default function TicketCard({ ticket, index }: TicketCardProps) {
           title: ticket.title,
           description: ticket.description,
           acceptance_criteria: ticket.acceptance_criteria,
+          idempotency_key: ticket.idempotency_key,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || "Failed to create issue");
       }
+
       setPushed(true);
+      const createdIssueUrl = typeof data.issue?.url === "string" ? data.issue.url : null;
+      setIssueUrl(createdIssueUrl);
+
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          issueUrl: createdIssueUrl,
+          createdAt: Date.now(),
+          idempotencyKey: ticket.idempotency_key,
+        })
+      );
     } catch (err) {
       setPushError(err instanceof Error ? err.message : "Failed to push");
     } finally {
@@ -116,7 +143,17 @@ export default function TicketCard({ ticket, index }: TicketCardProps) {
 
       {/* Footer */}
       <div className="pt-3 border-t border-zinc-800/60">
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-end gap-2">
+          {issueUrl && (
+            <a
+              href={issueUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] font-medium text-zinc-400 hover:text-zinc-200 transition-colors"
+            >
+              View issue
+            </a>
+          )}
           <button
             onClick={handlePushToLinear}
             disabled={pushing || pushed}

@@ -1,13 +1,15 @@
 "use client";
 
 import { useState, useRef } from "react";
-import TicketCard, { Ticket } from "./components/TicketCard";
+import TicketCard from "./components/TicketCard";
+import type { Ticket } from "@/lib/shared/tickets";
 
 export default function Home() {
   const [transcript, setTranscript] = useState("");
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [loadingText, setLoadingText] = useState("Initializing…");
   const ticketsRef = useRef<HTMLDivElement>(null);
 
@@ -25,7 +27,8 @@ export default function Home() {
 
     setLoading(true);
     setError(null);
-    setTickets([]);
+    setWarnings([]);
+    setLoadingText(loadingMessages[0]);
 
     let msgIdx = 0;
     const interval = setInterval(() => {
@@ -46,7 +49,16 @@ export default function Home() {
         throw new Error(data.error || "Failed to generate tickets");
       }
 
+      if (!Array.isArray(data.tickets)) {
+        throw new Error("Invalid ticket payload received from the API.");
+      }
+
       setTickets(data.tickets);
+      setWarnings(
+        Array.isArray(data.warnings)
+          ? data.warnings.filter((warning: unknown) => typeof warning === "string")
+          : []
+      );
 
       setTimeout(() => {
         ticketsRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -152,6 +164,16 @@ export default function Home() {
               <div className="mt-3 p-3 rounded-xl bg-rose-500/5 border border-rose-500/20 text-rose-400 text-xs font-mono">
                 <span className="text-rose-500/60">error: </span>
                 {error}
+              </div>
+            )}
+
+            {warnings.length > 0 && (
+              <div className="mt-3 p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 text-amber-300 text-xs">
+                {warnings.map((warning, index) => (
+                  <p key={`${warning}-${index}`} className="leading-relaxed">
+                    {warning}
+                  </p>
+                ))}
               </div>
             )}
           </div>
