@@ -27,6 +27,7 @@ import type {
   SecretKey,
   SessionDetail,
   SessionRecord,
+  ScreenContextInput,
   SettingRecord,
 } from "./lib/types";
 import { useLiveTranscription } from "./session/useLiveTranscription";
@@ -107,7 +108,20 @@ export default function App() {
     setActiveSessionDetail(isSessionLive(detail.session.status) ? detail : null);
   }
 
-  const { captureError, captureState, isCapturing, partialTranscript, startCapture, stopCapture } = useLiveTranscription({
+  const {
+    captureError,
+    captureState,
+    isCapturing,
+    partialTranscript,
+    screenShareError,
+    screenShareOwnedByCapture,
+    screenShareState,
+    startCapture,
+    startScreenShare,
+    stopCapture,
+    stopScreenShare,
+    captureScreenContext,
+  } = useLiveTranscription({
     onFinalTranscript: async (segment) => {
       if (!activeSessionRef.current) {
         return;
@@ -205,6 +219,9 @@ export default function App() {
   const overlayAlwaysOnTop = bootstrap ? getSettingValue(bootstrap.settings, "always_on_top", "true") === "true" : true;
   const sessionWidgetEnabled = bootstrap
     ? getSettingValue(bootstrap.settings, "session_widget_enabled", "true") === "true"
+    : true;
+  const screenContextEnabled = bootstrap
+    ? getSettingValue(bootstrap.settings, "screen_context_enabled", "true") === "true"
     : true;
 
   useEffect(() => {
@@ -380,7 +397,7 @@ export default function App() {
     void updateOverlayWindowLayout();
   }, [activeSessionDetail, overlayOpen, updateOverlayWindowLayout]);
 
-  async function startLiveCaptureForSession(sessionDetail: SessionDetail) {
+  async function startLiveCaptureForSession() {
     if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
       setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
       return;
@@ -410,7 +427,7 @@ export default function App() {
 
   async function handleStartSession(title: string) {
     try {
-      const detail = await createSessionRecord(title);
+      await createSessionRecord(title);
       if (sessionWidgetEnabled) {
         await syncOverlayWindow(true);
       }
@@ -418,7 +435,7 @@ export default function App() {
         bootstrap?.secrets.deepgramConfigured &&
         (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
       ) {
-        await startLiveCaptureForSession(detail);
+        await startLiveCaptureForSession();
       }
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to start session.";
@@ -429,7 +446,9 @@ export default function App() {
   async function handleStartListening() {
     try {
       setError(null);
-      const detail = activeSessionRef.current ?? (await createSessionRecord(createOverlaySessionTitle()));
+      if (!activeSessionRef.current) {
+        await createSessionRecord(createOverlaySessionTitle());
+      }
 
       if (!overlayOpenRef.current) {
         await syncOverlayWindow(true);
@@ -439,7 +458,7 @@ export default function App() {
         return;
       }
 
-      await startLiveCaptureForSession(detail);
+      await startLiveCaptureForSession();
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to start listening.";
       setError(message);
@@ -462,13 +481,16 @@ export default function App() {
       bootstrap?.secrets.deepgramConfigured &&
       (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
     ) {
-      await startLiveCaptureForSession(detail);
+      await startLiveCaptureForSession();
     }
   }
 
   async function handleCompleteSession(sessionId: string) {
     if (isCapturing) {
       await stopCapture();
+    }
+    if (screenShareState === "active" || screenShareState === "error") {
+      await stopScreenShare();
     }
     if (overlayOpenRef.current) {
       await syncOverlayWindow(false);
@@ -491,7 +513,13 @@ export default function App() {
       return;
     }
 
-    const detail = await runDynamicAction(activeSessionRef.current.session.id, action);
+    const screenContext =
+      action === "follow_up" && screenContextEnabled ? await captureScreenContextSafely() : null;
+    const detail = await runDynamicAction({
+      sessionId: activeSessionRef.current.session.id,
+      action,
+      screenContext,
+    });
     applySessionDetail(detail);
   }
 
@@ -503,6 +531,7 @@ export default function App() {
     const detail = await askAssistant({
       sessionId: activeSessionRef.current.session.id,
       prompt,
+      screenContext: screenContextEnabled ? await captureScreenContextSafely() : null,
     });
     applySessionDetail(detail);
   }
@@ -517,11 +546,23 @@ export default function App() {
       return;
     }
 
-    await startLiveCaptureForSession(activeSessionRef.current);
+    await startLiveCaptureForSession();
   }
 
   async function handleStopLiveCapture() {
     await stopCapture();
+  }
+
+  async function captureScreenContextSafely(): Promise<ScreenContextInput | null> {
+    if (!screenContextEnabled || screenShareState !== "active") {
+      return null;
+    }
+
+    try {
+      return await captureScreenContext();
+    } catch {
+      return null;
+    }
   }
 
   function handleExportSession(sessionDetail: SessionDetail) {
@@ -582,6 +623,10 @@ export default function App() {
           overlayOpen={overlayOpen}
           overlayShortcut={overlayShortcut}
           partialTranscript={partialTranscript}
+          screenContextEnabled={screenContextEnabled}
+          screenShareError={screenShareError}
+          screenShareOwnedByCapture={screenShareOwnedByCapture}
+          screenShareState={screenShareState}
           onStartSession={handleStartSession}
           onPauseSession={handlePauseSession}
           onResumeSession={handleResumeSession}
@@ -592,7 +637,9 @@ export default function App() {
           onSetCaptureMode={setSelectedCaptureMode}
           onStartLiveCapture={handleStartLiveCapture}
           onStartListening={handleStartListening}
+          onStartScreenShare={startScreenShare}
           onStopLiveCapture={handleStopLiveCapture}
+          onStopScreenShare={stopScreenShare}
           onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
         />
       </main>
@@ -712,6 +759,10 @@ export default function App() {
               overlayOpen={overlayOpen}
               overlayShortcut={overlayShortcut}
               partialTranscript={partialTranscript}
+              screenContextEnabled={screenContextEnabled}
+              screenShareError={screenShareError}
+              screenShareOwnedByCapture={screenShareOwnedByCapture}
+              screenShareState={screenShareState}
               onStartSession={handleStartSession}
               onPauseSession={handlePauseSession}
               onResumeSession={handleResumeSession}
@@ -722,7 +773,9 @@ export default function App() {
               onSetCaptureMode={setSelectedCaptureMode}
               onStartLiveCapture={handleStartLiveCapture}
               onStartListening={handleStartListening}
+              onStartScreenShare={startScreenShare}
               onStopLiveCapture={handleStopLiveCapture}
+              onStopScreenShare={stopScreenShare}
               onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
             />
           ) : null}

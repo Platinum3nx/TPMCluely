@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { CaptureMode, SessionDetail } from "../lib/types";
+import type { CaptureMode, ScreenShareState, SessionDetail } from "../lib/types";
 
 interface SessionControlsProps {
   activeSession: SessionDetail | null;
@@ -8,13 +8,19 @@ interface SessionControlsProps {
   captureState: string;
   overlayOpen: boolean;
   overlayShortcut: string;
+  screenContextEnabled: boolean;
+  screenShareError: string | null;
+  screenShareOwnedByCapture: boolean;
+  screenShareState: ScreenShareState;
   onStartSession: (title: string) => Promise<void>;
   onPauseSession: (sessionId: string) => Promise<void>;
   onResumeSession: (sessionId: string) => Promise<void>;
   onCompleteSession: (sessionId: string) => Promise<void>;
   onSetCaptureMode: (mode: CaptureMode) => void;
   onStartLiveCapture: () => Promise<void>;
+  onStartScreenShare: () => Promise<boolean>;
   onStopLiveCapture: () => Promise<void>;
+  onStopScreenShare: () => Promise<void>;
   onToggleOverlay: () => Promise<void>;
 }
 
@@ -25,13 +31,19 @@ export function SessionControls({
   captureState,
   overlayOpen,
   overlayShortcut,
+  screenContextEnabled,
+  screenShareError,
+  screenShareOwnedByCapture,
+  screenShareState,
   onStartSession,
   onPauseSession,
   onResumeSession,
   onCompleteSession,
   onSetCaptureMode,
   onStartLiveCapture,
+  onStartScreenShare,
   onStopLiveCapture,
+  onStopScreenShare,
   onToggleOverlay,
 }: SessionControlsProps) {
   const [title, setTitle] = useState("Sprint planning sync");
@@ -70,6 +82,10 @@ export function SessionControls({
         <span>Live transcript</span>
         <strong>{captureState}</strong>
       </div>
+      <div className="readiness-row">
+        <span>Screen context</span>
+        <strong>{screenShareState}</strong>
+      </div>
       <div className="field">
         <span>Capture mode</span>
         <select value={captureMode} onChange={(event) => onSetCaptureMode(event.target.value as CaptureMode)}>
@@ -107,11 +123,30 @@ export function SessionControls({
           </button>
         ) : null}
       </div>
+      {screenContextEnabled && !screenShareOwnedByCapture ? (
+        <div className="toolbar-row">
+          {screenShareState === "active" ? (
+            <button type="button" className="secondary-button" onClick={() => void onStopScreenShare()}>
+              Stop Sharing Screen
+            </button>
+          ) : (
+            <button type="button" className="secondary-button" onClick={() => void onStartScreenShare()}>
+              Share Screen
+            </button>
+          )}
+        </div>
+      ) : null}
       <p className="card-detail">Overlay shortcut: {overlayShortcut}</p>
       {captureError ? (
         <div className="inline-alert inline-alert-soft">
           <strong>Live transcription needs attention</strong>
           <p>{captureError}</p>
+        </div>
+      ) : null}
+      {screenShareError ? (
+        <div className="inline-alert inline-alert-soft">
+          <strong>Screen context needs attention</strong>
+          <p>{screenShareError}</p>
         </div>
       ) : null}
     </article>

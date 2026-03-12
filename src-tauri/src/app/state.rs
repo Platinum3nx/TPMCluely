@@ -8,6 +8,7 @@ use crate::secrets::{AppSecretStore, KeychainSecretStore};
 
 #[derive(Clone)]
 pub struct AppState {
+    app_dir: Arc<PathBuf>,
     database: Arc<AppDatabase>,
     secret_store: Arc<dyn AppSecretStore>,
     permissions: PermissionService,
@@ -21,11 +22,16 @@ impl AppState {
         let secret_store = KeychainSecretStore::new("com.cluely.desktop");
 
         Ok(Self {
+            app_dir: Arc::new(app_dir),
             database: Arc::new(database),
             secret_store: Arc::new(secret_store),
             permissions: PermissionService::new(),
             providers: ProviderCatalog,
         })
+    }
+
+    pub fn app_dir(&self) -> Arc<PathBuf> {
+        Arc::clone(&self.app_dir)
     }
 
     pub fn database(&self) -> Arc<AppDatabase> {

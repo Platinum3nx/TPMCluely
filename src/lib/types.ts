@@ -87,6 +87,8 @@ export interface SessionRecord {
 
 export type TranscriptSource = "manual" | "capture";
 
+export type ScreenShareState = "inactive" | "requesting" | "active" | "error";
+
 export interface TranscriptSegment {
   id: string;
   sessionId: string;
@@ -98,11 +100,34 @@ export interface TranscriptSegment {
   createdAt: string;
 }
 
+export interface ScreenContextInput {
+  mimeType: string;
+  dataBase64: string;
+  capturedAt: string;
+  width: number;
+  height: number;
+  sourceLabel: string;
+  staleMs: number;
+}
+
+export interface MessageAttachment {
+  kind: "screenshot";
+  artifactId?: string;
+  mimeType: string;
+  capturedAt: string;
+  width: number;
+  height: number;
+  sourceLabel: string;
+  persisted: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   sessionId: string;
   role: "user" | "assistant" | "system";
   content: string;
+  contextSnapshot: string | null;
+  attachments: MessageAttachment[];
   createdAt: string;
 }
 
@@ -128,9 +153,16 @@ export interface AppendTranscriptInput {
 export interface AskSessionInput {
   sessionId: string;
   prompt: string;
+  screenContext?: ScreenContextInput | null;
 }
 
 export type DynamicActionKey = "summary" | "decisions" | "next_steps" | "follow_up";
+
+export interface RunDynamicActionInput {
+  sessionId: string;
+  action: DynamicActionKey;
+  screenContext?: ScreenContextInput | null;
+}
 
 export type TicketType = "Bug" | "Feature" | "Task";
 

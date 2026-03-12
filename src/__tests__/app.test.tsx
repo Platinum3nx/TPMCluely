@@ -14,14 +14,6 @@ describe("App shell", () => {
   });
 
   it("opens the listening overlay from the keyboard shortcut before a session exists", async () => {
-    window.localStorage.setItem(
-      "cluely.desktop.secrets",
-      JSON.stringify({
-        deepgram_api_key: "test-deepgram",
-        gemini_api_key: "test-gemini",
-      })
-    );
-
     render(<App />);
 
     expect(await screen.findByText(/Session-first meeting intelligence/i)).toBeInTheDocument();
@@ -29,6 +21,18 @@ describe("App shell", () => {
     fireEvent.keyDown(window, { key: "K", metaKey: true, shiftKey: true });
 
     expect(await screen.findByText(/Shortcut First/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Start Listening/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Start (Listening|Session)/i })).toBeInTheDocument();
+  });
+
+  it("shows screen sharing controls after starting a manual listening session", async () => {
+    render(<App />);
+
+    expect(await screen.findByText(/Session-first meeting intelligence/i)).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "K", metaKey: true, shiftKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: /Start Session/i }));
+
+    expect(await screen.findByRole("button", { name: /Share Screen/i })).toBeInTheDocument();
+    expect(screen.getByText(/Transcript grounded/i)).toBeInTheDocument();
   });
 });

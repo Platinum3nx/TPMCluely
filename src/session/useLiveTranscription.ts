@@ -1,15 +1,24 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import type { CaptureMode } from "../lib/types";
+import type { MutableRefObject } from "react";
+import type { CaptureMode, ScreenContextInput, ScreenShareState } from "../lib/types";
 
 const KEEP_ALIVE_INTERVAL_MS = 8_000;
+const MAX_SCREEN_CONTEXT_BYTES = 1_500_000;
+const MAX_SCREEN_CONTEXT_STALE_MS = 5_000;
+const MAX_SCREEN_LONG_EDGE = 1_440;
+const MIN_SCREEN_WIDTH = 480;
+const MIN_SCREEN_HEIGHT = 270;
+const INITIAL_SCREEN_QUALITY = 0.82;
+const MIN_SCREEN_QUALITY = 0.56;
+const SCREEN_COMPRESSION_ATTEMPTS = 6;
 
 type CaptureState = "idle" | "connecting" | "listening" | "stopping" | "error" | "unsupported";
 
-interface CaptureSegment {
+type CaptureSegment = {
   speakerLabel?: string;
   text: string;
   source: "capture";
-}
+};
 
 interface StartCaptureOptions {
   apiKey: string;
@@ -59,13 +68,120 @@ function mapAudioLanguage(language: string): string | null {
   return language;
 }
 
+function stopMediaStream(stream: MediaStream | null) {
+  if (!stream) {
+    return;
+  }
+
+  for (const track of stream.getTracks()) {
+    track.onended = null;
+    track.stop();
+  }
+}
+
+function ensureFrameElements(
+  videoRef: MutableRefObject<HTMLVideoElement | null>,
+  canvasRef: MutableRefObject<HTMLCanvasElement | null>
+) {
+  if (!videoRef.current) {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.autoplay = false;
+    videoRef.current = video;
+  }
+
+  if (!canvasRef.current) {
+    canvasRef.current = document.createElement("canvas");
+  }
+
+  return {
+    video: videoRef.current,
+    canvas: canvasRef.current,
+  };
+}
+
+async function waitForVideoFrame(video: HTMLVideoElement): Promise<void> {
+  if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Shared screen video is not ready yet."));
+    }, 2_000);
+
+    const onLoaded = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = () => {
+      cleanup();
+      reject(new Error("Shared screen video could not be read."));
+    };
+
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.removeEventListener("loadedmetadata", onLoaded);
+      video.removeEventListener("canplay", onLoaded);
+      video.removeEventListener("error", onError);
+    };
+
+    video.addEventListener("loadedmetadata", onLoaded);
+    video.addEventListener("canplay", onLoaded);
+    video.addEventListener("error", onError);
+  });
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("Screen frame could not be read."));
+    reader.onloadend = () => {
+      const value = typeof reader.result === "string" ? reader.result : "";
+      const [, payload = ""] = value.split(",", 2);
+      resolve(payload);
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, mimeType: string, quality: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Screen frame could not be encoded."));
+          return;
+        }
+        resolve(blob);
+      },
+      mimeType,
+      quality
+    );
+  });
+}
+
+function describeDisplaySource(stream: MediaStream | null): string {
+  const track = stream?.getVideoTracks()[0];
+  const label = track?.label?.trim();
+  return label && label.length > 0 ? label : "Shared screen";
+}
+
 export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscriptionOptions) {
   const [captureState, setCaptureState] = useState<CaptureState>("idle");
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [partialTranscript, setPartialTranscript] = useState("");
+  const [screenShareState, setScreenShareState] = useState<ScreenShareState>("inactive");
+  const [screenShareError, setScreenShareError] = useState<string | null>(null);
+  const [screenShareOwnedByCapture, setScreenShareOwnedByCapture] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const displayStreamRef = useRef<MediaStream | null>(null);
+  const displayOwnedByAudioRef = useRef(false);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorNodeRef = useRef<ScriptProcessorNodeLike | null>(null);
   const silenceNodeRef = useRef<GainNode | null>(null);
@@ -73,6 +189,9 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
   const keepAliveRef = useRef<number | null>(null);
   const captureStateRef = useRef<CaptureState>("idle");
   const lastFinalTranscriptRef = useRef("");
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
+  const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
+  const screenContextCacheRef = useRef<ScreenContextInput | null>(null);
 
   const handleFinalTranscript = useEffectEvent(async (text: string, speakerLabel: string) => {
     await onFinalTranscript({
@@ -80,6 +199,99 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
       speakerLabel,
       source: "capture",
     });
+  });
+
+  const resetScreenContextCache = useEffectEvent(() => {
+    screenContextCacheRef.current = null;
+  });
+
+  const clearDisplayStream = useEffectEvent(async (stopTracks: boolean) => {
+    const displayStream = displayStreamRef.current;
+    displayStreamRef.current = null;
+    displayOwnedByAudioRef.current = false;
+    resetScreenContextCache();
+    setScreenShareOwnedByCapture(false);
+
+    if (videoElementRef.current) {
+      videoElementRef.current.pause();
+      videoElementRef.current.srcObject = null;
+    }
+
+    if (stopTracks) {
+      stopMediaStream(displayStream);
+    } else if (displayStream) {
+      for (const track of displayStream.getTracks()) {
+        track.onended = null;
+      }
+    }
+
+    setScreenShareState("inactive");
+  });
+
+  const handleDisplayTrackEnded = useEffectEvent(async (ownedByAudio: boolean) => {
+    resetScreenContextCache();
+    if (ownedByAudio) {
+      await clearDisplayStream(false);
+      setScreenShareState("error");
+      setScreenShareError("Screen sharing ended, so TPMCluely stopped listening. Start Listening again to recover.");
+      setCaptureError("System audio sharing ended, so TPMCluely stopped listening.");
+      captureStateRef.current = "error";
+      setCaptureState("error");
+
+      if (keepAliveRef.current !== null) {
+        window.clearInterval(keepAliveRef.current);
+        keepAliveRef.current = null;
+      }
+
+      if (websocketRef.current) {
+        websocketRef.current.close();
+        websocketRef.current = null;
+      }
+
+      sourceNodeRef.current?.disconnect();
+      processorNodeRef.current?.disconnect();
+      silenceNodeRef.current?.disconnect();
+      sourceNodeRef.current = null;
+      processorNodeRef.current = null;
+      silenceNodeRef.current = null;
+
+      stopMediaStream(audioStreamRef.current);
+      audioStreamRef.current = null;
+      if (audioContextRef.current) {
+        await audioContextRef.current.close().catch(() => undefined);
+        audioContextRef.current = null;
+      }
+      return;
+    }
+
+    await clearDisplayStream(false);
+    setScreenShareState("error");
+    setScreenShareError("Screen sharing ended. Ask TPMCluely will fall back to transcript-only answers.");
+  });
+
+  const attachDisplayStream = useEffectEvent(async (stream: MediaStream, ownedByAudio: boolean) => {
+    if (displayStreamRef.current && displayStreamRef.current !== stream) {
+      await clearDisplayStream(true);
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {
+      setScreenShareState("inactive");
+      return;
+    }
+
+    const { video } = ensureFrameElements(videoElementRef, canvasElementRef);
+    displayStreamRef.current = stream;
+    displayOwnedByAudioRef.current = ownedByAudio;
+    setScreenShareOwnedByCapture(ownedByAudio);
+    videoTrack.onended = () => {
+      void handleDisplayTrackEnded(ownedByAudio);
+    };
+
+    video.srcObject = stream;
+    await video.play().catch(() => undefined);
+    setScreenShareError(null);
+    setScreenShareState("active");
   });
 
   function teardownAudioGraph() {
@@ -91,6 +303,11 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
     silenceNodeRef.current = null;
     sourceNodeRef.current = null;
   }
+
+  const stopScreenShare = useEffectEvent(async () => {
+    await clearDisplayStream(true);
+    setScreenShareError(null);
+  });
 
   const stopCapture = useEffectEvent(async () => {
     captureStateRef.current = "stopping";
@@ -113,11 +330,12 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
 
     teardownAudioGraph();
 
-    if (mediaStreamRef.current) {
-      for (const track of mediaStreamRef.current.getTracks()) {
-        track.stop();
-      }
-      mediaStreamRef.current = null;
+    const audioStream = audioStreamRef.current;
+    audioStreamRef.current = null;
+    stopMediaStream(audioStream);
+
+    if (displayOwnedByAudioRef.current) {
+      await clearDisplayStream(true);
     }
 
     if (audioContextRef.current) {
@@ -183,7 +401,11 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
             : "The selected microphone stream did not provide any audio tracks."
         );
       }
-      mediaStreamRef.current = mediaStream;
+      audioStreamRef.current = mediaStream;
+
+      if (mode === "system_audio") {
+        await attachDisplayStream(mediaStream, true);
+      }
 
       const audioContext = new AudioContextCtor();
       audioContextRef.current = audioContext;
@@ -259,15 +481,16 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
         if (captureStateRef.current === "stopping") {
           return;
         }
-        if (mediaStreamRef.current) {
-          for (const track of mediaStreamRef.current.getTracks()) {
-            track.stop();
-          }
-          mediaStreamRef.current = null;
+        if (audioStreamRef.current) {
+          stopMediaStream(audioStreamRef.current);
+          audioStreamRef.current = null;
         }
         if (audioContextRef.current) {
           void audioContextRef.current.close().catch(() => undefined);
           audioContextRef.current = null;
+        }
+        if (displayOwnedByAudioRef.current) {
+          void clearDisplayStream(true);
         }
         if (captureStateRef.current === "listening" || captureStateRef.current === "connecting") {
           setCaptureError("Live transcription disconnected. You can start it again.");
@@ -318,18 +541,141 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
     }
   });
 
+  const startScreenShare = useEffectEvent(async () => {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setScreenShareError("Screen sharing is not available in this runtime.");
+      setScreenShareState("error");
+      return false;
+    }
+
+    try {
+      setScreenShareError(null);
+      setScreenShareState("requesting");
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        audio: false,
+        video: true,
+      });
+      await attachDisplayStream(displayStream, false);
+      return true;
+    } catch (error) {
+      const message =
+        error instanceof DOMException && error.name === "NotAllowedError"
+          ? "Screen sharing was cancelled. TPMCluely will keep using transcript-only answers."
+          : error instanceof Error
+            ? error.message
+            : "Screen sharing could not start.";
+      setScreenShareError(message);
+      setScreenShareState("error");
+      return false;
+    }
+  });
+
+  const captureScreenContext = useEffectEvent(async (): Promise<ScreenContextInput | null> => {
+    const displayStream = displayStreamRef.current;
+    if (!displayStream || screenShareState !== "active") {
+      return null;
+    }
+
+    const cached = screenContextCacheRef.current;
+    const now = Date.now();
+    try {
+      const { video, canvas } = ensureFrameElements(videoElementRef, canvasElementRef);
+      video.srcObject = displayStream;
+      await video.play().catch(() => undefined);
+      await waitForVideoFrame(video);
+
+      const naturalWidth = video.videoWidth;
+      const naturalHeight = video.videoHeight;
+      if (naturalWidth <= 0 || naturalHeight <= 0) {
+        throw new Error("Shared screen frame is unavailable.");
+      }
+
+      const longestEdge = Math.max(naturalWidth, naturalHeight);
+      const scale = Math.min(1, MAX_SCREEN_LONG_EDGE / longestEdge);
+      let targetWidth = Math.max(MIN_SCREEN_WIDTH, Math.round(naturalWidth * scale));
+      let targetHeight = Math.max(MIN_SCREEN_HEIGHT, Math.round(naturalHeight * scale));
+      let quality = INITIAL_SCREEN_QUALITY;
+
+      let blob: Blob | null = null;
+
+      for (let attempt = 0; attempt < SCREEN_COMPRESSION_ATTEMPTS; attempt += 1) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          throw new Error("Canvas context is unavailable for screen capture.");
+        }
+
+        context.drawImage(video, 0, 0, targetWidth, targetHeight);
+        blob = await canvasToBlob(canvas, "image/jpeg", quality);
+        if (blob.size <= MAX_SCREEN_CONTEXT_BYTES) {
+          break;
+        }
+
+        const shrinkFactor = Math.max(
+          0.7,
+          Math.min(0.92, Math.sqrt(MAX_SCREEN_CONTEXT_BYTES / blob.size) * 0.95)
+        );
+        targetWidth = Math.max(MIN_SCREEN_WIDTH, Math.round(targetWidth * shrinkFactor));
+        targetHeight = Math.max(MIN_SCREEN_HEIGHT, Math.round(targetHeight * shrinkFactor));
+        quality = Math.max(MIN_SCREEN_QUALITY, quality - 0.06);
+      }
+
+      if (!blob) {
+        throw new Error("Screen frame could not be encoded.");
+      }
+
+      const capturedAt = new Date(now).toISOString();
+      const screenContext: ScreenContextInput = {
+        mimeType: blob.type || "image/jpeg",
+        dataBase64: await blobToBase64(blob),
+        capturedAt,
+        width: targetWidth,
+        height: targetHeight,
+        sourceLabel: describeDisplaySource(displayStream),
+        staleMs: 0,
+      };
+
+      screenContextCacheRef.current = screenContext;
+      setScreenShareError(null);
+      return screenContext;
+    } catch (error) {
+      const cachedAge = cached ? now - Date.parse(cached.capturedAt) : Number.POSITIVE_INFINITY;
+      if (cached && cachedAge <= MAX_SCREEN_CONTEXT_STALE_MS) {
+        return {
+          ...cached,
+          staleMs: cachedAge,
+        };
+      }
+
+      setScreenShareError(
+        error instanceof Error
+          ? `${error.message} TPMCluely will answer from transcript only until screen sharing is healthy again.`
+          : "Shared screen is unavailable. TPMCluely will answer from transcript only."
+      );
+      return null;
+    }
+  });
+
   useEffect(() => {
     return () => {
       void stopCapture();
+      void stopScreenShare();
     };
-  }, [stopCapture]);
+  }, [stopCapture, stopScreenShare]);
 
   return {
     captureError,
     captureState,
     isCapturing: captureState === "connecting" || captureState === "listening",
     partialTranscript,
+    screenShareError,
+    screenShareOwnedByCapture,
+    screenShareState,
     startCapture,
+    startScreenShare,
     stopCapture,
+    stopScreenShare,
+    captureScreenContext,
   };
 }

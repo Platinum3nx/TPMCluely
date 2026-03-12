@@ -171,6 +171,8 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           ('live_summary_enabled', 'true'),
           ('screenshot_mode', 'selection'),
           ('screenshot_processing', 'manual'),
+          ('screen_context_enabled', 'true'),
+          ('persist_screen_artifacts', 'false'),
           ('ticket_generation_enabled', 'true'),
           ('auto_generate_tickets', 'true'),
           ('auto_push_linear', 'true'),
@@ -184,6 +186,8 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         "source",
         "TEXT NOT NULL DEFAULT 'manual'",
     )?;
+    add_column_if_missing(connection, "chat_messages", "context_snapshot", "TEXT")?;
+    add_column_if_missing(connection, "chat_messages", "attachments_json", "TEXT")?;
     add_column_if_missing(connection, "generated_tickets", "source_line", "TEXT")?;
 
     Ok(())

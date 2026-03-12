@@ -22,6 +22,16 @@ const toggleSettings = [
     description: "Generate background summary snapshots for lower-latency assistant answers.",
   },
   {
+    key: "screen_context_enabled",
+    title: "Screen Context",
+    description: "Let Ask TPMCluely and Follow-up questions use shared screen context when available.",
+  },
+  {
+    key: "persist_screen_artifacts",
+    title: "Persist Screen Artifacts",
+    description: "Store the exact screenshot sent to Gemini for debugging and auditability.",
+  },
+  {
     key: "ticket_generation_enabled",
     title: "Ticket Generation",
     description: "Allow transcript-to-Linear generation inside sessions and session review.",

@@ -29,6 +29,15 @@ pub enum LlmProviderError {
     MissingText,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmPart {
+    Text(String),
+    InlineImage {
+        mime_type: String,
+        data_base64: String,
+    },
+}
+
 fn should_retry(status: StatusCode) -> bool {
     matches!(
         status,
@@ -44,7 +53,7 @@ async fn request_with_retry(
     client: &Client,
     api_key: &str,
     system_prompt: &str,
-    user_prompt: &str,
+    user_parts: &[LlmPart],
     response_mime_type: Option<&str>,
 ) -> Result<String, LlmProviderError> {
     let endpoint = format!(
@@ -53,25 +62,13 @@ async fn request_with_retry(
 
     let mut last_error = None;
     for attempt in 0..3 {
-        let mut generation_config = json!({
-            "temperature": 0.2
-        });
-        if let Some(mime_type) = response_mime_type {
-            generation_config["responseMimeType"] = json!(mime_type);
-        }
-
         let response = client
             .post(&endpoint)
-            .json(&json!({
-                "systemInstruction": {
-                    "parts": [{ "text": system_prompt }]
-                },
-                "contents": [{
-                    "role": "user",
-                    "parts": [{ "text": user_prompt }]
-                }],
-                "generationConfig": generation_config
-            }))
+            .json(&build_request_payload(
+                system_prompt,
+                user_parts,
+                response_mime_type,
+            ))
             .send()
             .await?;
 
@@ -120,6 +117,48 @@ async fn request_with_retry(
     Err(last_error.unwrap_or(LlmProviderError::MissingText))
 }
 
+fn build_user_parts(user_parts: &[LlmPart]) -> Vec<serde_json::Value> {
+    user_parts
+        .iter()
+        .map(|part| match part {
+            LlmPart::Text(text) => json!({ "text": text }),
+            LlmPart::InlineImage {
+                mime_type,
+                data_base64,
+            } => json!({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": data_base64
+                }
+            }),
+        })
+        .collect()
+}
+
+fn build_request_payload(
+    system_prompt: &str,
+    user_parts: &[LlmPart],
+    response_mime_type: Option<&str>,
+) -> serde_json::Value {
+    let mut generation_config = json!({
+        "temperature": 0.2
+    });
+    if let Some(mime_type) = response_mime_type {
+        generation_config["responseMimeType"] = json!(mime_type);
+    }
+
+    json!({
+        "systemInstruction": {
+            "parts": [{ "text": system_prompt }]
+        },
+        "contents": [{
+            "role": "user",
+            "parts": build_user_parts(user_parts)
+        }],
+        "generationConfig": generation_config
+    })
+}
+
 pub async fn generate_text(
     api_key: &str,
     system_prompt: &str,
@@ -129,7 +168,26 @@ pub async fn generate_text(
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .build()?;
 
-    request_with_retry(&client, api_key, system_prompt, user_prompt, None).await
+    request_with_retry(
+        &client,
+        api_key,
+        system_prompt,
+        &[LlmPart::Text(user_prompt.to_string())],
+        None,
+    )
+    .await
+}
+
+pub async fn generate_text_multimodal(
+    api_key: &str,
+    system_prompt: &str,
+    user_parts: &[LlmPart],
+) -> Result<String, LlmProviderError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .build()?;
+
+    request_with_retry(&client, api_key, system_prompt, user_parts, None).await
 }
 
 pub async fn generate_json(
@@ -145,8 +203,56 @@ pub async fn generate_json(
         &client,
         api_key,
         system_prompt,
-        user_prompt,
+        &[LlmPart::Text(user_prompt.to_string())],
         Some("application/json"),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_request_payload, LlmPart};
+
+    #[test]
+    fn builds_multimodal_payload_with_inline_image_parts() {
+        let payload = build_request_payload(
+            "system",
+            &[
+                LlmPart::Text("question".to_string()),
+                LlmPart::InlineImage {
+                    mime_type: "image/jpeg".to_string(),
+                    data_base64: "abc123".to_string(),
+                },
+            ],
+            None,
+        );
+
+        let parts = payload["contents"][0]["parts"]
+            .as_array()
+            .expect("parts should be an array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "question");
+        assert_eq!(parts[1]["inline_data"]["mime_type"], "image/jpeg");
+        assert_eq!(parts[1]["inline_data"]["data"], "abc123");
+    }
+
+    #[test]
+    fn builds_json_payload_without_inline_image_when_text_only() {
+        let payload = build_request_payload(
+            "system",
+            &[LlmPart::Text("tickets".to_string())],
+            Some("application/json"),
+        );
+
+        let parts = payload["contents"][0]["parts"]
+            .as_array()
+            .expect("parts should be an array");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "tickets");
+        assert!(parts[0].get("inline_data").is_none());
+        assert_eq!(
+            payload["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+    }
 }

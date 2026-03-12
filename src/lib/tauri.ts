@@ -20,8 +20,8 @@ import type {
   AppendTranscriptInput,
   AskSessionInput,
   BootstrapPayload,
-  DynamicActionKey,
   MarkGeneratedTicketPushedInput,
+  RunDynamicActionInput,
   SaveGeneratedTicketsInput,
   SaveSecretInput,
   SaveSettingInput,
@@ -125,15 +125,12 @@ export async function appendTranscriptSegment(input: AppendTranscriptInput): Pro
   return invoke<SessionDetail | null>("append_transcript_segment", { input });
 }
 
-export async function runDynamicAction(
-  sessionId: string,
-  action: DynamicActionKey
-): Promise<SessionDetail | null> {
+export async function runDynamicAction(input: RunDynamicActionInput): Promise<SessionDetail | null> {
   if (!isTauriRuntime()) {
-    return runMockDynamicAction(sessionId, action);
+    return runMockDynamicAction(input);
   }
 
-  return invoke<SessionDetail | null>("run_dynamic_action", { sessionId, action });
+  return invoke<SessionDetail | null>("run_dynamic_action", { input });
 }
 
 export async function askAssistant(input: AskSessionInput): Promise<SessionDetail | null> {

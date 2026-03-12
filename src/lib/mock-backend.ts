@@ -5,11 +5,13 @@ import type {
   ChatMessage,
   DynamicActionKey,
   GeneratedTicket,
-  GeneratedTicketDraft,
   MarkGeneratedTicketPushedInput,
+  MessageAttachment,
   PermissionSnapshot,
+  RunDynamicActionInput,
   SessionDetail,
   SessionRecord,
+  ScreenContextInput,
   SaveGeneratedTicketsInput,
   SaveSecretInput,
   SaveSettingInput,
@@ -37,6 +39,8 @@ const defaultSettings: SettingRecord[] = [
   { key: "live_summary_enabled", value: "true" },
   { key: "screenshot_mode", value: "selection" },
   { key: "screenshot_processing", value: "manual" },
+  { key: "screen_context_enabled", value: "true" },
+  { key: "persist_screen_artifacts", value: "false" },
   { key: "ticket_generation_enabled", value: "true" },
   { key: "auto_generate_tickets", value: "true" },
   { key: "auto_push_linear", value: "true" },
@@ -147,8 +151,18 @@ function readMessages(): ChatMessage[] {
   }
 
   try {
-    const parsed = JSON.parse(raw) as ChatMessage[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw) as Partial<ChatMessage>[];
+    return Array.isArray(parsed)
+      ? parsed.map((message) => ({
+          id: message.id ?? createId("msg"),
+          sessionId: message.sessionId ?? "",
+          role: message.role ?? "assistant",
+          content: message.content ?? "",
+          contextSnapshot: message.contextSnapshot ?? null,
+          attachments: Array.isArray(message.attachments) ? message.attachments : [],
+          createdAt: message.createdAt ?? nowIso(),
+        }))
+      : [];
   } catch {
     return [];
   }
@@ -259,13 +273,49 @@ function deriveSummary(detail: SessionDetail): DerivedSessionArtifacts {
   };
 }
 
-function appendAssistantMessage(sessionId: string, role: ChatMessage["role"], content: string): ChatMessage[] {
+function buildScreenAttachment(screenContext?: ScreenContextInput | null): MessageAttachment[] {
+  if (!screenContext) {
+    return [];
+  }
+
+  return [
+    {
+      kind: "screenshot",
+      mimeType: screenContext.mimeType,
+      capturedAt: screenContext.capturedAt,
+      width: screenContext.width,
+      height: screenContext.height,
+      sourceLabel: screenContext.sourceLabel,
+      persisted: false,
+    },
+  ];
+}
+
+function buildContextSnapshot(screenContext?: ScreenContextInput | null): string | null {
+  if (!screenContext) {
+    return null;
+  }
+
+  return `Screen shared from ${screenContext.sourceLabel} at ${screenContext.capturedAt} (${screenContext.width}x${screenContext.height}, ${screenContext.staleMs}ms stale).`;
+}
+
+function appendAssistantMessage(
+  sessionId: string,
+  role: ChatMessage["role"],
+  content: string,
+  options?: {
+    attachments?: MessageAttachment[];
+    contextSnapshot?: string | null;
+  }
+): ChatMessage[] {
   const messages = readMessages();
   messages.push({
     id: createId("msg"),
     sessionId,
     role,
     content,
+    contextSnapshot: options?.contextSnapshot ?? null,
+    attachments: options?.attachments ?? [],
     createdAt: nowIso(),
   });
   writeMessages(messages);
@@ -496,10 +546,9 @@ export async function markMockGeneratedTicketPushed(
 }
 
 export async function runMockDynamicAction(
-  sessionId: string,
-  action: DynamicActionKey
+  input: RunDynamicActionInput
 ): Promise<SessionDetail | null> {
-  const detail = getSessionDetail(sessionId);
+  const detail = getSessionDetail(input.sessionId);
   if (!detail) {
     return null;
   }
@@ -512,14 +561,22 @@ export async function runMockDynamicAction(
     follow_up: derived.followUpEmailMd,
   };
 
-  appendAssistantMessage(sessionId, "assistant", contentByAction[action]);
+  const usesScreen = input.action === "follow_up" && input.screenContext;
+  const content = usesScreen
+    ? `${contentByAction[input.action]}\n\n[Screen] Shared screen context was available and can help refine unresolved implementation questions.`
+    : contentByAction[input.action];
+
+  appendAssistantMessage(input.sessionId, "assistant", content, {
+    attachments: usesScreen ? buildScreenAttachment(input.screenContext) : [],
+    contextSnapshot: usesScreen ? buildContextSnapshot(input.screenContext) : null,
+  });
   updateSessionRecord({
     ...detail.session,
     updatedAt: nowIso(),
     ...derived,
   });
 
-  return getSessionDetail(sessionId);
+  return getSessionDetail(input.sessionId);
 }
 
 export async function askMockAssistant(input: AskSessionInput): Promise<SessionDetail | null> {
@@ -540,8 +597,13 @@ export async function askMockAssistant(input: AskSessionInput): Promise<SessionD
     response = derived.followUpEmailMd;
   }
 
-  appendAssistantMessage(input.sessionId, "user", input.prompt);
-  appendAssistantMessage(input.sessionId, "assistant", response);
+  appendAssistantMessage(input.sessionId, "user", input.prompt, {
+    contextSnapshot: buildContextSnapshot(input.screenContext),
+  });
+  appendAssistantMessage(input.sessionId, "assistant", response, {
+    attachments: buildScreenAttachment(input.screenContext),
+    contextSnapshot: buildContextSnapshot(input.screenContext),
+  });
   updateSessionRecord({
     ...detail.session,
     updatedAt: nowIso(),

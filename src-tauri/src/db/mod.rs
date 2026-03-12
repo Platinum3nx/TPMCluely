@@ -53,6 +53,8 @@ pub struct MessageRow {
     pub session_id: String,
     pub role: String,
     pub content: String,
+    pub context_snapshot: Option<String>,
+    pub attachments_json: Option<String>,
     pub created_at: String,
 }
 
@@ -645,7 +647,7 @@ impl AppDatabase {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "
-                SELECT id, session_id, role, content, created_at
+                SELECT id, session_id, role, content, context_snapshot, attachments_json, created_at
                 FROM chat_messages
                 WHERE session_id = ?1
                 ORDER BY created_at ASC
@@ -658,7 +660,9 @@ impl AppDatabase {
                     session_id: row.get(1)?,
                     role: row.get(2)?,
                     content: row.get(3)?,
-                    created_at: row.get(4)?,
+                    context_snapshot: row.get(4)?,
+                    attachments_json: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             })?;
 
@@ -672,7 +676,21 @@ impl AppDatabase {
         role: &str,
         content: &str,
     ) -> Result<MessageRow, DatabaseError> {
-        let message_id = Uuid::new_v4().to_string();
+        self.append_message_with_metadata(session_id, role, content, None, None, None)
+    }
+
+    pub fn append_message_with_metadata(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        context_snapshot: Option<&str>,
+        attachments_json: Option<&str>,
+        message_id: Option<&str>,
+    ) -> Result<MessageRow, DatabaseError> {
+        let message_id = message_id
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = now_iso();
 
         self.with_connection(|connection| {
@@ -683,10 +701,20 @@ impl AppDatabase {
                     session_id,
                     role,
                     content,
+                    context_snapshot,
+                    attachments_json,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 ",
-                params![message_id, session_id, role, content, now],
+                params![
+                    message_id,
+                    session_id,
+                    role,
+                    content,
+                    context_snapshot,
+                    attachments_json,
+                    now
+                ],
             )?;
 
             connection.execute(
@@ -700,8 +728,49 @@ impl AppDatabase {
                 session_id: session_id.to_string(),
                 role: role.to_string(),
                 content: content.to_string(),
+                context_snapshot: context_snapshot.map(str::to_string),
+                attachments_json: attachments_json.map(str::to_string),
                 created_at: now,
             })
+        })
+    }
+
+    pub fn insert_session_artifact(
+        &self,
+        session_id: &str,
+        kind: &str,
+        storage_path: Option<&str>,
+        mime_type: Option<&str>,
+        sha256: Option<&str>,
+        metadata_json: Option<&str>,
+    ) -> Result<String, DatabaseError> {
+        let artifact_id = Uuid::new_v4().to_string();
+
+        self.with_connection(|connection| {
+            connection.execute(
+                "
+                INSERT INTO session_artifacts (
+                    id,
+                    session_id,
+                    kind,
+                    storage_path,
+                    mime_type,
+                    sha256,
+                    metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ",
+                params![
+                    artifact_id,
+                    session_id,
+                    kind,
+                    storage_path,
+                    mime_type,
+                    sha256,
+                    metadata_json
+                ],
+            )?;
+
+            Ok(artifact_id)
         })
     }
 }

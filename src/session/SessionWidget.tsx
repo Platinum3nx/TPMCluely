@@ -2,7 +2,13 @@ import { AskBar } from "./AskBar";
 import { DynamicActions } from "./DynamicActions";
 import { SessionControls } from "./SessionControls";
 import { TranscriptPanel } from "./TranscriptPanel";
-import type { CaptureMode, ChatMessage, DynamicActionKey, SessionDetail, TranscriptSegment } from "../lib/types";
+import type {
+  CaptureMode,
+  ChatMessage,
+  DynamicActionKey,
+  ScreenShareState,
+  SessionDetail,
+} from "../lib/types";
 
 interface SessionWidgetProps {
   activeSession: SessionDetail | null;
@@ -16,6 +22,10 @@ interface SessionWidgetProps {
   overlayOpen: boolean;
   overlayShortcut: string;
   partialTranscript: string;
+  screenContextEnabled: boolean;
+  screenShareError: string | null;
+  screenShareOwnedByCapture: boolean;
+  screenShareState: ScreenShareState;
   onStartSession: (title: string) => Promise<void>;
   onPauseSession: (sessionId: string) => Promise<void>;
   onResumeSession: (sessionId: string) => Promise<void>;
@@ -26,7 +36,9 @@ interface SessionWidgetProps {
   onSetCaptureMode: (mode: CaptureMode) => void;
   onStartLiveCapture: () => Promise<void>;
   onStartListening: () => Promise<void>;
+  onStartScreenShare: () => Promise<boolean>;
   onStopLiveCapture: () => Promise<void>;
+  onStopScreenShare: () => Promise<void>;
   onToggleOverlay: () => Promise<void>;
 }
 
@@ -67,7 +79,18 @@ function renderAssistantFeed(messages: ChatMessage[], overlayOpen: boolean) {
             .slice(overlayOpen ? -5 : 0)
             .map((message) => (
               <div key={message.id} className={`message-card message-${message.role}`}>
-                <span>{message.role}</span>
+                <div className="message-card-header">
+                  <span>{message.role}</span>
+                  {message.attachments.some((attachment) => attachment.kind === "screenshot") ? (
+                    <span className="message-attachment-badge">
+                      Screen used ·{" "}
+                      {new Date(message.attachments[0].capturedAt).toLocaleTimeString([], {
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  ) : null}
+                </div>
                 <p>{message.content}</p>
               </div>
             ))
@@ -77,13 +100,23 @@ function renderAssistantFeed(messages: ChatMessage[], overlayOpen: boolean) {
   );
 }
 
-function renderOverlayCapability(label: string, ready: boolean) {
+function renderOverlayCapability(label: string, ready: boolean, statusText?: string) {
   return (
     <div className={`overlay-capability ${ready ? "overlay-capability-ready" : "overlay-capability-missing"}`}>
       <strong>{label}</strong>
-      <span>{ready ? "Ready" : "Missing"}</span>
+      <span>{statusText ?? (ready ? "Ready" : "Missing")}</span>
     </div>
   );
+}
+
+function screenStatusLabel(screenShareState: ScreenShareState): string {
+  if (screenShareState === "active") {
+    return "Sharing";
+  }
+  if (screenShareState === "error") {
+    return "Needs attention";
+  }
+  return "Screen off";
 }
 
 export function SessionWidget({
@@ -98,6 +131,10 @@ export function SessionWidget({
   overlayOpen,
   overlayShortcut,
   partialTranscript,
+  screenContextEnabled,
+  screenShareError,
+  screenShareOwnedByCapture,
+  screenShareState,
   onStartSession,
   onPauseSession,
   onResumeSession,
@@ -108,7 +145,9 @@ export function SessionWidget({
   onSetCaptureMode,
   onStartLiveCapture,
   onStartListening,
+  onStartScreenShare,
   onStopLiveCapture,
+  onStopScreenShare,
   onToggleOverlay,
 }: SessionWidgetProps) {
   const status = activeSession?.session.status ?? "idle";
@@ -166,6 +205,7 @@ export function SessionWidget({
                 {renderOverlayCapability("Deepgram", deepgramReady)}
                 {renderOverlayCapability("Gemini", geminiReady)}
                 {renderOverlayCapability("Linear", linearReady)}
+                {renderOverlayCapability("Screen", screenShareState === "active", screenStatusLabel(screenShareState))}
               </div>
 
               <div className="overlay-launch-actions">
@@ -194,6 +234,9 @@ export function SessionWidget({
                   </div>
                   <div className="cluely-live-meta">
                     <span className={`overlay-pill ${isCapturing ? "overlay-pill-live" : ""}`}>{listeningLabel}</span>
+                    <span className={`overlay-pill ${screenShareState === "active" ? "overlay-pill-live" : ""}`}>
+                      {screenStatusLabel(screenShareState)}
+                    </span>
                     <span className="overlay-shortcut-badge">{overlayShortcut}</span>
                   </div>
                 </div>
@@ -234,6 +277,19 @@ export function SessionWidget({
                     End Meeting
                   </button>
                 </div>
+                {screenContextEnabled && !screenShareOwnedByCapture ? (
+                  <div className="toolbar-row cluely-live-toolbar">
+                    {screenShareState === "active" ? (
+                      <button type="button" className="secondary-button" onClick={() => void onStopScreenShare()}>
+                        Stop Sharing Screen
+                      </button>
+                    ) : (
+                      <button type="button" className="secondary-button" onClick={() => void onStartScreenShare()}>
+                        Share Screen
+                      </button>
+                    )}
+                  </div>
+                ) : null}
 
                 {captureError ? (
                   <div className="inline-alert inline-alert-soft">
@@ -241,9 +297,20 @@ export function SessionWidget({
                     <p>{captureError}</p>
                   </div>
                 ) : null}
+                {screenShareError ? (
+                  <div className="inline-alert inline-alert-soft">
+                    <strong>Screen context needs attention</strong>
+                    <p>{screenShareError}</p>
+                  </div>
+                ) : null}
               </article>
 
-              <AskBar disabled={false} onAsk={onAsk} />
+              <AskBar
+                disabled={false}
+                screenContextEnabled={screenContextEnabled}
+                screenShareState={screenShareState}
+                onAsk={onAsk}
+              />
               <DynamicActions disabled={false} onRunAction={onDynamicAction} />
 
               <div className="overlay-feed-grid">
@@ -286,17 +353,28 @@ export function SessionWidget({
             captureState={captureState}
             overlayOpen={overlayOpen}
             overlayShortcut={overlayShortcut}
+            screenContextEnabled={screenContextEnabled}
+            screenShareError={screenShareError}
+            screenShareOwnedByCapture={screenShareOwnedByCapture}
+            screenShareState={screenShareState}
             onStartSession={onStartSession}
             onPauseSession={onPauseSession}
             onResumeSession={onResumeSession}
             onCompleteSession={onCompleteSession}
             onSetCaptureMode={onSetCaptureMode}
             onStartLiveCapture={onStartLiveCapture}
+            onStartScreenShare={onStartScreenShare}
             onStopLiveCapture={onStopLiveCapture}
+            onStopScreenShare={onStopScreenShare}
             onToggleOverlay={onToggleOverlay}
           />
           <DynamicActions disabled={!activeSession} onRunAction={onDynamicAction} />
-          <AskBar disabled={!activeSession} onAsk={onAsk} />
+          <AskBar
+            disabled={!activeSession}
+            screenContextEnabled={screenContextEnabled}
+            screenShareState={screenShareState}
+            onAsk={onAsk}
+          />
         </div>
 
         <div className="card-stack">
