@@ -17,8 +17,8 @@ use crate::secrets::SecretPresence;
 use crate::session::state_machine::SessionStateMachine;
 use crate::tickets::generate_tickets;
 
-const MEETING_ASSISTANT_SYSTEM_PROMPT: &str = "You are Cluely, a real-time meeting copilot for engineering conversations. Answer only from the provided transcript and meeting context. Never invent facts. When possible, cite the transcript snippets you relied on using labels like [S14]. Keep spoken answers concise enough for the user to read aloud in a meeting.";
-const ACTION_ASSISTANT_SYSTEM_PROMPT: &str = "You are Cluely, a real-time meeting copilot for engineering conversations. Use only the provided transcript and summary. Be specific, concise, and grounded. If evidence is weak or missing, say that clearly instead of guessing.";
+const MEETING_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Answer only from the provided transcript and meeting context. Never invent facts. When possible, cite the transcript snippets you relied on using labels like [S14]. Keep spoken answers concise enough for the user to read aloud in a meeting.";
+const ACTION_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use only the provided transcript and summary. Be specific, concise, and grounded. If evidence is weak or missing, say that clearly instead of guessing.";
 const MAX_ASSISTANT_TRANSCRIPT_CHARS: usize = 18_000;
 
 #[derive(Debug, Clone, Serialize)]
@@ -436,7 +436,7 @@ fn format_recent_messages(messages: &[MessageRow]) -> String {
         .collect::<Vec<_>>();
 
     if recent.is_empty() {
-        return "No prior Ask Cluely conversation yet.".to_string();
+        return "No prior Ask TPMCluely conversation yet.".to_string();
     }
 
     recent
@@ -518,7 +518,7 @@ fn build_question_prompt(
     let snippets = select_relevant_transcript_snippets(transcripts, prompt).join("\n");
     let recent_messages = format_recent_messages(messages);
     format!(
-        "Rolling summary:\n{}\n\nRecent Ask Cluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\nUser question:\n{}\n\nAnswer using only the transcript. If the transcript does not contain the answer, say that clearly. Cite the transcript snippets you relied on using their [S#] labels. Keep the answer concise enough to read aloud in a meeting.",
+        "Rolling summary:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\nUser question:\n{}\n\nAnswer using only the transcript. If the transcript does not contain the answer, say that clearly. Cite the transcript snippets you relied on using their [S#] labels. Keep the answer concise enough to read aloud in a meeting.",
         derived
             .rolling_summary
             .as_deref()
@@ -773,7 +773,7 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
         .map_err(|error| error.to_string())?;
 
     Ok(BootstrapPayload {
-        app_name: "Cluely Desktop".to_string(),
+        app_name: "TPMCluely".to_string(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         permissions,
         settings,

@@ -4,13 +4,13 @@ TPMCluely is a Tauri desktop app for demoing an in-meeting engineering copilot w
 
 - start a meeting session
 - capture transcript signal live
-- ask transcript-grounded questions with `Ask Cluely`
+- ask transcript-grounded questions with `Ask TPMCluely`
 - generate follow-up questions during the meeting
 - end the meeting
 - automatically generate engineering tickets
 - push those tickets into Linear with idempotent dedupe
 
-The primary goal of this repo is a reliable, recordable product demo for an engineering meeting, not full parity with every Cluely feature.
+The primary goal of this repo is a reliable, recordable product demo for an engineering meeting, not full parity with every legacy Cluely feature.
 
 ## Naming Note
 
@@ -48,7 +48,7 @@ The intended workflow is:
    - `Demo transcript`
 4. Open the translucent overlay with the configured shortcut.
 5. Let the meeting proceed.
-6. Click `Ask Cluely` when the user needs a transcript-grounded answer to read aloud.
+6. Click `Ask TPMCluely` when the user needs a transcript-grounded answer to read aloud.
 7. Click `Follow-up questions` when you want Gemini to suggest deeper questions based on unresolved discussion.
 8. End the session.
 9. Review generated notes and tickets in the dashboard.
@@ -220,7 +220,7 @@ npm run tauri:dev
 7. Click `Start Live Transcript`.
 8. Open the overlay.
 9. Run the meeting.
-10. Use `Ask Cluely` and `Follow-up questions` during the discussion.
+10. Use `Ask TPMCluely` and `Follow-up questions` during the discussion.
 11. End the session.
 12. Open `Dashboard` and show the resulting tickets and Linear links.
 
@@ -251,7 +251,7 @@ Fallback mode.
 
 Use this if live capture fails and you still want to demonstrate:
 
-- Ask Cluely
+- Ask TPMCluely
 - follow-up generation
 - ticket generation
 
@@ -281,7 +281,7 @@ It includes:
 - capture mode selection
 - live transcript controls
 - overlay toggle
-- `Ask Cluely`
+- `Ask TPMCluely`
 - dynamic actions
 - transcript feed
 - assistant feed
@@ -316,7 +316,7 @@ Here is the recommended demo flow for recording:
 2. Start a meeting called something like `Q2 engineering planning` or `Auth rollout review`.
 3. Start live transcript capture.
 4. Let the team discuss a couple of features.
-5. When someone asks the user a question, click `Ask Cluely`.
+5. When someone asks the user a question, click `Ask TPMCluely`.
 6. Ask something like:
    - `What should I say about rollout risk?`
    - `What was decided about the metrics dashboard?`
@@ -374,7 +374,7 @@ Fallback:
 - add transcript lines manually
 - or use `Load Demo Transcript`
 
-### `Ask Cluely` gives weak answers
+### `Ask TPMCluely` gives weak answers
 
 Usually this means:
 
@@ -462,7 +462,7 @@ Before recording your demo:
 2. Run a 3-5 minute rehearsal with the same meeting app.
 3. Verify:
    - transcript appears live
-   - `Ask Cluely` returns usable answers
+   - `Ask TPMCluely` returns usable answers
    - `Follow-up questions` works
    - ending the session generates tickets
    - tickets land in Linear

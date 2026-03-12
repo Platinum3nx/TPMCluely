@@ -45,7 +45,7 @@ export function SessionControls({
         <p className="card-title">Start a Session</p>
         <p className="card-detail">
           Sessions drive the live overlay. Start one here and the app will be ready for live transcript capture,
-          Ask Cluely answers, and automatic ticket creation when the meeting ends.
+          Ask TPMCluely answers, and automatic ticket creation when the meeting ends.
         </p>
         <div className="field-row">
           <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Session title" />

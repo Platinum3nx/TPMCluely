@@ -2,7 +2,7 @@
 name = "cluely_desktop"
 version = "0.1.0"
 edition = "2021"
-description = "Cluely-style desktop assistant with local-first transcript and ticket workflows"
+description = "TPMCluely desktop assistant with local-first transcript and ticket workflows"
 license = "UNLICENSED"
 publish = false
 

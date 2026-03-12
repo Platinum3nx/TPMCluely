@@ -54,7 +54,7 @@ export function SessionWidget({
       {overlayOpen ? (
         <div className="overlay-banner">
           <div>
-            <p className="eyebrow">Cluely Overlay</p>
+            <p className="eyebrow">TPMCluely Overlay</p>
             <h2>{activeSession?.session.title ?? "Live meeting"}</h2>
           </div>
           <div className="overlay-meta">
@@ -68,7 +68,7 @@ export function SessionWidget({
           <p className="eyebrow">Live Session Widget</p>
           <h2>Live transcript, overlay controls, grounded answers, and auto-generated tickets.</h2>
           <p className="muted">
-            Start a meeting, stream transcript signal into the assistant, answer live questions with Ask Cluely, then
+            Start a meeting, stream transcript signal into the assistant, answer live questions with Ask TPMCluely, then
             end the session to generate deduped Linear tickets automatically.
           </p>
         </div>

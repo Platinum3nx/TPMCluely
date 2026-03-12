@@ -522,7 +522,7 @@ export default function App() {
     return (
       <main className="app-shell">
         <div className="loading-state">
-          <span className="eyebrow">Cluely Desktop</span>
+          <span className="eyebrow">TPMCluely</span>
           <h1>Bootstrapping the foundation layer.</h1>
           <p>Loading permissions, settings, diagnostics, and provider state.</p>
         </div>
@@ -583,7 +583,7 @@ export default function App() {
     <main className="app-shell">
       <section className="hero-strip">
         <div>
-          <p className="eyebrow">Cluely Desktop Foundation</p>
+          <p className="eyebrow">TPMCluely Foundation</p>
           <h1>Session-first meeting intelligence, grounded in local state and explicit system contracts.</h1>
         </div>
         <div className="hero-meta">
@@ -643,7 +643,7 @@ export default function App() {
                   <p className="card-title">Execution Focus</p>
                   <h2>Live meeting demo path</h2>
                   <p className="card-detail">
-                    Start a meeting, capture transcript signal, answer questions with Ask Cluely, and end into
+                    Start a meeting, capture transcript signal, answer questions with Ask TPMCluely, and end into
                     automatically generated Linear tickets.
                   </p>
                 </article>

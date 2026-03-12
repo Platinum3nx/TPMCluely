@@ -6,6 +6,6 @@ describe("App shell", () => {
     render(<App />);
 
     expect(await screen.findByText(/Session-first meeting intelligence/i)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /^Cluely Desktop$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^TPMCluely$/i })).toBeInTheDocument();
   });
 });

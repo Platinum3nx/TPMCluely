@@ -277,7 +277,7 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
   const secrets = readSecrets();
 
   return {
-    appName: "Cluely Desktop",
+    appName: "TPMCluely",
     appVersion: "0.1.0-mock",
     permissions: defaultPermissions,
     settings,

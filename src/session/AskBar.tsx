@@ -11,7 +11,7 @@ export function AskBar({ disabled, onAsk }: AskBarProps) {
   return (
     <article className="card">
       <div className="section-header">
-        <p className="card-title">Ask Cluely</p>
+        <p className="card-title">Ask TPMCluely</p>
         <span className="section-meta">Grounded in the live transcript</span>
       </div>
       <div className="field-row">
@@ -29,7 +29,7 @@ export function AskBar({ disabled, onAsk }: AskBarProps) {
             setPrompt("");
           }}
         >
-          Ask Cluely
+          Ask TPMCluely
         </button>
       </div>
     </article>

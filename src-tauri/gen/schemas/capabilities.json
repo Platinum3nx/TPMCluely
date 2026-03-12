@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability set for Cluely Desktop foundation commands.","local":true,"windows":["main"],"permissions":["core:default","global-shortcut:allow-is-registered","global-shortcut:allow-register","global-shortcut:allow-unregister"]}}
+{"default":{"identifier":"default","description":"Default capability set for TPMCluely foundation commands.","local":true,"windows":["main"],"permissions":["core:default","global-shortcut:allow-is-registered","global-shortcut:allow-register","global-shortcut:allow-unregister"]}}

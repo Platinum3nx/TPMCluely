@@ -61,5 +61,5 @@ pub fn run() {
             mark_generated_ticket_pushed
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run Cluely Desktop");
+        .expect("failed to run TPMCluely");
 }
