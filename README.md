@@ -35,6 +35,195 @@ This repo has two related apps:
 
 For the main product workflow, use the desktop app at the repo root.
 
+## User Manual
+
+This section is written for someone who just wants to set up TPMCluely and use it in a real meeting.
+
+### What TPMCluely Does
+
+TPMCluely helps during meetings.
+
+It can:
+
+- listen to the meeting
+- show a live transcript
+- answer questions based on what has already been said
+- suggest follow-up questions
+- create engineering tickets after the meeting
+- push those tickets into Linear
+
+### What You Need Before You Start
+
+You need:
+
+- a Mac
+- this project downloaded on your machine
+- `Gemini API Key`
+- `Deepgram API Key`
+- `Linear API Key`
+- `Linear Team ID`
+
+If someone else on your team already gave you these keys, you can paste them into TPMCluely during setup.
+
+### First-Time Setup
+
+1. Open Terminal.
+2. Go to the TPMCluely project folder.
+3. Run:
+
+```bash
+npm install
+```
+
+4. Start TPMCluely:
+
+```bash
+npm run tauri:dev
+```
+
+5. In the app, open `Onboarding`.
+6. Paste in:
+   `Gemini API Key`
+   `Deepgram API Key`
+   `Linear API Key`
+   `Linear Team ID`
+7. Click `Store` for each one.
+8. Confirm the app shows:
+   `Gemini: Ready`
+   `Deepgram: Ready`
+   `Linear: Ready`
+9. Open `Settings`.
+10. Make sure these are turned on:
+    `Ticket Generation`
+    `Auto Generate Tickets`
+    `Auto Push Linear`
+11. Check the overlay shortcut.
+    Default is `CmdOrCtrl+Shift+K`.
+
+### How To Start TPMCluely For A Meeting
+
+TPMCluely does not automatically detect meetings yet.
+
+To use it:
+
+1. Start TPMCluely.
+2. Join your Zoom, Google Meet, or other meeting.
+3. Press the TPMCluely shortcut.
+4. The overlay opens.
+5. Pick the transcript source you want:
+   `Microphone + Deepgram`
+   `System audio + Deepgram`
+   `Manual only`
+6. Click `Start Listening`.
+
+If you want the safest setup, use `Microphone + Deepgram` unless you already know system audio works well on your machine.
+
+### What To Do During The Meeting
+
+Once TPMCluely is listening:
+
+- the transcript should begin to appear
+- the overlay stays available while the meeting continues
+- TPMCluely starts collecting the context it will later use for answers and ticket generation
+
+You can use these main controls:
+
+- `Ask TPMCluely`
+  Use this when someone asks you something and you want TPMCluely to suggest an answer based on the meeting.
+- `Follow-up questions`
+  Use this when you want TPMCluely to suggest smart next questions based on what is still unclear.
+- `Summarize so far`
+  Use this for a short recap of the meeting.
+- `What was decided?`
+  Use this to pull out decisions.
+- `Next steps`
+  Use this to pull out action items.
+- `Pause`
+  Use this if you want to temporarily pause the meeting session.
+- `Hide`
+  Use this to close the overlay without ending the meeting.
+
+### How To Use Ask TPMCluely
+
+When someone in the meeting asks you a question:
+
+1. Open the overlay if it is hidden.
+2. Click into `Ask TPMCluely`.
+3. Type a direct question such as:
+   `What was decided about the rollout?`
+   `Who owns the backend work?`
+   `What should I say about the risk here?`
+4. Read TPMCluely's answer aloud.
+
+Best results come when:
+
+- people are speaking clearly
+- not too many people talk over each other
+- TPMCluely has already collected at least a little transcript
+
+### How Ticket Generation Works
+
+When you end the meeting:
+
+1. TPMCluely finalizes the transcript.
+2. It creates session notes.
+3. It uses Gemini to generate engineering tickets from the meeting.
+4. If Linear is configured, it pushes those tickets into Linear.
+
+Ticket count is based on the meeting itself.
+
+That means:
+
+- one small discussion may create one ticket
+- a larger planning meeting may create several tickets
+- a vague meeting may create none
+
+### How To Review Results After The Meeting
+
+After you click `End Meeting`:
+
+1. Open `Dashboard`.
+2. Select the meeting session you want to review.
+3. Check:
+   `Summary`
+   `Decisions`
+   `Action Items`
+   `Transcript`
+   `Generated Tickets`
+4. If Linear push worked, use the Linear links shown on the tickets.
+
+You can also click `Export Markdown` to save a written version of the meeting.
+
+### What Each Screen Is For
+
+- `Onboarding`
+  Add keys and check readiness.
+- `Session`
+  Main control area for meetings and transcript capture.
+- `Dashboard`
+  Review old meetings, notes, transcript, and tickets.
+- `Settings`
+  Change shortcut and meeting behavior.
+
+### Best Practices
+
+- Start TPMCluely before the meeting gets important.
+- Use `Microphone + Deepgram` if you want the safest live transcript path.
+- Ask short, direct questions in `Ask TPMCluely`.
+- End the meeting cleanly so ticket generation can run.
+- Do one short test meeting before using TPMCluely in something important.
+
+### Simple Troubleshooting
+
+- If no transcript appears:
+  Check your Deepgram key, permissions, and capture mode.
+- If TPMCluely gives weak answers:
+  Wait for more transcript and ask a more specific question.
+- If tickets do not show up in Linear:
+  Check the Linear API key, team ID, and auto-push setting.
+- If the shortcut does not open TPMCluely:
+  Check the shortcut in `Settings` and make sure no other app is already using it.
+
 ## Core Workflow
 
 The intended workflow is:
@@ -398,7 +587,6 @@ Check:
 
 - the shortcut value in `Settings`
 - whether another app is already using the same global shortcut
-- whether the meeting session is active
 
 You can always open the overlay using the in-app button.
 
