@@ -47,7 +47,7 @@ Reason:
 
 ### Non-negotiable delivery rules
 
-1. No checkpoint closes without automated verification and a manual demo path.
+1. No checkpoint closes without automated verification and a manual validation path.
 2. No ticket-generation porting starts until fixture-based parity coverage exists for the current TypeScript implementation.
 3. No release candidate exists until signing, hardened runtime, notarization, and clean-machine permission checks are proven.
 4. No feature work bypasses the session data model, transcript store, or Keychain secret layer.
@@ -174,7 +174,7 @@ Create the root desktop app scaffold and the foundation layers that every later 
 - `cargo fmt --check`
 - `cargo clippy -- -D warnings`
 
-Manual demo:
+Manual validation:
 
 - App launches
 - Onboarding renders
@@ -230,7 +230,7 @@ Users can start, pause, resume, and stop a session from tray or shortcut, and th
 - `cargo test session`
 - `npm run test:web -- session-widget`
 
-Manual demo:
+Manual validation:
 
 - `Start Session` opens widget
 - `Pause` and `Resume` change state without recreating the session
@@ -285,7 +285,7 @@ System audio becomes ordered, persisted transcript segments in a live session.
 - `cargo test transcript`
 - `cargo test deepgram`
 
-Manual demo:
+Manual validation:
 
 - Start session
 - Play meeting audio
@@ -344,7 +344,7 @@ The session widget supports live questions, streaming answers, and dynamic actio
 - `cargo test summarizer`
 - `npm run test:web -- ask-bar`
 
-Manual demo:
+Manual validation:
 
 - Ask a question during a session
 - Observe streaming response
@@ -397,7 +397,7 @@ Ending a session produces the durable dashboard experience: transcript, summary,
 - `cargo test finalizer`
 - `npm run test:web -- dashboard`
 
-Manual demo:
+Manual validation:
 
 - Start and stop a session
 - Open dashboard
@@ -446,7 +446,7 @@ Search works over sessions at product scale and export remains stable on seeded 
 - `cargo test search`
 - Seed 500 to 1,000 sessions and measure query latency
 
-Manual demo:
+Manual validation:
 
 - Search by decision text
 - Search by transcript phrase
@@ -492,7 +492,7 @@ Users can capture on-screen context for one-off help or attach it to a session d
 
 - `cargo test screenshot`
 
-Manual demo:
+Manual validation:
 
 - Capture region
 - Ask a question about the capture
@@ -538,7 +538,7 @@ Users can customize the assistant and session behavior safely.
 - `cargo test knowledge`
 - `npm run test:web -- settings`
 
-Manual demo:
+Manual validation:
 
 - Add prompt
 - Add file
@@ -578,7 +578,7 @@ Add the Cluely-style prep flow without delaying the core session product.
 
 - `cargo test briefs`
 
-Manual demo:
+Manual validation:
 
 - Surface an upcoming meeting
 - Generate brief
@@ -667,7 +667,7 @@ Part C - ship the product workflow
 - `cargo test tickets`
 - `cargo test linear`
 
-Manual demo:
+Manual validation:
 
 - Generate tickets from a completed session
 - Generate tickets from an active session
@@ -719,7 +719,7 @@ Produce a release candidate that can survive daily use on clean machines.
 - Permission deny/recover test
 - Active-session crash/restart recovery test
 
-Manual demo:
+Manual validation:
 
 - Install on a clean machine
 - Grant and deny permissions
@@ -839,7 +839,7 @@ A checkpoint is only `DONE` when all of the following are true:
 
 - Code is merged and builds cleanly
 - Automated tests pass
-- Manual demo path works
+- Manual validation path works
 - Docs are updated
 - Known deviations are written down explicitly
 - No unresolved blocker remains for the next checkpoint
