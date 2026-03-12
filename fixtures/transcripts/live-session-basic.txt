@@ -1,0 +1,3 @@
+PM: Let's confirm the authentication rollout plan.
+Engineer: I can own the rate-limit fix and the session timeout patch.
+PM: Great, let's also create a follow-up task for QA verification.

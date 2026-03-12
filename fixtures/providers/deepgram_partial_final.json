@@ -1,0 +1,22 @@
+{
+  "partial": {
+    "channel": {
+      "alternatives": [
+        {
+          "transcript": "I can own the rate"
+        }
+      ]
+    },
+    "is_final": false
+  },
+  "final": {
+    "channel": {
+      "alternatives": [
+        {
+          "transcript": "I can own the rate-limit fix and the session timeout patch."
+        }
+      ]
+    },
+    "is_final": true
+  }
+}
