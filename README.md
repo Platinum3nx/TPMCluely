@@ -1,6 +1,6 @@
 # TPMCluely
 
-TPMCluely is a Tauri desktop app for demoing an in-meeting engineering copilot workflow:
+TPMCluely is a Tauri desktop app for an in-meeting engineering copilot workflow:
 
 - start a meeting session
 - capture transcript signal live
@@ -10,7 +10,7 @@ TPMCluely is a Tauri desktop app for demoing an in-meeting engineering copilot w
 - automatically generate engineering tickets
 - push those tickets into Linear with idempotent dedupe
 
-The primary goal of this repo is a reliable, recordable product demo for an engineering meeting, not full parity with every legacy Cluely feature.
+The goal of this repo is a fully functional TPMCluely-style product focused on the core meeting loop and ticket generation, not full parity with every legacy Cluely feature.
 
 ## Naming Note
 
@@ -31,11 +31,11 @@ This repo has two related apps:
 
 2. `ticket-generator/`
    - a standalone Next.js reference implementation for the older ticket-generation workflow
-   - useful for comparison, but not required for the current desktop demo flow
+   - useful for comparison, but not required for the current desktop app flow
 
-For the main demo workflow, use the desktop app at the repo root.
+For the main product workflow, use the desktop app at the repo root.
 
-## Core Demo Workflow
+## Core Workflow
 
 The intended workflow is:
 
@@ -182,7 +182,7 @@ Run the actual TPMCluely desktop app:
 npm run tauri:dev
 ```
 
-This is the command you should use for real demo testing.
+This is the command you should use for real desktop usage and validation.
 
 ### Browser Mock
 
@@ -202,9 +202,9 @@ It will not give you the full desktop behavior.
 npm run tauri:build
 ```
 
-## Recommended Demo Setup
+## Recommended Setup
 
-For the most reliable recording:
+For the most reliable setup:
 
 1. Launch the app with:
 
@@ -228,7 +228,7 @@ npm run tauri:dev
 
 ### `Microphone + Deepgram`
 
-Safest option for most demo recordings.
+Safest option for most single-machine usage.
 
 Use this if:
 
@@ -249,7 +249,7 @@ Use this only if you have already verified:
 
 Fallback mode.
 
-Use this if live capture fails and you still want to demonstrate:
+Use this if live capture fails and you still want to keep working:
 
 - Ask TPMCluely
 - follow-up generation
@@ -257,9 +257,9 @@ Use this if live capture fails and you still want to demonstrate:
 
 ### `Demo transcript`
 
-Fast scripted demo fallback.
+Seeded transcript fallback.
 
-This lets you quickly populate a believable engineering meeting transcript if live capture is unavailable.
+This lets you quickly populate a believable engineering meeting transcript for development, testing, or recovery when live capture is unavailable.
 
 ## Main Screens
 
@@ -308,9 +308,9 @@ Use this to configure:
 - session widget / always-on-top behavior
 - ticket automation toggles
 
-## Exact Demo Flow
+## Typical Meeting Flow
 
-Here is the recommended demo flow for recording:
+Here is a representative TPMCluely workflow:
 
 1. Start TPMCluely.
 2. Start a meeting called something like `Q2 engineering planning` or `Auth rollout review`.
@@ -452,14 +452,14 @@ It is intentionally not focused on out-of-meeting features like:
 
 - Google Calendar pre-briefs
 - pre-call summaries
-- extra non-demo workflow surfaces
+- extra out-of-scope workflow surfaces
 
-## Recommended Pre-Recording Checklist
+## Recommended Readiness Checklist
 
-Before recording your demo:
+Before relying on the app for a live meeting:
 
 1. Confirm all four provider secrets are present.
-2. Run a 3-5 minute rehearsal with the same meeting app.
+2. Run a 3-5 minute dry run with the same meeting app.
 3. Verify:
    - transcript appears live
    - `Ask TPMCluely` returns usable answers
