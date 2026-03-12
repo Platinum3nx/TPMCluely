@@ -968,7 +968,7 @@ pub async fn run_dynamic_action(
     let derived = derive_session_update(&transcripts);
     let fallback_response = assistant_response_for_action(&action, &derived);
     let response = if transcripts.is_empty() {
-        "I do not have enough transcript yet to answer that. Let the meeting run a little longer or load a demo transcript first.".to_string()
+        "I do not have enough transcript yet to answer that. Let the meeting run a little longer or add a manual transcript line first.".to_string()
     } else if let Some(gemini_api_key) = load_gemini_api_key(&state)? {
         let prompt = build_action_prompt(&action, &transcripts, &derived);
         match generate_text(
@@ -1015,7 +1015,7 @@ pub async fn ask_assistant(
         .map_err(|error| error.to_string())?;
     let fallback_response = assistant_response_for_prompt(&input.prompt, &derived);
     let response = if transcripts.is_empty() {
-        "I do not have enough transcript yet to answer that. Let the meeting run a little longer or load a demo transcript first.".to_string()
+        "I do not have enough transcript yet to answer that. Let the meeting run a little longer or add a manual transcript line first.".to_string()
     } else if let Some(gemini_api_key) = load_gemini_api_key(&state)? {
         let prompt = build_question_prompt(&input.prompt, &transcripts, &messages, &derived);
         match generate_text(

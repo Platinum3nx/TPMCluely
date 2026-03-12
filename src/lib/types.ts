@@ -85,7 +85,7 @@ export interface SessionRecord {
   notesMd: string | null;
 }
 
-export type TranscriptSource = "manual" | "demo" | "capture";
+export type TranscriptSource = "manual" | "capture";
 
 export interface TranscriptSegment {
   id: string;
@@ -134,7 +134,7 @@ export type DynamicActionKey = "summary" | "decisions" | "next_steps" | "follow_
 
 export type TicketType = "Bug" | "Feature" | "Task";
 
-export type CaptureMode = "system_audio" | "microphone" | "demo_stream" | "manual";
+export type CaptureMode = "system_audio" | "microphone" | "manual";
 
 export interface GeneratedTicket {
   id: string;

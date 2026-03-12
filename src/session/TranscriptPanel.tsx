@@ -42,9 +42,9 @@ export function TranscriptPanel({
           <div className="empty-block">
             <strong>No transcript yet</strong>
             <p>
-              {captureMode === "microphone"
+              {captureMode === "microphone" || captureMode === "system_audio"
                 ? "Start live transcription to stream Deepgram results here, or add a manual line as a fallback."
-                : "Add a line manually or load the demo transcript to simulate an active meeting."}
+                : "Add a line manually to capture the key parts of the meeting."}
             </p>
           </div>
         ) : (
@@ -62,7 +62,7 @@ export function TranscriptPanel({
           <input value={speaker} onChange={(event) => setSpeaker(event.target.value)} disabled={!sessionId} />
         </label>
         <label className="field">
-          <span>Manual correction / demo line</span>
+          <span>Manual transcript line</span>
           <div className="field-row">
             <input
               value={line}

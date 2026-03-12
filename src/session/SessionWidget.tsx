@@ -24,7 +24,6 @@ interface SessionWidgetProps {
   onStartLiveCapture: () => Promise<void>;
   onStopLiveCapture: () => Promise<void>;
   onToggleOverlay: () => Promise<void>;
-  onSeedTranscript: () => Promise<void>;
 }
 
 export function SessionWidget({
@@ -47,7 +46,6 @@ export function SessionWidget({
   onStartLiveCapture,
   onStopLiveCapture,
   onToggleOverlay,
-  onSeedTranscript,
 }: SessionWidgetProps) {
   return (
     <section className={`panel session-grid ${overlayOpen ? "session-grid-overlay" : ""}`}>
@@ -91,7 +89,6 @@ export function SessionWidget({
             onStartLiveCapture={onStartLiveCapture}
             onStopLiveCapture={onStopLiveCapture}
             onToggleOverlay={onToggleOverlay}
-            onSeedTranscript={onSeedTranscript}
           />
           <DynamicActions disabled={!activeSession} onRunAction={onDynamicAction} />
           <AskBar disabled={!activeSession} onAsk={onAsk} />

@@ -16,7 +16,6 @@ interface SessionControlsProps {
   onStartLiveCapture: () => Promise<void>;
   onStopLiveCapture: () => Promise<void>;
   onToggleOverlay: () => Promise<void>;
-  onSeedTranscript: () => Promise<void>;
 }
 
 export function SessionControls({
@@ -34,7 +33,6 @@ export function SessionControls({
   onStartLiveCapture,
   onStopLiveCapture,
   onToggleOverlay,
-  onSeedTranscript,
 }: SessionControlsProps) {
   const [title, setTitle] = useState("Sprint planning sync");
   const status = activeSession?.session.status ?? "idle";
@@ -78,7 +76,6 @@ export function SessionControls({
           <option value="system_audio">System audio + Deepgram</option>
           <option value="microphone">Microphone + Deepgram</option>
           <option value="manual">Manual only</option>
-          <option value="demo_stream">Demo transcript</option>
         </select>
       </div>
       <div className="toolbar-row">
@@ -109,9 +106,6 @@ export function SessionControls({
             End Session
           </button>
         ) : null}
-        <button type="button" className="secondary-button" onClick={() => void onSeedTranscript()}>
-          Load Demo Transcript
-        </button>
       </div>
       <p className="card-detail">Overlay shortcut: {overlayShortcut}</p>
       {captureError ? (

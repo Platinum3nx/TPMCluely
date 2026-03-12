@@ -152,7 +152,7 @@ export default function App() {
     sessionId: string,
     speakerLabel: string,
     text: string,
-    source: "manual" | "demo" | "capture" = "manual"
+    source: "manual" | "capture" = "manual"
   ) {
     const detail = await appendTranscriptSegment({
       sessionId,
@@ -353,34 +353,7 @@ export default function App() {
     };
   }, [pluginShortcut, syncOverlayWindow]);
 
-  async function handleSeedTranscript(sessionIdOverride?: string) {
-    const sessionId = sessionIdOverride ?? activeSessionRef.current?.session.id;
-    if (!sessionId) {
-      return;
-    }
-
-    const demoLines = [
-      ["PM", "We should ship the new engineering metrics panel behind a staff-only flag first."],
-      ["Backend", "I can own the aggregation endpoint and add caching so the dashboard stays under 400 milliseconds."],
-      ["Frontend", "We also need a polished empty state and a loading skeleton for the analytics cards."],
-      ["QA", "Please give me seeded accounts and acceptance criteria for chart edge cases before Friday."],
-      ["EM", "Let's also fix the flaky auth refresh bug before rollout because support is still seeing timeout complaints."],
-    ] as const;
-
-    for (const [speakerLabel, text] of demoLines) {
-      await appendAndApplyTranscript(sessionId, speakerLabel, text, "demo");
-      await new Promise((resolve) => {
-        window.setTimeout(resolve, 250);
-      });
-    }
-  }
-
   async function startLiveCaptureForSession(sessionDetail: SessionDetail) {
-    if (selectedCaptureMode === "demo_stream") {
-      await handleSeedTranscript(sessionDetail.session.id);
-      return;
-    }
-
     if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
       setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
       return;
@@ -573,7 +546,6 @@ export default function App() {
           onStartLiveCapture={handleStartLiveCapture}
           onStopLiveCapture={handleStopLiveCapture}
           onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
-          onSeedTranscript={() => handleSeedTranscript()}
         />
       </main>
     );
@@ -641,18 +613,17 @@ export default function App() {
               <div className="overview-grid">
                 <article className="card feature-card">
                   <p className="card-title">Execution Focus</p>
-                  <h2>Live meeting demo path</h2>
+                  <h2>Live meeting workflow</h2>
                   <p className="card-detail">
                     Start a meeting, capture transcript signal, answer questions with Ask TPMCluely, and end into
                     automatically generated Linear tickets.
                   </p>
                 </article>
                 <article className="card feature-card accent-card">
-                  <p className="card-title">Demo Critical Path</p>
+                  <p className="card-title">Critical Path</p>
                   <h2>Transcript to answer to ticket workflow</h2>
                   <p className="card-detail">
-                    The shell now focuses on the exact product loop needed for a real engineering-meeting demo instead
-                    of extra pre- and post-meeting surfaces.
+                    The shell focuses on the core product loop instead of extra pre- and post-meeting surfaces.
                   </p>
                 </article>
                 <article className="card feature-card">
@@ -701,7 +672,6 @@ export default function App() {
               onStartLiveCapture={handleStartLiveCapture}
               onStopLiveCapture={handleStopLiveCapture}
               onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
-              onSeedTranscript={() => handleSeedTranscript()}
             />
           ) : null}
 

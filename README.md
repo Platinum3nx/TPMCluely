@@ -45,7 +45,6 @@ The intended workflow is:
    - `System audio + Deepgram`
    - `Microphone + Deepgram`
    - `Manual only`
-   - `Demo transcript`
 4. Open the translucent overlay with the configured shortcut.
 5. Let the meeting proceed.
 6. Click `Ask TPMCluely` when the user needs a transcript-grounded answer to read aloud.
@@ -255,12 +254,6 @@ Use this if live capture fails and you still want to keep working:
 - follow-up generation
 - ticket generation
 
-### `Demo transcript`
-
-Seeded transcript fallback.
-
-This lets you quickly populate a believable engineering meeting transcript for development, testing, or recovery when live capture is unavailable.
-
 ## Main Screens
 
 ### Onboarding
@@ -372,7 +365,6 @@ Fallback:
 
 - switch to `Manual only`
 - add transcript lines manually
-- or use `Load Demo Transcript`
 
 ### `Ask TPMCluely` gives weak answers
 
@@ -467,4 +459,3 @@ Before relying on the app for a live meeting:
    - ending the session generates tickets
    - tickets land in Linear
 4. If system audio is inconsistent, switch to `Microphone + Deepgram`.
-5. Keep `Load Demo Transcript` available as a fallback.
