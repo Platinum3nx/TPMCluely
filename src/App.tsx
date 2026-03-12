@@ -207,7 +207,10 @@ export default function App() {
       return;
     }
 
-    if (!bootstrap.secrets.deepgramConfigured && selectedCaptureMode === "microphone") {
+    if (
+      !bootstrap.secrets.deepgramConfigured &&
+      (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
+    ) {
       setSelectedCaptureMode("manual");
     }
   }, [bootstrap, selectedCaptureMode]);
@@ -378,8 +381,8 @@ export default function App() {
       return;
     }
 
-    if (selectedCaptureMode !== "microphone") {
-      setError("Set capture mode to microphone to start Deepgram live transcription.");
+    if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
+      setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
       return;
     }
 
@@ -393,7 +396,7 @@ export default function App() {
     await startCapture({
       apiKey,
       language: audioLanguage,
-      mode: "microphone",
+      mode: selectedCaptureMode,
       speakerLabel: "Meeting",
     });
   }
@@ -406,7 +409,10 @@ export default function App() {
       if (sessionWidgetEnabled) {
         await syncOverlayWindow(true);
       }
-      if (bootstrap?.secrets.deepgramConfigured && selectedCaptureMode === "microphone") {
+      if (
+        bootstrap?.secrets.deepgramConfigured &&
+        (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
+      ) {
         await startLiveCaptureForSession(detail);
       }
     } catch (unknownError) {
@@ -426,7 +432,11 @@ export default function App() {
   async function handleResumeSession(sessionId: string) {
     const detail = await resumeSession(sessionId);
     applySessionDetail(detail);
-    if (detail && bootstrap?.secrets.deepgramConfigured && selectedCaptureMode === "microphone") {
+    if (
+      detail &&
+      bootstrap?.secrets.deepgramConfigured &&
+      (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
+    ) {
       await startLiveCaptureForSession(detail);
     }
   }

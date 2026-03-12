@@ -75,6 +75,7 @@ export function SessionControls({
       <div className="field">
         <span>Capture mode</span>
         <select value={captureMode} onChange={(event) => onSetCaptureMode(event.target.value as CaptureMode)}>
+          <option value="system_audio">System audio + Deepgram</option>
           <option value="microphone">Microphone + Deepgram</option>
           <option value="manual">Manual only</option>
           <option value="demo_stream">Demo transcript</option>

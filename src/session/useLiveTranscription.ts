@@ -132,15 +132,15 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
   const startCapture = useEffectEvent(async ({ apiKey, language, mode, speakerLabel = "Meeting" }: StartCaptureOptions) => {
     await stopCapture();
 
-    if (mode !== "microphone") {
-      setCaptureError("Live transcription currently supports microphone capture in the desktop app.");
+    if (mode !== "microphone" && mode !== "system_audio") {
+      setCaptureError("Live transcription currently supports microphone or system-audio capture in the desktop app.");
       setCaptureState("error");
       captureStateRef.current = "error";
       return;
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCaptureError("Microphone capture is not available in this runtime.");
+      setCaptureError("Audio capture is not available in this runtime.");
       setCaptureState("unsupported");
       captureStateRef.current = "unsupported";
       return;
@@ -162,14 +162,27 @@ export function useLiveTranscription({ onFinalTranscript }: UseLiveTranscription
       setCaptureState("connecting");
       captureStateRef.current = "connecting";
 
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      const mediaStream =
+        mode === "system_audio"
+          ? await navigator.mediaDevices.getDisplayMedia({
+              audio: true,
+              video: true,
+            })
+          : await navigator.mediaDevices.getUserMedia({
+              audio: {
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+            });
+      if (mediaStream.getAudioTracks().length === 0) {
+        throw new Error(
+          mode === "system_audio"
+            ? "System audio capture did not include an audio track. Share a screen or window with audio enabled."
+            : "The selected microphone stream did not provide any audio tracks."
+        );
+      }
       mediaStreamRef.current = mediaStream;
 
       const audioContext = new AudioContextCtor();
