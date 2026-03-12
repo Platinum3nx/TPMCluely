@@ -87,7 +87,7 @@ async function postLinearGraphql<T>(
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `${apiKey}`,
           },
           body: JSON.stringify({ query, variables }),
           signal: controller.signal,

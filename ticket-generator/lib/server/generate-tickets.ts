@@ -5,7 +5,7 @@ import { withRetry, withTimeout } from "./resilience";
 import { prepareTranscriptForModel } from "./transcript";
 import { extractJsonArrayFromText, normalizeAndValidateTickets } from "./ticket-normalization";
 
-const GENERATION_MODEL = "gemini-2.0-flash";
+const GENERATION_MODEL = "gemini-2.5-flash";
 const GEMINI_TIMEOUT_MS = 25_000;
 
 const SYSTEM_PROMPT = `You are a principal technical program manager.
