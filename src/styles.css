@@ -201,7 +201,8 @@ button {
 .panel-column,
 .card-stack,
 .form-grid,
-.toggle-list {
+.toggle-list,
+.notes-grid {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -217,15 +218,166 @@ button {
 .readiness-row,
 .toggle-card,
 .field-row,
-.diagnostic-grid {
+.diagnostic-grid,
+.section-header,
+.toolbar-row {
   display: flex;
 }
 
 .permission-card,
-.readiness-row {
+.readiness-row,
+.section-header,
+.toolbar-row {
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
+}
+
+.session-grid-body,
+.dashboard-grid-body {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
+  gap: 20px;
+}
+
+.toolbar-row,
+.action-grid {
+  gap: 12px;
+}
+
+.toolbar-row {
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.toolbar-row button,
+.action-card,
+.session-list-item {
+  border: 1px solid var(--border);
+  background: rgba(10, 20, 22, 0.94);
+  color: var(--text);
+}
+
+.toolbar-row button,
+.secondary-button,
+.action-card {
+  border-radius: 16px;
+  padding: 12px 14px;
+}
+
+.secondary-button {
+  background: rgba(15, 31, 35, 0.9);
+}
+
+.transcript-feed,
+.message-feed,
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.transcript-feed,
+.message-feed {
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.transcript-line,
+.message-card,
+.session-list-item,
+.empty-block {
+  border-radius: 18px;
+  border: 1px solid rgba(167, 208, 205, 0.08);
+  background: rgba(7, 15, 18, 0.92);
+  padding: 14px 16px;
+}
+
+.transcript-line span,
+.message-card span,
+.section-meta,
+.session-list-item span,
+.session-list-item p {
+  color: var(--muted);
+}
+
+.transcript-line p,
+.message-card p,
+.empty-block p {
+  margin: 6px 0 0;
+}
+
+.section-meta {
+  font-size: 0.85rem;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.action-card {
+  text-align: left;
+}
+
+.action-card p {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.message-card {
+  border-left: 3px solid rgba(167, 208, 205, 0.18);
+}
+
+.message-assistant {
+  border-left-color: rgba(242, 138, 63, 0.5);
+}
+
+.message-system {
+  border-left-color: rgba(82, 213, 158, 0.5);
+}
+
+.session-list-item {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-list-item-active {
+  border-color: rgba(242, 138, 63, 0.24);
+  background: linear-gradient(135deg, rgba(242, 138, 63, 0.12), rgba(15, 31, 35, 0.94));
+}
+
+.notes-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.notes-grid section {
+  border-radius: 18px;
+  border: 1px solid rgba(167, 208, 205, 0.08);
+  background: rgba(7, 15, 18, 0.92);
+  padding: 14px 16px;
+}
+
+.notes-grid h3 {
+  margin-top: 0;
+}
+
+.notes-grid pre {
+  white-space: pre-wrap;
+  margin: 0;
+  color: var(--muted);
+  font-family: "SF Mono", "IBM Plex Mono", monospace;
 }
 
 .status-chip {
@@ -364,7 +516,12 @@ button {
   .workspace-shell,
   .panel-grid,
   .card-grid,
-  .overview-grid {
+  .overview-grid,
+  .session-grid-body,
+  .dashboard-grid-body,
+  .notes-grid,
+  .action-grid,
+  .field-grid {
     grid-template-columns: 1fr;
   }
 

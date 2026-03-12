@@ -1,14 +1,25 @@
 import type {
+  AppendTranscriptInput,
+  AskSessionInput,
   BootstrapPayload,
+  ChatMessage,
+  DynamicActionKey,
   PermissionSnapshot,
+  SessionDetail,
+  SessionRecord,
   SaveSecretInput,
   SaveSettingInput,
   SecretKey,
   SettingRecord,
+  StartSessionInput,
+  TranscriptSegment,
 } from "./types";
 
 const SETTINGS_KEY = "cluely.desktop.settings";
 const SECRETS_KEY = "cluely.desktop.secrets";
+const SESSIONS_KEY = "cluely.desktop.sessions";
+const TRANSCRIPTS_KEY = "cluely.desktop.transcripts";
+const MESSAGES_KEY = "cluely.desktop.messages";
 
 const defaultSettings: SettingRecord[] = [
   { key: "theme", value: "system" },
@@ -31,6 +42,22 @@ const defaultPermissions: PermissionSnapshot = {
 };
 
 type SecretMap = Partial<Record<SecretKey, string>>;
+
+interface DerivedSessionArtifacts {
+  finalSummary: string;
+  decisionsMd: string;
+  actionItemsMd: string;
+  followUpEmailMd: string;
+  notesMd: string;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function createId(prefix: string): string {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+}
 
 function readSettings(): SettingRecord[] {
   const raw = window.localStorage.getItem(SETTINGS_KEY);
@@ -66,6 +93,151 @@ function readSecrets(): SecretMap {
 
 function writeSecrets(secrets: SecretMap): void {
   window.localStorage.setItem(SECRETS_KEY, JSON.stringify(secrets));
+}
+
+function readSessions(): SessionRecord[] {
+  const raw = window.localStorage.getItem(SESSIONS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as SessionRecord[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSessions(sessions: SessionRecord[]): void {
+  window.localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+}
+
+function readTranscripts(): TranscriptSegment[] {
+  const raw = window.localStorage.getItem(TRANSCRIPTS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as TranscriptSegment[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeTranscripts(segments: TranscriptSegment[]): void {
+  window.localStorage.setItem(TRANSCRIPTS_KEY, JSON.stringify(segments));
+}
+
+function readMessages(): ChatMessage[] {
+  const raw = window.localStorage.getItem(MESSAGES_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as ChatMessage[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeMessages(messages: ChatMessage[]): void {
+  window.localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages));
+}
+
+function getSessionDetail(sessionId: string): SessionDetail | null {
+  const session = readSessions().find((entry) => entry.id === sessionId);
+  if (!session) {
+    return null;
+  }
+
+  return {
+    session,
+    transcripts: readTranscripts()
+      .filter((segment) => segment.sessionId === sessionId)
+      .sort((left, right) => left.sequenceNo - right.sequenceNo),
+    messages: readMessages()
+      .filter((message) => message.sessionId === sessionId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+  };
+}
+
+function updateSessionRecord(next: SessionRecord): SessionRecord[] {
+  const sessions = readSessions();
+  const index = sessions.findIndex((session) => session.id === next.id);
+
+  if (index >= 0) {
+    sessions[index] = next;
+  } else {
+    sessions.unshift(next);
+  }
+
+  writeSessions(sessions);
+  return sessions;
+}
+
+function extractLines(detail: SessionDetail): string[] {
+  return detail.transcripts.map((segment) => segment.text.trim()).filter(Boolean);
+}
+
+function toBulletMd(lines: string[]): string {
+  if (lines.length === 0) {
+    return "- No signal detected yet.";
+  }
+
+  return lines.map((line) => `- ${line}`).join("\n");
+}
+
+function deriveSummary(detail: SessionDetail): DerivedSessionArtifacts {
+  const lines = extractLines(detail);
+  const summaryLines = lines.slice(0, 3);
+  const decisionLines = lines.filter((line) => /(decid|agree|plan|ship|rollout|confirm)/i.test(line));
+  const actionLines = lines.filter((line) => /(will|owner|todo|follow-up|task|fix|handle)/i.test(line));
+
+  const finalSummary =
+    summaryLines.length > 0
+      ? `This session focused on ${summaryLines.join(" ")}`.replace(/\s+/g, " ").trim()
+      : "No transcript signal captured yet.";
+
+  const decisionsMd = toBulletMd(decisionLines.slice(0, 4));
+  const actionItemsMd = toBulletMd(actionLines.slice(0, 5));
+  const notesMd = toBulletMd(lines.slice(0, 6));
+  const followUpEmailMd = [
+    "Team,",
+    "",
+    finalSummary,
+    "",
+    "Decisions",
+    decisionsMd,
+    "",
+    "Next steps",
+    actionItemsMd,
+  ].join("\n");
+
+  return {
+    finalSummary,
+    decisionsMd,
+    actionItemsMd,
+    followUpEmailMd,
+    notesMd,
+  };
+}
+
+function appendAssistantMessage(sessionId: string, role: ChatMessage["role"], content: string): ChatMessage[] {
+  const messages = readMessages();
+  messages.push({
+    id: createId("msg"),
+    sessionId,
+    role,
+    content,
+    createdAt: nowIso(),
+  });
+  writeMessages(messages);
+  return messages;
 }
 
 export async function bootstrapMockApp(): Promise<BootstrapPayload> {
@@ -118,4 +290,164 @@ export async function saveMockSecret(input: SaveSecretInput): Promise<void> {
   const secrets = readSecrets();
   secrets[input.key] = input.value;
   writeSecrets(secrets);
+}
+
+export async function listMockSessions(): Promise<SessionRecord[]> {
+  return readSessions().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export async function getMockSessionDetail(sessionId: string): Promise<SessionDetail | null> {
+  return getSessionDetail(sessionId);
+}
+
+export async function startMockSession(input: StartSessionInput): Promise<SessionDetail> {
+  const now = nowIso();
+  const session: SessionRecord = {
+    id: createId("session"),
+    title: input.title.trim() || "Untitled session",
+    status: "active",
+    startedAt: now,
+    endedAt: null,
+    updatedAt: now,
+    finalSummary: null,
+    decisionsMd: null,
+    actionItemsMd: null,
+    followUpEmailMd: null,
+    notesMd: null,
+  };
+
+  updateSessionRecord(session);
+  appendAssistantMessage(session.id, "system", "Session started. Transcript capture is ready.");
+
+  return getSessionDetail(session.id)!;
+}
+
+export async function pauseMockSession(sessionId: string): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  updateSessionRecord({
+    ...detail.session,
+    status: "paused",
+    updatedAt: nowIso(),
+  });
+
+  return getSessionDetail(sessionId);
+}
+
+export async function resumeMockSession(sessionId: string): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  updateSessionRecord({
+    ...detail.session,
+    status: "active",
+    updatedAt: nowIso(),
+  });
+
+  return getSessionDetail(sessionId);
+}
+
+export async function completeMockSession(sessionId: string): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  const derived = deriveSummary(detail);
+  updateSessionRecord({
+    ...detail.session,
+    status: "completed",
+    endedAt: nowIso(),
+    updatedAt: nowIso(),
+    ...derived,
+  });
+  appendAssistantMessage(sessionId, "assistant", derived.finalSummary);
+
+  return getSessionDetail(sessionId);
+}
+
+export async function appendMockTranscriptSegment(input: AppendTranscriptInput): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(input.sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  const segments = readTranscripts();
+  segments.push({
+    id: createId("seg"),
+    sessionId: input.sessionId,
+    sequenceNo: detail.transcripts.length + 1,
+    speakerLabel: input.speakerLabel?.trim() || null,
+    text: input.text.trim(),
+    isFinal: input.isFinal ?? true,
+    createdAt: nowIso(),
+  });
+  writeTranscripts(segments);
+  updateSessionRecord({
+    ...detail.session,
+    updatedAt: nowIso(),
+  });
+
+  return getSessionDetail(input.sessionId);
+}
+
+export async function runMockDynamicAction(
+  sessionId: string,
+  action: DynamicActionKey
+): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  const derived = deriveSummary(detail);
+  const contentByAction: Record<DynamicActionKey, string> = {
+    summary: derived.finalSummary,
+    decisions: derived.decisionsMd,
+    next_steps: derived.actionItemsMd,
+    follow_up: derived.followUpEmailMd,
+  };
+
+  appendAssistantMessage(sessionId, "assistant", contentByAction[action]);
+  updateSessionRecord({
+    ...detail.session,
+    updatedAt: nowIso(),
+    ...derived,
+  });
+
+  return getSessionDetail(sessionId);
+}
+
+export async function askMockAssistant(input: AskSessionInput): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(input.sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  const derived = deriveSummary(detail);
+  const prompt = input.prompt.toLowerCase();
+
+  let response = derived.finalSummary;
+  if (prompt.includes("decid")) {
+    response = derived.decisionsMd;
+  } else if (prompt.includes("next") || prompt.includes("action")) {
+    response = derived.actionItemsMd;
+  } else if (prompt.includes("follow")) {
+    response = derived.followUpEmailMd;
+  }
+
+  appendAssistantMessage(input.sessionId, "user", input.prompt);
+  appendAssistantMessage(input.sessionId, "assistant", response);
+  updateSessionRecord({
+    ...detail.session,
+    updatedAt: nowIso(),
+    ...derived,
+  });
+
+  return getSessionDetail(input.sessionId);
 }

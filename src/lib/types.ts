@@ -57,3 +57,71 @@ export interface SaveSettingInput {
   key: string;
   value: string;
 }
+
+export type SessionStatus =
+  | "idle"
+  | "preparing"
+  | "active"
+  | "paused"
+  | "finishing"
+  | "completed"
+  | "permission_blocked"
+  | "capture_error"
+  | "provider_degraded"
+  | "finalization_failed";
+
+export interface SessionRecord {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  startedAt: string | null;
+  endedAt: string | null;
+  updatedAt: string;
+  finalSummary: string | null;
+  decisionsMd: string | null;
+  actionItemsMd: string | null;
+  followUpEmailMd: string | null;
+  notesMd: string | null;
+}
+
+export interface TranscriptSegment {
+  id: string;
+  sessionId: string;
+  sequenceNo: number;
+  speakerLabel: string | null;
+  text: string;
+  isFinal: boolean;
+  createdAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  sessionId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  createdAt: string;
+}
+
+export interface SessionDetail {
+  session: SessionRecord;
+  transcripts: TranscriptSegment[];
+  messages: ChatMessage[];
+}
+
+export interface StartSessionInput {
+  title: string;
+}
+
+export interface AppendTranscriptInput {
+  sessionId: string;
+  speakerLabel?: string;
+  text: string;
+  isFinal?: boolean;
+}
+
+export interface AskSessionInput {
+  sessionId: string;
+  prompt: string;
+}
+
+export type DynamicActionKey = "summary" | "decisions" | "next_steps" | "follow_up";

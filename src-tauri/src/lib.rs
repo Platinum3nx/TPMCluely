@@ -15,7 +15,11 @@ pub mod window;
 
 use std::fs;
 
-use app::commands::{bootstrap_app, save_secret, save_setting};
+use app::commands::{
+    append_transcript_segment, ask_assistant, bootstrap_app, complete_session, get_session_detail,
+    list_sessions, pause_session, resume_session, run_dynamic_action, save_secret, save_setting,
+    start_session,
+};
 use app::state::AppState;
 use tauri::Manager;
 
@@ -39,6 +43,15 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap_app,
+            list_sessions,
+            get_session_detail,
+            start_session,
+            pause_session,
+            resume_session,
+            complete_session,
+            append_transcript_segment,
+            run_dynamic_action,
+            ask_assistant,
             save_setting,
             save_secret
         ])

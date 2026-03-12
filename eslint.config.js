@@ -5,7 +5,13 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist", "node_modules", "ticket-generator/.next", "ticket-generator/node_modules"],
+    ignores: [
+      "dist",
+      "node_modules",
+      "src-tauri/target",
+      "ticket-generator/.next",
+      "ticket-generator/node_modules",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
