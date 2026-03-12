@@ -63,6 +63,16 @@ function isSessionLive(status: SessionRecord["status"]): boolean {
   return ["active", "paused", "preparing", "finishing"].includes(status);
 }
 
+function createOverlaySessionTitle(): string {
+  const stamp = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date());
+  return `Live meeting - ${stamp}`;
+}
+
 export default function App() {
   const [view, setView] = useState<ViewKey>("overview");
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
@@ -215,15 +225,8 @@ export default function App() {
     }
   }, [bootstrap, selectedCaptureMode]);
 
-  const syncOverlayWindow = useEffectEvent(async (nextOpen: boolean) => {
-    if (nextOpen && !activeSessionRef.current) {
-      return;
-    }
-
-    setOverlayOpen(nextOpen);
-    setView("session");
-
-    if (!("__TAURI_INTERNALS__" in window)) {
+  const updateOverlayWindowLayout = useEffectEvent(async () => {
+    if (!("__TAURI_INTERNALS__" in window) || !overlayOpenRef.current) {
       return;
     }
 
@@ -234,12 +237,38 @@ export default function App() {
       ]);
 
       const appWindow = getCurrentWindow();
+      const monitor = await currentMonitor();
+      const width = activeSessionRef.current ? 468 : 430;
+      const height = activeSessionRef.current ? 780 : 440;
+
+      await appWindow.setSize(new LogicalSize(width, height));
+      if (monitor) {
+        const x = monitor.workArea.position.x + monitor.workArea.size.width - width - 28;
+        const y = monitor.workArea.position.y + 28;
+        await appWindow.setPosition(new LogicalPosition(x, y));
+      }
+    } catch {
+      return;
+    }
+  });
+
+  const syncOverlayWindow = useEffectEvent(async (nextOpen: boolean) => {
+    setOverlayOpen(nextOpen);
+    setView("session");
+
+    if (!("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+
+    try {
+      const [{ LogicalPosition, LogicalSize }, { getCurrentWindow }] = await Promise.all([
+        import("@tauri-apps/api/dpi"),
+        import("@tauri-apps/api/window"),
+      ]);
+
+      const appWindow = getCurrentWindow();
       if (nextOpen) {
-        const [outerSize, outerPosition, monitor] = await Promise.all([
-          appWindow.outerSize(),
-          appWindow.outerPosition(),
-          currentMonitor(),
-        ]);
+        const [outerSize, outerPosition] = await Promise.all([appWindow.outerSize(), appWindow.outerPosition()]);
 
         previousWindowFrameRef.current = {
           width: outerSize.width,
@@ -253,14 +282,8 @@ export default function App() {
         await appWindow.setVisibleOnAllWorkspaces(true).catch(() => undefined);
         await appWindow.setTitleBarStyle("overlay").catch(() => undefined);
         await appWindow.setShadow(true).catch(() => undefined);
-        await appWindow.setSize(new LogicalSize(540, 820));
-
-        if (monitor) {
-          const x = monitor.workArea.position.x + monitor.workArea.size.width - 572;
-          const y = monitor.workArea.position.y + 28;
-          await appWindow.setPosition(new LogicalPosition(x, y));
-        }
-
+        overlayOpenRef.current = true;
+        await updateOverlayWindowLayout();
         await appWindow.show();
         await appWindow.setFocus().catch(() => undefined);
         return;
@@ -286,10 +309,6 @@ export default function App() {
   });
 
   const handleOverlayShortcut = useEffectEvent((event: KeyboardEvent) => {
-    if (!activeSessionRef.current) {
-      return;
-    }
-
     if (!matchesShortcut(event, overlayShortcut)) {
       return;
     }
@@ -327,7 +346,7 @@ export default function App() {
           await unregister(pluginShortcut);
         }
         await register(pluginShortcut, (event) => {
-          if (event.state !== "Pressed" || !activeSessionRef.current) {
+          if (event.state !== "Pressed") {
             return;
           }
           void syncOverlayWindow(!overlayOpenRef.current);
@@ -353,6 +372,14 @@ export default function App() {
     };
   }, [pluginShortcut, syncOverlayWindow]);
 
+  useEffect(() => {
+    if (!overlayOpen) {
+      return;
+    }
+
+    void updateOverlayWindowLayout();
+  }, [activeSessionDetail, overlayOpen, updateOverlayWindowLayout]);
+
   async function startLiveCaptureForSession(sessionDetail: SessionDetail) {
     if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
       setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
@@ -374,11 +401,16 @@ export default function App() {
     });
   }
 
+  async function createSessionRecord(title: string) {
+    const detail = await startSession({ title });
+    applySessionDetail(detail);
+    setView("session");
+    return detail;
+  }
+
   async function handleStartSession(title: string) {
     try {
-      const detail = await startSession({ title });
-      applySessionDetail(detail);
-      setView("session");
+      const detail = await createSessionRecord(title);
       if (sessionWidgetEnabled) {
         await syncOverlayWindow(true);
       }
@@ -390,6 +422,26 @@ export default function App() {
       }
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to start session.";
+      setError(message);
+    }
+  }
+
+  async function handleStartListening() {
+    try {
+      setError(null);
+      const detail = activeSessionRef.current ?? (await createSessionRecord(createOverlaySessionTitle()));
+
+      if (!overlayOpenRef.current) {
+        await syncOverlayWindow(true);
+      }
+
+      if (selectedCaptureMode === "manual") {
+        return;
+      }
+
+      await startLiveCaptureForSession(detail);
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Failed to start listening.";
       setError(message);
     }
   }
@@ -483,14 +535,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
-  useEffect(() => {
-    if (activeSessionDetail || !overlayOpen) {
-      return;
-    }
-
-    void syncOverlayWindow(false);
-  }, [activeSessionDetail, overlayOpen, syncOverlayWindow]);
-
   if (loading) {
     return (
       <main className="app-shell">
@@ -531,7 +575,10 @@ export default function App() {
           captureError={captureError ?? error}
           captureMode={selectedCaptureMode}
           captureState={captureState}
+          deepgramReady={bootstrap.secrets.deepgramConfigured}
+          geminiReady={bootstrap.secrets.geminiConfigured}
           isCapturing={isCapturing}
+          linearReady={bootstrap.secrets.linearConfigured}
           overlayOpen={overlayOpen}
           overlayShortcut={overlayShortcut}
           partialTranscript={partialTranscript}
@@ -544,6 +591,7 @@ export default function App() {
           onAsk={handleAsk}
           onSetCaptureMode={setSelectedCaptureMode}
           onStartLiveCapture={handleStartLiveCapture}
+          onStartListening={handleStartListening}
           onStopLiveCapture={handleStopLiveCapture}
           onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
         />
@@ -657,7 +705,10 @@ export default function App() {
               captureError={captureError ?? error}
               captureMode={selectedCaptureMode}
               captureState={captureState}
+              deepgramReady={bootstrap.secrets.deepgramConfigured}
+              geminiReady={bootstrap.secrets.geminiConfigured}
               isCapturing={isCapturing}
+              linearReady={bootstrap.secrets.linearConfigured}
               overlayOpen={overlayOpen}
               overlayShortcut={overlayShortcut}
               partialTranscript={partialTranscript}
@@ -670,6 +721,7 @@ export default function App() {
               onAsk={handleAsk}
               onSetCaptureMode={setSelectedCaptureMode}
               onStartLiveCapture={handleStartLiveCapture}
+              onStartListening={handleStartListening}
               onStopLiveCapture={handleStopLiveCapture}
               onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
             />

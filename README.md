@@ -40,18 +40,19 @@ For the main product workflow, use the desktop app at the repo root.
 The intended workflow is:
 
 1. Start TPMCluely.
-2. Start a meeting session.
-3. Choose a transcript source:
+2. Join a meeting on your machine.
+3. Press the overlay shortcut to open TPMCluely.
+4. Choose a transcript source:
    - `System audio + Deepgram`
    - `Microphone + Deepgram`
    - `Manual only`
-4. Open the translucent overlay with the configured shortcut.
-5. Let the meeting proceed.
-6. Click `Ask TPMCluely` when the user needs a transcript-grounded answer to read aloud.
-7. Click `Follow-up questions` when you want Gemini to suggest deeper questions based on unresolved discussion.
-8. End the session.
-9. Review generated notes and tickets in the dashboard.
-10. If Linear is configured, tickets are automatically pushed to Linear once per idempotency key.
+5. Click `Start Listening` in the overlay.
+6. Let the meeting proceed.
+7. Click `Ask TPMCluely` when the user needs a transcript-grounded answer to read aloud.
+8. Click `Follow-up questions` when you want Gemini to suggest deeper questions based on unresolved discussion.
+9. End the session.
+10. Review generated notes and tickets in the dashboard.
+11. If Linear is configured, tickets are automatically pushed to Linear once per idempotency key.
 
 ## How It Works
 
@@ -76,11 +77,11 @@ The intended workflow is:
 
 ### Session Lifecycle
 
-When you start a session:
+When you open the overlay and click `Start Listening`:
 
 - a session record is created
 - the live meeting UI becomes active
-- the overlay can open automatically or manually
+- the overlay becomes the primary live control surface
 - transcript segments are appended as they arrive
 - rolling summary and derived notes are updated as transcript signal grows
 
@@ -214,10 +215,10 @@ npm run tauri:dev
 2. Go to `Onboarding` and confirm all providers are `Ready`.
 3. Go to `Settings` and confirm ticket automation toggles are enabled.
 4. Go to `Session`.
-5. Start a meeting session with the title you want to show on screen.
+5. Join the meeting you want TPMCluely to assist with.
 6. Choose `Microphone + Deepgram` unless you have already verified `System audio + Deepgram` on your exact machine and meeting app.
-7. Click `Start Live Transcript`.
-8. Open the overlay.
+7. Press the overlay shortcut.
+8. Click `Start Listening`.
 9. Run the meeting.
 10. Use `Ask TPMCluely` and `Follow-up questions` during the discussion.
 11. End the session.
@@ -306,8 +307,8 @@ Use this to configure:
 Here is a representative TPMCluely workflow:
 
 1. Start TPMCluely.
-2. Start a meeting called something like `Q2 engineering planning` or `Auth rollout review`.
-3. Start live transcript capture.
+2. Join a meeting called something like `Q2 engineering planning` or `Auth rollout review`.
+3. Press the overlay shortcut and click `Start Listening`.
 4. Let the team discuss a couple of features.
 5. When someone asks the user a question, click `Ask TPMCluely`.
 6. Ask something like:
@@ -359,7 +360,7 @@ Check:
 - Deepgram key is stored in the desktop app
 - microphone or system audio permissions are granted
 - you selected the right capture mode
-- you clicked `Start Live Transcript`
+- you clicked `Start Listening`
 
 Fallback:
 

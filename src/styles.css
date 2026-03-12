@@ -47,7 +47,7 @@ button {
 }
 
 .app-shell-overlay {
-  padding: 12px;
+  padding: 0;
   background: transparent;
 }
 
@@ -549,53 +549,244 @@ button {
   box-shadow: var(--shadow);
 }
 
-.overlay-banner {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
-  margin-bottom: 18px;
-  padding: 18px 20px;
-  border-radius: 20px;
-  border: 1px solid rgba(242, 138, 63, 0.18);
-  background: linear-gradient(135deg, rgba(15, 28, 32, 0.94), rgba(34, 21, 14, 0.78));
+.cluely-overlay-shell {
+  min-height: 100vh;
+  padding: 12px;
 }
 
-.overlay-banner h2 {
-  margin: 8px 0 0;
-  font-size: 1.5rem;
-  line-height: 1.05;
-}
-
-.overlay-meta {
+.cluely-overlay-frame {
+  min-height: calc(100vh - 24px);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top right, rgba(242, 138, 63, 0.16), transparent 28%),
+    linear-gradient(165deg, rgba(6, 12, 14, 0.92), rgba(11, 18, 21, 0.82));
+  box-shadow: 0 34px 80px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(28px);
+}
+
+.cluely-overlay-header,
+.cluely-brand-lockup,
+.cluely-overlay-header-actions,
+.overlay-launch-actions,
+.cluely-live-meta {
+  display: flex;
+  align-items: center;
+}
+
+.cluely-overlay-header {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.cluely-brand-lockup {
+  gap: 12px;
+}
+
+.cluely-brand-lockup h2 {
+  margin: 6px 0 0;
+  font-size: 1.2rem;
+  line-height: 1.08;
+}
+
+.cluely-brand-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(242, 138, 63, 0.72);
+  box-shadow: 0 0 0 8px rgba(242, 138, 63, 0.08);
+}
+
+.cluely-brand-dot-live {
+  background: var(--success);
+  box-shadow:
+    0 0 0 8px rgba(82, 213, 158, 0.1),
+    0 0 18px rgba(82, 213, 158, 0.45);
+}
+
+.cluely-overlay-header-actions,
+.overlay-launch-actions,
+.cluely-live-meta {
+  gap: 10px;
+}
+
+.overlay-pill,
+.overlay-shortcut-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(167, 208, 205, 0.14);
+  background: rgba(18, 30, 33, 0.85);
   color: var(--muted);
-  text-align: right;
-  font-size: 0.86rem;
+  padding: 8px 12px;
+  font-size: 0.77rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
 }
 
-.session-grid-overlay {
-  min-height: auto;
-  padding: 18px;
+.overlay-pill-live {
+  border-color: rgba(82, 213, 158, 0.26);
+  background: rgba(17, 43, 34, 0.9);
+  color: var(--success);
 }
 
-.session-grid-overlay .session-grid-body {
+.overlay-ghost-button {
+  border: 1px solid rgba(167, 208, 205, 0.14);
+  background: rgba(15, 28, 31, 0.76);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.cluely-launch-surface,
+.cluely-live-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.cluely-launch-surface {
+  flex: 1;
+  justify-content: center;
+}
+
+.cluely-launch-copy {
+  padding: 8px 4px 0;
+}
+
+.cluely-launch-copy h3 {
+  margin: 10px 0 0;
+  font-size: 1.6rem;
+  line-height: 1.02;
+  max-width: 12ch;
+}
+
+.overlay-mode-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.overlay-mode-picker-compact {
+  margin-top: 14px;
+}
+
+.overlay-mode-button {
+  border: 1px solid rgba(167, 208, 205, 0.12);
+  border-radius: 18px;
+  background: rgba(12, 22, 25, 0.94);
+  color: var(--text);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.overlay-mode-button-active {
+  border-color: rgba(242, 138, 63, 0.34);
+  background: linear-gradient(145deg, rgba(242, 138, 63, 0.12), rgba(13, 25, 29, 0.96));
+}
+
+.overlay-mode-button span {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.overlay-mode-picker-compact .overlay-mode-button {
+  padding: 12px;
+}
+
+.overlay-mode-picker-compact .overlay-mode-button span {
+  display: none;
+}
+
+.overlay-capability-grid,
+.overlay-feed-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.overlay-capability-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.overlay-capability {
+  border-radius: 18px;
+  border: 1px solid rgba(167, 208, 205, 0.08);
+  background: rgba(7, 15, 18, 0.78);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.overlay-capability strong {
+  font-size: 0.95rem;
+}
+
+.overlay-capability span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.overlay-capability-ready {
+  border-color: rgba(82, 213, 158, 0.22);
+}
+
+.overlay-capability-missing {
+  border-color: rgba(255, 109, 102, 0.2);
+}
+
+.overlay-launch-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.overlay-primary-button {
+  border: 0;
+  border-radius: 18px;
+  padding: 14px 20px;
+  background: linear-gradient(135deg, #f3ad58, #f07836);
+  color: #140f0d;
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  box-shadow: 0 18px 34px rgba(240, 120, 54, 0.24);
+}
+
+.cluely-live-hero {
+  background: linear-gradient(145deg, rgba(12, 23, 26, 0.96), rgba(27, 17, 12, 0.88));
+}
+
+.cluely-live-meta {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.cluely-live-toolbar {
+  margin-top: 14px;
+}
+
+.overlay-feed-grid {
   grid-template-columns: 1fr;
 }
 
-.session-grid-overlay .action-grid {
-  grid-template-columns: 1fr;
+.overlay-feed-grid .card {
+  padding: 16px;
 }
 
-.session-grid-overlay .transcript-feed,
-.session-grid-overlay .message-feed {
-  max-height: 220px;
-}
-
-.session-grid-overlay .card {
-  padding: 18px;
+.overlay-feed-grid .transcript-feed,
+.overlay-feed-grid .message-feed {
+  max-height: 180px;
 }
 
 .inline-link {
@@ -633,6 +824,16 @@ button {
 @media (max-width: 720px) {
   .app-shell {
     padding: 18px;
+  }
+
+  .overlay-mode-picker,
+  .overlay-capability-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .overlay-launch-actions {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .side-nav,

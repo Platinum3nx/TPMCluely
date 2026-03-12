@@ -81,11 +81,11 @@ export function SessionControls({
       <div className="toolbar-row">
         {captureState === "listening" || captureState === "connecting" || captureState === "stopping" ? (
           <button type="button" onClick={() => void onStopLiveCapture()}>
-            Stop Live Transcript
+            Stop Listening
           </button>
         ) : (
           <button type="button" onClick={() => void onStartLiveCapture()}>
-            Start Live Transcript
+            Start Listening
           </button>
         )}
         <button type="button" className="secondary-button" onClick={() => void onToggleOverlay()}>

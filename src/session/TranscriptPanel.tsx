@@ -7,6 +7,7 @@ interface TranscriptPanelProps {
   overlayOpen: boolean;
   partialTranscript: string;
   sessionId: string | null;
+  showManualComposer?: boolean;
   transcripts: TranscriptSegment[];
   onAppendTranscript: (speakerLabel: string, text: string) => Promise<void>;
 }
@@ -17,6 +18,7 @@ export function TranscriptPanel({
   overlayOpen,
   partialTranscript,
   sessionId,
+  showManualComposer = true,
   transcripts,
   onAppendTranscript,
 }: TranscriptPanelProps) {
@@ -44,7 +46,9 @@ export function TranscriptPanel({
             <p>
               {captureMode === "microphone" || captureMode === "system_audio"
                 ? "Start live transcription to stream Deepgram results here, or add a manual line as a fallback."
-                : "Add a line manually to capture the key parts of the meeting."}
+                : showManualComposer
+                  ? "Add a line manually to capture the key parts of the meeting."
+                  : "Open the full session view if you need to add manual transcript lines."}
             </p>
           </div>
         ) : (
@@ -56,33 +60,35 @@ export function TranscriptPanel({
           ))
         )}
       </div>
-      <div className={`field-grid ${overlayOpen ? "field-grid-overlay" : ""}`}>
-        <label className="field">
-          <span>Speaker</span>
-          <input value={speaker} onChange={(event) => setSpeaker(event.target.value)} disabled={!sessionId} />
-        </label>
-        <label className="field">
-          <span>Manual transcript line</span>
-          <div className="field-row">
-            <input
-              value={line}
-              onChange={(event) => setLine(event.target.value)}
-              placeholder="Engineer: I can own the auth timeout fix."
-              disabled={!sessionId}
-            />
-            <button
-              type="button"
-              disabled={!sessionId || line.trim().length === 0}
-              onClick={async () => {
-                await onAppendTranscript(speaker, line);
-                setLine("");
-              }}
-            >
-              Add
-            </button>
-          </div>
-        </label>
-      </div>
+      {showManualComposer ? (
+        <div className={`field-grid ${overlayOpen ? "field-grid-overlay" : ""}`}>
+          <label className="field">
+            <span>Speaker</span>
+            <input value={speaker} onChange={(event) => setSpeaker(event.target.value)} disabled={!sessionId} />
+          </label>
+          <label className="field">
+            <span>Manual transcript line</span>
+            <div className="field-row">
+              <input
+                value={line}
+                onChange={(event) => setLine(event.target.value)}
+                placeholder="Engineer: I can own the auth timeout fix."
+                disabled={!sessionId}
+              />
+              <button
+                type="button"
+                disabled={!sessionId || line.trim().length === 0}
+                onClick={async () => {
+                  await onAppendTranscript(speaker, line);
+                  setLine("");
+                }}
+              >
+                Add
+              </button>
+            </div>
+          </label>
+        </div>
+      ) : null}
     </article>
   );
 }
