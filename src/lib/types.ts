@@ -77,12 +77,15 @@ export interface SessionRecord {
   startedAt: string | null;
   endedAt: string | null;
   updatedAt: string;
+  rollingSummary: string | null;
   finalSummary: string | null;
   decisionsMd: string | null;
   actionItemsMd: string | null;
   followUpEmailMd: string | null;
   notesMd: string | null;
 }
+
+export type TranscriptSource = "manual" | "demo" | "capture";
 
 export interface TranscriptSegment {
   id: string;
@@ -91,6 +94,7 @@ export interface TranscriptSegment {
   speakerLabel: string | null;
   text: string;
   isFinal: boolean;
+  source: TranscriptSource;
   createdAt: string;
 }
 
@@ -106,6 +110,7 @@ export interface SessionDetail {
   session: SessionRecord;
   transcripts: TranscriptSegment[];
   messages: ChatMessage[];
+  generatedTickets: GeneratedTicket[];
 }
 
 export interface StartSessionInput {
@@ -117,6 +122,7 @@ export interface AppendTranscriptInput {
   speakerLabel?: string;
   text: string;
   isFinal?: boolean;
+  source?: TranscriptSource;
 }
 
 export interface AskSessionInput {
@@ -128,11 +134,43 @@ export type DynamicActionKey = "summary" | "decisions" | "next_steps" | "follow_
 
 export type TicketType = "Bug" | "Feature" | "Task";
 
+export type CaptureMode = "system_audio" | "microphone" | "demo_stream" | "manual";
+
 export interface GeneratedTicket {
+  id: string;
+  sessionId: string;
   idempotencyKey: string;
   title: string;
   description: string;
   acceptanceCriteria: string[];
   type: TicketType;
-  sourceLine: string;
+  sourceLine: string | null;
+  linearIssueId: string | null;
+  linearIssueKey: string | null;
+  linearIssueUrl: string | null;
+  pushedAt: string | null;
+  createdAt: string;
+}
+
+export interface GeneratedTicketDraft {
+  idempotencyKey: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+  type: TicketType;
+  sourceLine?: string | null;
+}
+
+export interface SaveGeneratedTicketsInput {
+  sessionId: string;
+  tickets: GeneratedTicketDraft[];
+}
+
+export interface MarkGeneratedTicketPushedInput {
+  sessionId: string;
+  idempotencyKey: string;
+  linearIssueId: string;
+  linearIssueKey: string;
+  linearIssueUrl: string;
+  pushedAt?: string;
 }

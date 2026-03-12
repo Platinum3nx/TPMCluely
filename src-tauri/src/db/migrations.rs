@@ -2,6 +2,34 @@ use rusqlite::Connection;
 
 use super::DatabaseError;
 
+fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool, DatabaseError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn add_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), DatabaseError> {
+    if !column_exists(connection, table, column)? {
+        connection.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+        ))?;
+    }
+
+    Ok(())
+}
+
 pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
     connection.execute_batch(
         "
@@ -46,6 +74,7 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           speaker_confidence    REAL,
           start_ms              INTEGER,
           end_ms                INTEGER,
+          source                TEXT NOT NULL DEFAULT 'manual',
           text                  TEXT NOT NULL,
           is_final              INTEGER NOT NULL DEFAULT 0,
           created_at            TEXT NOT NULL DEFAULT (datetime('now'))
@@ -104,6 +133,7 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           acceptance_criteria   TEXT NOT NULL,
           type                  TEXT NOT NULL CHECK (type IN ('Bug', 'Feature', 'Task')),
           idempotency_key       TEXT NOT NULL,
+          source_line           TEXT,
           linear_issue_id       TEXT,
           linear_issue_key      TEXT,
           linear_issue_url      TEXT,
@@ -141,9 +171,20 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           ('live_summary_enabled', 'true'),
           ('screenshot_mode', 'selection'),
           ('screenshot_processing', 'manual'),
-          ('ticket_generation_enabled', 'true');
+          ('ticket_generation_enabled', 'true'),
+          ('auto_generate_tickets', 'true'),
+          ('auto_push_linear', 'true'),
+          ('overlay_shortcut', 'CmdOrCtrl+Shift+K');
         ",
     )?;
+
+    add_column_if_missing(
+        connection,
+        "transcript_segments",
+        "source",
+        "TEXT NOT NULL DEFAULT 'manual'",
+    )?;
+    add_column_if_missing(connection, "generated_tickets", "source_line", "TEXT")?;
 
     Ok(())
 }

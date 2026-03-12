@@ -55,12 +55,19 @@ export function generateTicketsFromSession(detail: SessionDetail): GeneratedTick
       ];
 
       return {
+        id: simpleHash(`id:${type}:${title.toLowerCase()}`),
+        sessionId: detail.session.id,
         idempotencyKey: simpleHash(`${type}:${title.toLowerCase()}`),
         title,
         description: `${summary}\n\nTranscript source: ${line}`,
         acceptanceCriteria,
         type,
         sourceLine: line,
+        linearIssueId: null,
+        linearIssueKey: null,
+        linearIssueUrl: null,
+        pushedAt: null,
+        createdAt: detail.session.updatedAt,
       } satisfies GeneratedTicket;
     })
     .filter((ticket) => {

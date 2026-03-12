@@ -4,9 +4,13 @@ import type {
   BootstrapPayload,
   ChatMessage,
   DynamicActionKey,
+  GeneratedTicket,
+  GeneratedTicketDraft,
+  MarkGeneratedTicketPushedInput,
   PermissionSnapshot,
   SessionDetail,
   SessionRecord,
+  SaveGeneratedTicketsInput,
   SaveSecretInput,
   SaveSettingInput,
   SecretKey,
@@ -20,6 +24,7 @@ const SECRETS_KEY = "cluely.desktop.secrets";
 const SESSIONS_KEY = "cluely.desktop.sessions";
 const TRANSCRIPTS_KEY = "cluely.desktop.transcripts";
 const MESSAGES_KEY = "cluely.desktop.messages";
+const GENERATED_TICKETS_KEY = "cluely.desktop.generated-tickets";
 
 const defaultSettings: SettingRecord[] = [
   { key: "theme", value: "system" },
@@ -33,6 +38,9 @@ const defaultSettings: SettingRecord[] = [
   { key: "screenshot_mode", value: "selection" },
   { key: "screenshot_processing", value: "manual" },
   { key: "ticket_generation_enabled", value: "true" },
+  { key: "auto_generate_tickets", value: "true" },
+  { key: "auto_push_linear", value: "true" },
+  { key: "overlay_shortcut", value: "CmdOrCtrl+Shift+K" },
 ];
 
 const defaultPermissions: PermissionSnapshot = {
@@ -44,6 +52,7 @@ const defaultPermissions: PermissionSnapshot = {
 type SecretMap = Partial<Record<SecretKey, string>>;
 
 interface DerivedSessionArtifacts {
+  rollingSummary: string;
   finalSummary: string;
   decisionsMd: string;
   actionItemsMd: string;
@@ -149,6 +158,24 @@ function writeMessages(messages: ChatMessage[]): void {
   window.localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages));
 }
 
+function readGeneratedTickets(): GeneratedTicket[] {
+  const raw = window.localStorage.getItem(GENERATED_TICKETS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as GeneratedTicket[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeGeneratedTickets(tickets: GeneratedTicket[]): void {
+  window.localStorage.setItem(GENERATED_TICKETS_KEY, JSON.stringify(tickets));
+}
+
 function getSessionDetail(sessionId: string): SessionDetail | null {
   const session = readSessions().find((entry) => entry.id === sessionId);
   if (!session) {
@@ -162,6 +189,9 @@ function getSessionDetail(sessionId: string): SessionDetail | null {
       .sort((left, right) => left.sequenceNo - right.sequenceNo),
     messages: readMessages()
       .filter((message) => message.sessionId === sessionId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    generatedTickets: readGeneratedTickets()
+      .filter((ticket) => ticket.sessionId === sessionId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
   };
 }
@@ -194,14 +224,15 @@ function toBulletMd(lines: string[]): string {
 
 function deriveSummary(detail: SessionDetail): DerivedSessionArtifacts {
   const lines = extractLines(detail);
-  const summaryLines = lines.slice(0, 3);
+  const summaryLines = lines.slice(0, 4);
   const decisionLines = lines.filter((line) => /(decid|agree|plan|ship|rollout|confirm)/i.test(line));
   const actionLines = lines.filter((line) => /(will|owner|todo|follow-up|task|fix|handle)/i.test(line));
 
-  const finalSummary =
+  const rollingSummary =
     summaryLines.length > 0
       ? `This session focused on ${summaryLines.join(" ")}`.replace(/\s+/g, " ").trim()
       : "No transcript signal captured yet.";
+  const finalSummary = rollingSummary;
 
   const decisionsMd = toBulletMd(decisionLines.slice(0, 4));
   const actionItemsMd = toBulletMd(actionLines.slice(0, 5));
@@ -219,6 +250,7 @@ function deriveSummary(detail: SessionDetail): DerivedSessionArtifacts {
   ].join("\n");
 
   return {
+    rollingSummary,
     finalSummary,
     decisionsMd,
     actionItemsMd,
@@ -292,6 +324,10 @@ export async function saveMockSecret(input: SaveSecretInput): Promise<void> {
   writeSecrets(secrets);
 }
 
+export async function getMockSecretValue(key: SecretKey): Promise<string | null> {
+  return readSecrets()[key] ?? null;
+}
+
 export async function listMockSessions(): Promise<SessionRecord[]> {
   return readSessions().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
@@ -309,6 +345,7 @@ export async function startMockSession(input: StartSessionInput): Promise<Sessio
     startedAt: now,
     endedAt: null,
     updatedAt: now,
+    rollingSummary: null,
     finalSummary: null,
     decisionsMd: null,
     actionItemsMd: null,
@@ -385,6 +422,7 @@ export async function appendMockTranscriptSegment(input: AppendTranscriptInput):
     speakerLabel: input.speakerLabel?.trim() || null,
     text: input.text.trim(),
     isFinal: input.isFinal ?? true,
+    source: input.source ?? "manual",
     createdAt: nowIso(),
   });
   writeTranscripts(segments);
@@ -393,6 +431,64 @@ export async function appendMockTranscriptSegment(input: AppendTranscriptInput):
     updatedAt: nowIso(),
   });
 
+  return getSessionDetail(input.sessionId);
+}
+
+export async function replaceMockGeneratedTickets(input: SaveGeneratedTicketsInput): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(input.sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  const now = nowIso();
+  const nextTickets: GeneratedTicket[] = input.tickets.map((ticket) => {
+    const existing = detail.generatedTickets.find((entry) => entry.idempotencyKey === ticket.idempotencyKey);
+    return {
+      id: existing?.id ?? createId("ticket"),
+      sessionId: input.sessionId,
+      idempotencyKey: ticket.idempotencyKey,
+      title: ticket.title,
+      description: ticket.description,
+      acceptanceCriteria: ticket.acceptanceCriteria,
+      type: ticket.type,
+      sourceLine: ticket.sourceLine ?? null,
+      linearIssueId: existing?.linearIssueId ?? null,
+      linearIssueKey: existing?.linearIssueKey ?? null,
+      linearIssueUrl: existing?.linearIssueUrl ?? null,
+      pushedAt: existing?.pushedAt ?? null,
+      createdAt: existing?.createdAt ?? now,
+    };
+  });
+
+  writeGeneratedTickets([
+    ...readGeneratedTickets().filter((ticket) => ticket.sessionId !== input.sessionId),
+    ...nextTickets,
+  ]);
+
+  return getSessionDetail(input.sessionId);
+}
+
+export async function markMockGeneratedTicketPushed(
+  input: MarkGeneratedTicketPushedInput
+): Promise<SessionDetail | null> {
+  const tickets = readGeneratedTickets();
+  const index = tickets.findIndex(
+    (ticket) => ticket.sessionId === input.sessionId && ticket.idempotencyKey === input.idempotencyKey
+  );
+
+  if (index < 0) {
+    return getSessionDetail(input.sessionId);
+  }
+
+  tickets[index] = {
+    ...tickets[index],
+    linearIssueId: input.linearIssueId,
+    linearIssueKey: input.linearIssueKey,
+    linearIssueUrl: input.linearIssueUrl,
+    pushedAt: input.pushedAt ?? nowIso(),
+  };
+
+  writeGeneratedTickets(tickets);
   return getSessionDetail(input.sessionId);
 }
 

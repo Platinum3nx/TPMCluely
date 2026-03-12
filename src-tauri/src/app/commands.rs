@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app::state::AppState;
-use crate::db::{MessageRow, SessionDerivedUpdate, SessionRow, TranscriptRow};
+use crate::db::{
+    GeneratedTicketInputRow, GeneratedTicketRow, MessageRow, SessionDerivedUpdate, SessionRow,
+    TranscriptRow,
+};
 use crate::permissions::PermissionSnapshot;
 use crate::providers::ProviderSnapshot;
 use crate::secrets::SecretPresence;
@@ -55,6 +58,7 @@ pub struct SessionRecordPayload {
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub updated_at: String,
+    pub rolling_summary: Option<String>,
     pub final_summary: Option<String>,
     pub decisions_md: Option<String>,
     pub action_items_md: Option<String>,
@@ -71,6 +75,7 @@ pub struct TranscriptSegmentPayload {
     pub speaker_label: Option<String>,
     pub text: String,
     pub is_final: bool,
+    pub source: String,
     pub created_at: String,
 }
 
@@ -86,10 +91,30 @@ pub struct ChatMessagePayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GeneratedTicketPayload {
+    pub id: String,
+    pub session_id: String,
+    pub title: String,
+    pub description: String,
+    pub acceptance_criteria: Vec<String>,
+    #[serde(rename = "type")]
+    pub ticket_type: String,
+    pub idempotency_key: String,
+    pub source_line: Option<String>,
+    pub linear_issue_id: Option<String>,
+    pub linear_issue_key: Option<String>,
+    pub linear_issue_url: Option<String>,
+    pub pushed_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionDetailPayload {
     pub session: SessionRecordPayload,
     pub transcripts: Vec<TranscriptSegmentPayload>,
     pub messages: Vec<ChatMessagePayload>,
+    pub generated_tickets: Vec<GeneratedTicketPayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +142,7 @@ pub struct AppendTranscriptInput {
     pub speaker_label: Option<String>,
     pub text: String,
     pub is_final: Option<bool>,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +150,36 @@ pub struct AppendTranscriptInput {
 pub struct AskSessionInput {
     pub session_id: String,
     pub prompt: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedTicketInput {
+    pub idempotency_key: String,
+    pub title: String,
+    pub description: String,
+    pub acceptance_criteria: Vec<String>,
+    #[serde(rename = "type")]
+    pub ticket_type: String,
+    pub source_line: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveGeneratedTicketsInput {
+    pub session_id: String,
+    pub tickets: Vec<GeneratedTicketInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkGeneratedTicketPushedInput {
+    pub session_id: String,
+    pub idempotency_key: String,
+    pub linear_issue_id: String,
+    pub linear_issue_key: String,
+    pub linear_issue_url: String,
+    pub pushed_at: Option<String>,
 }
 
 fn secret_snapshot(presence: &SecretPresence) -> SecretSnapshot {
@@ -142,6 +198,7 @@ fn map_session(row: SessionRow) -> SessionRecordPayload {
         started_at: row.started_at,
         ended_at: row.ended_at,
         updated_at: row.updated_at,
+        rolling_summary: row.rolling_summary,
         final_summary: row.final_summary,
         decisions_md: row.decisions_md,
         action_items_md: row.action_items_md,
@@ -158,6 +215,7 @@ fn map_transcript(row: TranscriptRow) -> TranscriptSegmentPayload {
         speaker_label: row.speaker_label,
         text: row.text,
         is_final: row.is_final,
+        source: row.source,
         created_at: row.created_at,
     }
 }
@@ -168,6 +226,24 @@ fn map_message(row: MessageRow) -> ChatMessagePayload {
         session_id: row.session_id,
         role: row.role,
         content: row.content,
+        created_at: row.created_at,
+    }
+}
+
+fn map_generated_ticket(row: GeneratedTicketRow) -> GeneratedTicketPayload {
+    GeneratedTicketPayload {
+        id: row.id,
+        session_id: row.session_id,
+        title: row.title,
+        description: row.description,
+        acceptance_criteria: serde_json::from_str(&row.acceptance_criteria).unwrap_or_default(),
+        ticket_type: row.ticket_type,
+        idempotency_key: row.idempotency_key,
+        source_line: row.source_line,
+        linear_issue_id: row.linear_issue_id,
+        linear_issue_key: row.linear_issue_key,
+        linear_issue_url: row.linear_issue_url,
+        pushed_at: row.pushed_at,
         created_at: row.created_at,
     }
 }
@@ -191,7 +267,7 @@ fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDerivedUpdate 
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
 
-    let summary_lines = lines.iter().take(3).cloned().collect::<Vec<_>>();
+    let summary_lines = lines.iter().take(4).cloned().collect::<Vec<_>>();
     let decision_lines = lines
         .iter()
         .filter(|line| {
@@ -222,7 +298,7 @@ fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDerivedUpdate 
         .cloned()
         .collect::<Vec<_>>();
 
-    let final_summary = if summary_lines.is_empty() {
+    let rolling_summary = if summary_lines.is_empty() {
         "No transcript signal captured yet.".to_string()
     } else {
         format!(
@@ -230,6 +306,7 @@ fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDerivedUpdate 
             summary_lines.join(" ").replace('\n', " ")
         )
     };
+    let final_summary = rolling_summary.clone();
     let decisions_md = to_bullet_md(&decision_lines);
     let action_items_md = to_bullet_md(&action_lines);
     let notes_md = to_bullet_md(&lines.iter().take(6).cloned().collect::<Vec<_>>());
@@ -247,6 +324,7 @@ fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDerivedUpdate 
     .join("\n");
 
     SessionDerivedUpdate {
+        rolling_summary: Some(rolling_summary),
         final_summary: Some(final_summary),
         decisions_md: Some(decisions_md),
         action_items_md: Some(action_items_md),
@@ -316,11 +394,18 @@ fn load_session_detail(state: &AppState, session_id: &str) -> Result<Option<Sess
                 .into_iter()
                 .map(map_message)
                 .collect::<Vec<_>>();
+            let generated_tickets = database
+                .list_generated_tickets(session_id)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(map_generated_ticket)
+                .collect::<Vec<_>>();
 
             Ok(Some(SessionDetailPayload {
                 session: map_session(session_row),
                 transcripts,
                 messages,
+                generated_tickets,
             }))
         }
         None => Ok(None),
@@ -386,6 +471,14 @@ pub fn save_secret(state: State<'_, AppState>, input: SaveSecretInput) -> Result
     state
         .secret_store()
         .save_secret(&input.key, &input.value)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn read_secret_value(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+    state
+        .secret_store()
+        .read_secret(&key)
         .map_err(|error| error.to_string())
 }
 
@@ -491,6 +584,7 @@ pub fn append_transcript_segment(
             input.speaker_label.as_deref(),
             input.text.trim(),
             input.is_final.unwrap_or(true),
+            input.source.as_deref().unwrap_or("manual"),
         )
         .map_err(|error| error.to_string())?;
 
@@ -540,6 +634,53 @@ pub fn ask_assistant(
         .map_err(|error| error.to_string())?;
     database
         .update_session_derived(&input.session_id, &derived)
+        .map_err(|error| error.to_string())?;
+
+    load_session_detail(&state, &input.session_id)
+}
+
+#[tauri::command]
+pub fn save_generated_tickets(
+    state: State<'_, AppState>,
+    input: SaveGeneratedTicketsInput,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let mut ticket_rows = Vec::with_capacity(input.tickets.len());
+    for ticket in input.tickets {
+        ticket_rows.push(GeneratedTicketInputRow {
+            idempotency_key: ticket.idempotency_key,
+            title: ticket.title,
+            description: ticket.description,
+            acceptance_criteria: serde_json::to_string(&ticket.acceptance_criteria)
+                .map_err(|error| error.to_string())?,
+            ticket_type: ticket.ticket_type,
+            source_line: ticket.source_line,
+        });
+    }
+
+    state
+        .database()
+        .replace_generated_tickets(&input.session_id, &ticket_rows)
+        .map_err(|error| error.to_string())?;
+
+    load_session_detail(&state, &input.session_id)
+}
+
+#[tauri::command]
+pub fn mark_generated_ticket_pushed(
+    state: State<'_, AppState>,
+    input: MarkGeneratedTicketPushedInput,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let pushed_at = input.pushed_at.unwrap_or_else(|| Utc::now().to_rfc3339());
+    state
+        .database()
+        .mark_generated_ticket_pushed(
+            &input.session_id,
+            &input.idempotency_key,
+            &input.linear_issue_id,
+            &input.linear_issue_key,
+            &input.linear_issue_url,
+            &pushed_at,
+        )
         .map_err(|error| error.to_string())?;
 
     load_session_detail(&state, &input.session_id)

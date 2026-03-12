@@ -10,6 +10,7 @@ const fixture: SessionDetail = {
     startedAt: new Date().toISOString(),
     endedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    rollingSummary: "Auth rollout, timeout stability, and QA follow-up.",
     finalSummary: "This session focused on stabilizing the authentication rollout and staging validation.",
     decisionsMd: "- Ship the auth timeout fix this sprint.",
     actionItemsMd: "- Engineer owns the rate-limit patch.\n- QA validates staging.",
@@ -24,6 +25,7 @@ const fixture: SessionDetail = {
       speakerLabel: "PM",
       text: "We need to confirm the auth rollout and reduce login timeout incidents.",
       isFinal: true,
+      source: "manual",
       createdAt: new Date().toISOString(),
     },
     {
@@ -33,10 +35,12 @@ const fixture: SessionDetail = {
       speakerLabel: "Engineer",
       text: "I can own the rate-limit fix and the session timeout patch this sprint.",
       isFinal: true,
+      source: "manual",
       createdAt: new Date().toISOString(),
     },
   ],
   messages: [],
+  generatedTickets: [],
 };
 
 describe("generateTicketsFromSession", () => {

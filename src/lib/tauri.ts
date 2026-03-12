@@ -5,8 +5,11 @@ import {
   bootstrapMockApp,
   completeMockSession,
   getMockSessionDetail,
+  getMockSecretValue,
   listMockSessions,
+  markMockGeneratedTicketPushed,
   pauseMockSession,
+  replaceMockGeneratedTickets,
   resumeMockSession,
   runMockDynamicAction,
   saveMockSecret,
@@ -18,11 +21,14 @@ import type {
   AskSessionInput,
   BootstrapPayload,
   DynamicActionKey,
+  MarkGeneratedTicketPushedInput,
+  SaveGeneratedTicketsInput,
   SaveSecretInput,
   SaveSettingInput,
   SessionDetail,
   SessionRecord,
   SettingRecord,
+  SecretKey,
   StartSessionInput,
 } from "./types";
 
@@ -53,6 +59,14 @@ export async function saveSecret(input: SaveSecretInput): Promise<void> {
   }
 
   await invoke("save_secret", { input });
+}
+
+export async function getSecretValue(key: SecretKey): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return getMockSecretValue(key);
+  }
+
+  return invoke<string | null>("read_secret_value", { key });
 }
 
 export async function listSessions(): Promise<SessionRecord[]> {
@@ -128,4 +142,22 @@ export async function askAssistant(input: AskSessionInput): Promise<SessionDetai
   }
 
   return invoke<SessionDetail | null>("ask_assistant", { input });
+}
+
+export async function saveGeneratedTickets(input: SaveGeneratedTicketsInput): Promise<SessionDetail | null> {
+  if (!isTauriRuntime()) {
+    return replaceMockGeneratedTickets(input);
+  }
+
+  return invoke<SessionDetail | null>("save_generated_tickets", { input });
+}
+
+export async function markGeneratedTicketPushed(
+  input: MarkGeneratedTicketPushedInput
+): Promise<SessionDetail | null> {
+  if (!isTauriRuntime()) {
+    return markMockGeneratedTicketPushed(input);
+  }
+
+  return invoke<SessionDetail | null>("mark_generated_ticket_pushed", { input });
 }

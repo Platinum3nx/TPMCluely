@@ -17,7 +17,8 @@ use std::fs;
 
 use app::commands::{
     append_transcript_segment, ask_assistant, bootstrap_app, complete_session, get_session_detail,
-    list_sessions, pause_session, resume_session, run_dynamic_action, save_secret, save_setting,
+    list_sessions, mark_generated_ticket_pushed, pause_session, read_secret_value,
+    resume_session, run_dynamic_action, save_generated_tickets, save_secret, save_setting,
     start_session,
 };
 use app::state::AppState;
@@ -53,7 +54,10 @@ pub fn run() {
             run_dynamic_action,
             ask_assistant,
             save_setting,
-            save_secret
+            save_secret,
+            read_secret_value,
+            save_generated_tickets,
+            mark_generated_ticket_pushed
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Cluely Desktop");
