@@ -46,6 +46,11 @@ button {
   padding: 32px;
 }
 
+.app-shell-overlay {
+  padding: 12px;
+  background: transparent;
+}
+
 .hero-strip,
 .workspace-shell,
 .panel,
@@ -178,6 +183,13 @@ button {
   padding: 16px 18px;
 }
 
+.inline-alert-soft {
+  margin-top: 16px;
+  margin-bottom: 0;
+  border-color: rgba(242, 138, 63, 0.24);
+  background: rgba(66, 35, 17, 0.42);
+}
+
 .panel {
   min-height: 100%;
   border-radius: 24px;
@@ -294,6 +306,26 @@ button {
   padding: 14px 16px;
 }
 
+.partial-transcript {
+  margin-bottom: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(242, 138, 63, 0.18);
+  background: linear-gradient(135deg, rgba(242, 138, 63, 0.12), rgba(15, 31, 35, 0.9));
+  padding: 14px 16px;
+}
+
+.partial-transcript span {
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.partial-transcript p {
+  margin: 8px 0 0;
+}
+
 .transcript-line span,
 .message-card span,
 .section-meta,
@@ -317,6 +349,10 @@ button {
   grid-template-columns: 180px minmax(0, 1fr);
   gap: 12px;
   margin-top: 18px;
+}
+
+.field-grid-overlay {
+  grid-template-columns: 140px minmax(0, 1fr);
 }
 
 .action-grid {
@@ -422,6 +458,7 @@ button {
 }
 
 .field-row input,
+.field input,
 .field select {
   width: 100%;
   border-radius: 14px;
@@ -510,6 +547,65 @@ button {
   border: 1px solid var(--border);
   background: rgba(8, 17, 20, 0.92);
   box-shadow: var(--shadow);
+}
+
+.overlay-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+  padding: 18px 20px;
+  border-radius: 20px;
+  border: 1px solid rgba(242, 138, 63, 0.18);
+  background: linear-gradient(135deg, rgba(15, 28, 32, 0.94), rgba(34, 21, 14, 0.78));
+}
+
+.overlay-banner h2 {
+  margin: 8px 0 0;
+  font-size: 1.5rem;
+  line-height: 1.05;
+}
+
+.overlay-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+  text-align: right;
+  font-size: 0.86rem;
+}
+
+.session-grid-overlay {
+  min-height: auto;
+  padding: 18px;
+}
+
+.session-grid-overlay .session-grid-body {
+  grid-template-columns: 1fr;
+}
+
+.session-grid-overlay .action-grid {
+  grid-template-columns: 1fr;
+}
+
+.session-grid-overlay .transcript-feed,
+.session-grid-overlay .message-feed {
+  max-height: 220px;
+}
+
+.session-grid-overlay .card {
+  padding: 18px;
+}
+
+.inline-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.inline-link:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 1080px) {

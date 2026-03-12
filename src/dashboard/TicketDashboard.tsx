@@ -7,13 +7,19 @@ interface TicketDashboardProps {
 }
 
 export function TicketDashboard({ sessionDetail }: TicketDashboardProps) {
-  const tickets = sessionDetail ? generateTicketsFromSession(sessionDetail) : [];
+  const persistedTickets = sessionDetail?.generatedTickets ?? [];
+  const fallbackTickets = sessionDetail && persistedTickets.length === 0 ? generateTicketsFromSession(sessionDetail) : [];
+  const tickets = persistedTickets.length > 0 ? persistedTickets : fallbackTickets;
+  const isFallback = persistedTickets.length === 0 && fallbackTickets.length > 0;
 
   return (
     <article className="card">
       <div className="section-header">
         <p className="card-title">Ticket Generation</p>
-        <span className="section-meta">{tickets.length} tickets</span>
+        <span className="section-meta">
+          {tickets.length} {tickets.length === 1 ? "ticket" : "tickets"}
+          {isFallback ? " · heuristic preview" : ""}
+        </span>
       </div>
       {!sessionDetail ? (
         <div className="empty-block">
@@ -23,7 +29,7 @@ export function TicketDashboard({ sessionDetail }: TicketDashboardProps) {
       ) : tickets.length === 0 ? (
         <div className="empty-block">
           <strong>No ticket candidates yet</strong>
-          <p>Add more transcript signal or generate session actions first.</p>
+          <p>End the meeting to run the transcript-to-Linear pipeline, or add more transcript signal first.</p>
         </div>
       ) : (
         <div className="card-stack">

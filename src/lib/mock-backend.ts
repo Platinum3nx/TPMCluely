@@ -426,9 +426,12 @@ export async function appendMockTranscriptSegment(input: AppendTranscriptInput):
     createdAt: nowIso(),
   });
   writeTranscripts(segments);
+  const nextDetail = getSessionDetail(input.sessionId);
+  const derived = nextDetail ? deriveSummary(nextDetail) : null;
   updateSessionRecord({
     ...detail.session,
     updatedAt: nowIso(),
+    ...(derived ?? {}),
   });
 
   return getSessionDetail(input.sessionId);

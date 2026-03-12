@@ -932,8 +932,8 @@ pub fn append_transcript_segment(
     state: State<'_, AppState>,
     input: AppendTranscriptInput,
 ) -> Result<Option<SessionDetailPayload>, String> {
-    state
-        .database()
+    let database = state.database();
+    database
         .append_transcript_segment(
             &input.session_id,
             input.speaker_label.as_deref(),
@@ -941,6 +941,14 @@ pub fn append_transcript_segment(
             input.is_final.unwrap_or(true),
             input.source.as_deref().unwrap_or("manual"),
         )
+        .map_err(|error| error.to_string())?;
+
+    let transcripts = database
+        .list_transcript_segments(&input.session_id)
+        .map_err(|error| error.to_string())?;
+    let derived = derive_session_update(&transcripts);
+    database
+        .update_session_derived(&input.session_id, &derived)
         .map_err(|error| error.to_string())?;
 
     load_session_detail(&state, &input.session_id)

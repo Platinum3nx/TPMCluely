@@ -2,10 +2,17 @@ import { AskBar } from "./AskBar";
 import { DynamicActions } from "./DynamicActions";
 import { SessionControls } from "./SessionControls";
 import { TranscriptPanel } from "./TranscriptPanel";
-import type { SessionDetail } from "../lib/types";
+import type { CaptureMode, SessionDetail } from "../lib/types";
 
 interface SessionWidgetProps {
   activeSession: SessionDetail | null;
+  captureError: string | null;
+  captureMode: CaptureMode;
+  captureState: string;
+  isCapturing: boolean;
+  overlayOpen: boolean;
+  overlayShortcut: string;
+  partialTranscript: string;
   onStartSession: (title: string) => Promise<void>;
   onPauseSession: (sessionId: string) => Promise<void>;
   onResumeSession: (sessionId: string) => Promise<void>;
@@ -13,11 +20,22 @@ interface SessionWidgetProps {
   onAppendTranscript: (speakerLabel: string, text: string) => Promise<void>;
   onDynamicAction: (action: "summary" | "decisions" | "next_steps" | "follow_up") => Promise<void>;
   onAsk: (prompt: string) => Promise<void>;
+  onSetCaptureMode: (mode: CaptureMode) => void;
+  onStartLiveCapture: () => Promise<void>;
+  onStopLiveCapture: () => Promise<void>;
+  onToggleOverlay: () => Promise<void>;
   onSeedTranscript: () => Promise<void>;
 }
 
 export function SessionWidget({
   activeSession,
+  captureError,
+  captureMode,
+  captureState,
+  isCapturing,
+  overlayOpen,
+  overlayShortcut,
+  partialTranscript,
   onStartSession,
   onPauseSession,
   onResumeSession,
@@ -25,27 +43,54 @@ export function SessionWidget({
   onAppendTranscript,
   onDynamicAction,
   onAsk,
+  onSetCaptureMode,
+  onStartLiveCapture,
+  onStopLiveCapture,
+  onToggleOverlay,
   onSeedTranscript,
 }: SessionWidgetProps) {
   return (
-    <section className="panel session-grid">
-      <div className="panel-hero">
-        <p className="eyebrow">Live Session Widget</p>
-        <h2>Compact, persistent, and only visible when a session is active.</h2>
-        <p className="muted">
-          This surface now supports the first real product loop: start a session, build transcript signal, run quick
-          actions, ask context-aware questions, and finish into a dashboard-ready record.
-        </p>
-      </div>
+    <section className={`panel session-grid ${overlayOpen ? "session-grid-overlay" : ""}`}>
+      {overlayOpen ? (
+        <div className="overlay-banner">
+          <div>
+            <p className="eyebrow">Cluely Overlay</p>
+            <h2>{activeSession?.session.title ?? "Live meeting"}</h2>
+          </div>
+          <div className="overlay-meta">
+            <span>{captureState}</span>
+            <span>{isCapturing ? "Listening" : "Idle"}</span>
+            <span>{overlayShortcut}</span>
+          </div>
+        </div>
+      ) : (
+        <div className="panel-hero">
+          <p className="eyebrow">Live Session Widget</p>
+          <h2>Live transcript, overlay controls, grounded answers, and auto-generated tickets.</h2>
+          <p className="muted">
+            Start a meeting, stream transcript signal into the assistant, answer live questions with Ask Cluely, then
+            end the session to generate deduped Linear tickets automatically.
+          </p>
+        </div>
+      )}
 
       <div className="session-grid-body">
         <div className="card-stack">
           <SessionControls
             activeSession={activeSession}
+            captureError={captureError}
+            captureMode={captureMode}
+            captureState={captureState}
+            overlayOpen={overlayOpen}
+            overlayShortcut={overlayShortcut}
             onStartSession={onStartSession}
             onPauseSession={onPauseSession}
             onResumeSession={onResumeSession}
             onCompleteSession={onCompleteSession}
+            onSetCaptureMode={onSetCaptureMode}
+            onStartLiveCapture={onStartLiveCapture}
+            onStopLiveCapture={onStopLiveCapture}
+            onToggleOverlay={onToggleOverlay}
             onSeedTranscript={onSeedTranscript}
           />
           <DynamicActions disabled={!activeSession} onRunAction={onDynamicAction} />
@@ -54,6 +99,10 @@ export function SessionWidget({
 
         <div className="card-stack">
           <TranscriptPanel
+            captureMode={captureMode}
+            captureState={captureState}
+            overlayOpen={overlayOpen}
+            partialTranscript={partialTranscript}
             sessionId={activeSession?.session.id ?? null}
             transcripts={activeSession?.transcripts ?? []}
             onAppendTranscript={onAppendTranscript}

@@ -9,7 +9,7 @@ const actions: Array<{ key: DynamicActionKey; label: string; detail: string }> =
   { key: "summary", label: "Summarize so far", detail: "Generate a crisp snapshot of the meeting." },
   { key: "decisions", label: "What was decided?", detail: "Pull out decisions and confirmed direction." },
   { key: "next_steps", label: "Next steps", detail: "Extract action items and follow-ups." },
-  { key: "follow_up", label: "Draft follow-up", detail: "Write a quick recap email draft." },
+  { key: "follow_up", label: "Follow-up questions", detail: "Ask Gemini for grounded questions to push the discussion deeper." },
 ];
 
 export function DynamicActions({ disabled, onRunAction }: DynamicActionsProps) {
@@ -17,7 +17,7 @@ export function DynamicActions({ disabled, onRunAction }: DynamicActionsProps) {
     <article className="card">
       <div className="section-header">
         <p className="card-title">Dynamic Actions</p>
-        <span className="section-meta">C3 quick wins</span>
+        <span className="section-meta">Meeting copilots</span>
       </div>
       <div className="action-grid">
         {actions.map((action) => (

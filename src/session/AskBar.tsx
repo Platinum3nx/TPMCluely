@@ -11,14 +11,14 @@ export function AskBar({ disabled, onAsk }: AskBarProps) {
   return (
     <article className="card">
       <div className="section-header">
-        <p className="card-title">Ask the Session</p>
-        <span className="section-meta">Prompt with transcript context</span>
+        <p className="card-title">Ask Cluely</p>
+        <span className="section-meta">Grounded in the live transcript</span>
       </div>
       <div className="field-row">
         <input
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
-          placeholder="What was decided about authentication rollout?"
+          placeholder="What should I say about the auth rollout risk?"
           disabled={disabled}
         />
         <button
@@ -29,7 +29,7 @@ export function AskBar({ disabled, onAsk }: AskBarProps) {
             setPrompt("");
           }}
         >
-          Ask
+          Ask Cluely
         </button>
       </div>
     </article>

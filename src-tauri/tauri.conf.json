@@ -14,6 +14,7 @@
         "title": "Cluely Desktop",
         "width": 1440,
         "height": 960,
+        "transparent": true,
         "resizable": true,
         "fullscreen": false
       }

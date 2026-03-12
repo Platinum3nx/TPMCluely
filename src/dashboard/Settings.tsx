@@ -26,6 +26,16 @@ const toggleSettings = [
     title: "Ticket Generation",
     description: "Allow transcript-to-Linear generation inside sessions and session review.",
   },
+  {
+    key: "auto_generate_tickets",
+    title: "Auto Generate Tickets",
+    description: "Run Gemini ticket generation automatically when a meeting ends.",
+  },
+  {
+    key: "auto_push_linear",
+    title: "Auto Push Linear",
+    description: "Push generated tickets to Linear immediately after ticket generation finishes.",
+  },
 ];
 
 function getSetting(settings: SettingRecord[], key: string, fallback: string): string {
@@ -36,6 +46,7 @@ export function Settings({ bootstrap, onUpdateSetting }: SettingsProps) {
   const theme = getSetting(bootstrap.settings, "theme", "system");
   const outputLanguage = getSetting(bootstrap.settings, "output_language", "en");
   const audioLanguage = getSetting(bootstrap.settings, "audio_language", "auto");
+  const overlayShortcut = getSetting(bootstrap.settings, "overlay_shortcut", "CmdOrCtrl+Shift+K");
 
   return (
     <section className="panel panel-settings">
@@ -71,6 +82,10 @@ export function Settings({ bootstrap, onUpdateSetting }: SettingsProps) {
               <option value="es">Spanish</option>
               <option value="fr">French</option>
             </select>
+          </div>
+          <div className="field">
+            <span>Overlay Shortcut</span>
+            <input value={overlayShortcut} onChange={(event) => void onUpdateSetting("overlay_shortcut", event.target.value)} />
           </div>
         </article>
 
