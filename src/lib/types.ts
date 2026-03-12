@@ -125,3 +125,14 @@ export interface AskSessionInput {
 }
 
 export type DynamicActionKey = "summary" | "decisions" | "next_steps" | "follow_up";
+
+export type TicketType = "Bug" | "Feature" | "Task";
+
+export interface GeneratedTicket {
+  idempotencyKey: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+  type: TicketType;
+  sourceLine: string;
+}

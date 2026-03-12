@@ -4,9 +4,10 @@ import { TranscriptView } from "./TranscriptView";
 
 interface SessionDetailProps {
   sessionDetail: SessionDetailModel | null;
+  onExportSession: (sessionDetail: SessionDetailModel) => void;
 }
 
-export function SessionDetail({ sessionDetail }: SessionDetailProps) {
+export function SessionDetail({ sessionDetail, onExportSession }: SessionDetailProps) {
   if (!sessionDetail) {
     return (
       <article className="card">
@@ -28,6 +29,11 @@ export function SessionDetail({ sessionDetail }: SessionDetailProps) {
         <p className="card-detail">
           Started {sessionDetail.session.startedAt ? new Date(sessionDetail.session.startedAt).toLocaleString() : "n/a"}
         </p>
+        <div className="toolbar-row">
+          <button type="button" onClick={() => onExportSession(sessionDetail)}>
+            Export Markdown
+          </button>
+        </div>
       </article>
       <NotesView session={sessionDetail.session} />
       <TranscriptView transcripts={sessionDetail.transcripts} />

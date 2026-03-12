@@ -17,6 +17,7 @@ import { DashboardApp } from "./dashboard/DashboardApp";
 import { OnboardingApp } from "./onboarding/OnboardingApp";
 import { Settings } from "./dashboard/Settings";
 import { SessionWidget } from "./session/SessionWidget";
+import { buildSessionMarkdown } from "./lib/export";
 import type { BootstrapPayload, DynamicActionKey, SecretKey, SessionDetail, SessionRecord } from "./lib/types";
 
 type ViewKey = "overview" | "onboarding" | "session" | "dashboard" | "settings";
@@ -214,6 +215,17 @@ export default function App() {
     setSelectedSessionDetail(await getSessionDetail(sessionId));
   }
 
+  function handleExportSession(sessionDetail: SessionDetail) {
+    const markdown = buildSessionMarkdown(sessionDetail);
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${sessionDetail.session.title.toLowerCase().replace(/\s+/g, "-") || "session"}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <main className="app-shell">
       <section className="hero-strip">
@@ -335,6 +347,7 @@ export default function App() {
               selectedSessionId={selectedSessionId}
               sessionDetail={selectedSessionDetail}
               onSelectSession={handleSelectSession}
+              onExportSession={handleExportSession}
             />
           ) : null}
 
