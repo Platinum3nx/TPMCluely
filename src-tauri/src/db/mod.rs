@@ -46,13 +46,26 @@ pub struct TranscriptRow {
     pub id: String,
     pub session_id: String,
     pub sequence_no: i64,
+    pub speaker_id: Option<String>,
     pub speaker_label: Option<String>,
+    pub speaker_confidence: Option<f64>,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
     pub text: String,
     pub is_final: bool,
     pub source: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSpeakerRow {
+    pub session_id: String,
+    pub speaker_id: String,
+    pub provider_label: Option<String>,
+    pub display_label: String,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -157,12 +170,251 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn normalize_casefold(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn normalize_manual_speaker_id(label: &str) -> String {
+    let mut token = String::new();
+    let mut last_was_separator = false;
+
+    for character in label.trim().chars().flat_map(|value| value.to_lowercase()) {
+        if character.is_ascii_alphanumeric() {
+            token.push(character);
+            last_was_separator = false;
+        } else if !token.is_empty() && !last_was_separator {
+            token.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    let normalized = token.trim_matches('-');
+    if normalized.is_empty() {
+        "speaker".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn default_provider_display_label(speaker_id: &str) -> String {
+    if let Some(raw_index) = speaker_id.strip_prefix("dg:") {
+        if let Ok(index) = raw_index.parse::<usize>() {
+            return format!("Speaker {}", index + 1);
+        }
+    }
+
+    "Speaker".to_string()
+}
+
+fn unattributed_label() -> &'static str {
+    "Unattributed"
+}
+
+fn transcript_line(label: Option<&str>, text: &str) -> String {
+    format!(
+        "{}: {}",
+        label
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(unattributed_label()),
+        text.trim()
+    )
+}
+
 fn touch_session(connection: &Connection, session_id: &str) -> Result<(), rusqlite::Error> {
     connection.execute(
         "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
         params![session_id, now_iso()],
     )?;
     Ok(())
+}
+
+fn load_session_speaker_by_id(
+    connection: &Connection,
+    session_id: &str,
+    speaker_id: &str,
+) -> Result<Option<SessionSpeakerRow>, rusqlite::Error> {
+    connection
+        .query_row(
+            "
+            SELECT
+                session_id,
+                speaker_id,
+                provider_label,
+                display_label,
+                source,
+                created_at,
+                updated_at
+            FROM session_speakers
+            WHERE session_id = ?1 AND speaker_id = ?2
+            ",
+            params![session_id, speaker_id],
+            |row| {
+                Ok(SessionSpeakerRow {
+                    session_id: row.get(0)?,
+                    speaker_id: row.get(1)?,
+                    provider_label: row.get(2)?,
+                    display_label: row.get(3)?,
+                    source: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+}
+
+fn load_session_speaker_by_label(
+    connection: &Connection,
+    session_id: &str,
+    display_label: &str,
+) -> Result<Option<SessionSpeakerRow>, rusqlite::Error> {
+    connection
+        .query_row(
+            "
+            SELECT
+                session_id,
+                speaker_id,
+                provider_label,
+                display_label,
+                source,
+                created_at,
+                updated_at
+            FROM session_speakers
+            WHERE session_id = ?1 AND lower(display_label) = lower(?2)
+            ORDER BY created_at ASC
+            LIMIT 1
+            ",
+            params![session_id, display_label.trim()],
+            |row| {
+                Ok(SessionSpeakerRow {
+                    session_id: row.get(0)?,
+                    speaker_id: row.get(1)?,
+                    provider_label: row.get(2)?,
+                    display_label: row.get(3)?,
+                    source: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+}
+
+fn insert_session_speaker(
+    connection: &Connection,
+    session_id: &str,
+    speaker_id: &str,
+    provider_label: Option<&str>,
+    display_label: &str,
+    source: &str,
+) -> Result<SessionSpeakerRow, rusqlite::Error> {
+    let now = now_iso();
+    let trimmed_display_label = display_label.trim();
+    let trimmed_provider_label = provider_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    connection.execute(
+        "
+        INSERT INTO session_speakers (
+            session_id,
+            speaker_id,
+            provider_label,
+            display_label,
+            source,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+        ",
+        params![
+            session_id,
+            speaker_id,
+            trimmed_provider_label,
+            trimmed_display_label,
+            source,
+            now
+        ],
+    )?;
+
+    Ok(SessionSpeakerRow {
+        session_id: session_id.to_string(),
+        speaker_id: speaker_id.to_string(),
+        provider_label: trimmed_provider_label.map(str::to_string),
+        display_label: trimmed_display_label.to_string(),
+        source: source.to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+fn resolve_transcript_speaker(
+    connection: &Connection,
+    session_id: &str,
+    source: &str,
+    speaker_id: Option<&str>,
+    speaker_label: Option<&str>,
+) -> Result<(Option<String>, Option<String>), rusqlite::Error> {
+    let normalized_speaker_id = speaker_id.map(str::trim).filter(|value| !value.is_empty());
+    let normalized_speaker_label = speaker_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if let Some(speaker_id) = normalized_speaker_id {
+        if let Some(existing) = load_session_speaker_by_id(connection, session_id, speaker_id)? {
+            return Ok((Some(existing.speaker_id), Some(existing.display_label)));
+        }
+
+        let display_label = if source == "manual" {
+            normalized_speaker_label
+                .clone()
+                .unwrap_or_else(|| default_provider_display_label(speaker_id))
+        } else {
+            default_provider_display_label(speaker_id)
+        };
+        let provider_label = if source == "manual" {
+            None
+        } else {
+            normalized_speaker_label.as_deref()
+        };
+        let created = insert_session_speaker(
+            connection,
+            session_id,
+            speaker_id,
+            provider_label,
+            &display_label,
+            if source == "manual" { "manual" } else { "provider" },
+        )?;
+        return Ok((Some(created.speaker_id), Some(created.display_label)));
+    }
+
+    if source == "manual" {
+        if let Some(label) = normalized_speaker_label {
+            if let Some(existing) = load_session_speaker_by_label(connection, session_id, &label)? {
+                return Ok((Some(existing.speaker_id), Some(existing.display_label)));
+            }
+
+            let speaker_id = format!(
+                "manual:{}:{}",
+                normalize_manual_speaker_id(&label),
+                Uuid::new_v4()
+            );
+            let created = insert_session_speaker(
+                connection,
+                session_id,
+                &speaker_id,
+                None,
+                &label,
+                "manual",
+            )?;
+            return Ok((Some(created.speaker_id), Some(created.display_label)));
+        }
+
+        return Ok((None, None));
+    }
+
+    Ok((None, None))
 }
 
 fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
@@ -214,9 +466,12 @@ fn refresh_session_search(
                 COALESCE(action_items_md, ''),
                 COALESCE(notes_md, ''),
                 COALESCE((
-                    SELECT group_concat(text, char(10))
+                    SELECT group_concat(transcript_line, char(10))
                     FROM (
-                        SELECT text
+                        SELECT CASE
+                            WHEN speaker_label IS NOT NULL AND trim(speaker_label) != '' THEN trim(speaker_label) || ': ' || text
+                            ELSE 'Unattributed: ' || text
+                        END AS transcript_line
                         FROM transcript_segments
                         WHERE session_id = sessions.id
                         ORDER BY sequence_no ASC
@@ -461,7 +716,14 @@ impl AppDatabase {
         })
     }
 
-    pub fn create_session(&self, title: &str) -> Result<SessionRow, DatabaseError> {
+    pub fn create_session(
+        &self,
+        title: &str,
+        initial_status: &str,
+        capture_mode: &str,
+        capture_target_kind: Option<&str>,
+        capture_target_label: Option<&str>,
+    ) -> Result<SessionRow, DatabaseError> {
         let session_id = Uuid::new_v4().to_string();
         let now = now_iso();
 
@@ -494,17 +756,23 @@ impl AppDatabase {
                     status,
                     started_at,
                     capture_mode,
+                    capture_target_kind,
+                    capture_target_label,
                     output_language,
                     audio_language,
                     active_prompt_id,
                     session_prompt_snapshot,
                     updated_at
-                ) VALUES (?1, ?2, 'active', ?3, 'manual', ?4, ?5, ?6, ?7, ?3)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?4)
                 ",
                 params![
                     session_id,
                     title,
+                    initial_status,
                     now,
+                    capture_mode,
+                    capture_target_kind,
+                    capture_target_label,
                     output_language,
                     audio_language,
                     active_prompt_id,
@@ -692,7 +960,19 @@ impl AppDatabase {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "
-                SELECT id, session_id, sequence_no, speaker_label, start_ms, end_ms, text, is_final, source, created_at
+                SELECT
+                    id,
+                    session_id,
+                    sequence_no,
+                    speaker_id,
+                    speaker_label,
+                    speaker_confidence,
+                    start_ms,
+                    end_ms,
+                    text,
+                    is_final,
+                    source,
+                    created_at
                 FROM transcript_segments
                 WHERE session_id = ?1
                 ORDER BY sequence_no ASC
@@ -704,13 +984,52 @@ impl AppDatabase {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
                     sequence_no: row.get(2)?,
-                    speaker_label: row.get(3)?,
-                    start_ms: row.get(4)?,
-                    end_ms: row.get(5)?,
-                    text: row.get(6)?,
-                    is_final: row.get::<_, i64>(7)? == 1,
-                    source: row.get(8)?,
-                    created_at: row.get(9)?,
+                    speaker_id: row.get(3)?,
+                    speaker_label: row.get(4)?,
+                    speaker_confidence: row.get(5)?,
+                    start_ms: row.get(6)?,
+                    end_ms: row.get(7)?,
+                    text: row.get(8)?,
+                    is_final: row.get::<_, i64>(9)? == 1,
+                    source: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            })?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    pub fn list_session_speakers(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionSpeakerRow>, DatabaseError> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "
+                SELECT
+                    session_id,
+                    speaker_id,
+                    provider_label,
+                    display_label,
+                    source,
+                    created_at,
+                    updated_at
+                FROM session_speakers
+                WHERE session_id = ?1
+                ORDER BY created_at ASC, display_label ASC
+                ",
+            )?;
+
+            let rows = statement.query_map(params![session_id], |row| {
+                Ok(SessionSpeakerRow {
+                    session_id: row.get(0)?,
+                    speaker_id: row.get(1)?,
+                    provider_label: row.get(2)?,
+                    display_label: row.get(3)?,
+                    source: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             })?;
 
@@ -721,14 +1040,18 @@ impl AppDatabase {
     pub fn append_transcript_segment(
         &self,
         session_id: &str,
+        speaker_id: Option<&str>,
         speaker_label: Option<&str>,
+        speaker_confidence: Option<f64>,
         text: &str,
         is_final: bool,
         source: &str,
     ) -> Result<TranscriptRow, DatabaseError> {
         self.append_transcript_segment_with_metadata(
             session_id,
+            speaker_id,
             speaker_label,
+            speaker_confidence,
             text,
             is_final,
             source,
@@ -742,7 +1065,9 @@ impl AppDatabase {
     pub fn append_transcript_segment_with_metadata(
         &self,
         session_id: &str,
+        speaker_id: Option<&str>,
         speaker_label: Option<&str>,
+        speaker_confidence: Option<f64>,
         text: &str,
         is_final: bool,
         source: &str,
@@ -754,6 +1079,8 @@ impl AppDatabase {
         let now = now_iso();
 
         self.with_connection(|connection| {
+            let (resolved_speaker_id, resolved_speaker_label) =
+                resolve_transcript_speaker(connection, session_id, source, speaker_id, speaker_label)?;
             let next_sequence = connection.query_row(
                 "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM transcript_segments WHERE session_id = ?1",
                 params![session_id],
@@ -766,7 +1093,9 @@ impl AppDatabase {
                     id,
                     session_id,
                     sequence_no,
+                    speaker_id,
                     speaker_label,
+                    speaker_confidence,
                     start_ms,
                     end_ms,
                     text,
@@ -774,13 +1103,15 @@ impl AppDatabase {
                     source,
                     dedupe_key,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 ",
                 params![
                     segment_id,
                     session_id,
                     next_sequence,
-                    speaker_label,
+                    resolved_speaker_id,
+                    resolved_speaker_label,
+                    speaker_confidence,
                     start_ms,
                     end_ms,
                     text,
@@ -808,7 +1139,9 @@ impl AppDatabase {
                 id: segment_id,
                 session_id: session_id.to_string(),
                 sequence_no: next_sequence,
-                speaker_label: speaker_label.map(str::to_string),
+                speaker_id: resolved_speaker_id,
+                speaker_label: resolved_speaker_label,
+                speaker_confidence,
                 start_ms,
                 end_ms,
                 text: text.to_string(),
@@ -816,6 +1149,40 @@ impl AppDatabase {
                 source: source.to_string(),
                 created_at: now,
             }))
+        })
+    }
+
+    pub fn rename_session_speaker(
+        &self,
+        session_id: &str,
+        speaker_id: &str,
+        display_label: &str,
+    ) -> Result<(), DatabaseError> {
+        let now = now_iso();
+        let normalized_label = display_label.trim();
+
+        self.with_connection(|connection| {
+            connection.execute(
+                "
+                UPDATE session_speakers
+                SET display_label = ?3,
+                    updated_at = ?4
+                WHERE session_id = ?1 AND speaker_id = ?2
+                ",
+                params![session_id, speaker_id, normalized_label, now],
+            )?;
+            connection.execute(
+                "
+                UPDATE transcript_segments
+                SET speaker_label = ?3
+                WHERE session_id = ?1 AND speaker_id = ?2
+                ",
+                params![session_id, speaker_id, normalized_label],
+            )?;
+
+            touch_session(connection, session_id)?;
+            refresh_session_search(connection, session_id)?;
+            Ok(())
         })
     }
 
@@ -1560,9 +1927,18 @@ impl AppDatabase {
                         WHEN lower(COALESCE(s.action_items_md, '')) LIKE ?2 THEN COALESCE(s.action_items_md, '')
                         WHEN lower(COALESCE(s.notes_md, '')) LIKE ?2 THEN COALESCE(s.notes_md, '')
                         ELSE COALESCE((
-                            SELECT text
+                            SELECT CASE
+                                WHEN speaker_label IS NOT NULL AND trim(speaker_label) != '' THEN trim(speaker_label) || ': ' || text
+                                ELSE 'Unattributed: ' || text
+                            END
                             FROM transcript_segments
-                            WHERE session_id = s.id AND lower(text) LIKE ?2
+                            WHERE session_id = s.id
+                              AND lower(
+                                CASE
+                                    WHEN speaker_label IS NOT NULL AND trim(speaker_label) != '' THEN trim(speaker_label) || ': ' || text
+                                    ELSE 'Unattributed: ' || text
+                                END
+                              ) LIKE ?2
                             ORDER BY sequence_no ASC
                             LIMIT 1
                         ), COALESCE(s.rolling_summary, ''))
@@ -1577,7 +1953,13 @@ impl AppDatabase {
                     (
                         SELECT sequence_no
                         FROM transcript_segments
-                        WHERE session_id = s.id AND lower(text) LIKE ?2
+                        WHERE session_id = s.id
+                          AND lower(
+                            CASE
+                                WHEN speaker_label IS NOT NULL AND trim(speaker_label) != '' THEN trim(speaker_label) || ': ' || text
+                                ELSE 'Unattributed: ' || text
+                            END
+                          ) LIKE ?2
                         ORDER BY sequence_no ASC
                         LIMIT 1
                     ) AS transcript_sequence_no
@@ -1628,13 +2010,15 @@ mod tests {
     fn dedupe_key_prevents_duplicate_capture_segments() {
         let database = AppDatabase::open_in_memory().expect("database should initialize");
         let session = database
-            .create_session("Audio session")
+            .create_session("Audio session", "active", "manual", None, None)
             .expect("session should exist");
 
         let first = database
             .append_transcript_segment_with_metadata(
                 &session.id,
-                Some("Meeting"),
+                Some("dg:0"),
+                Some("Speaker 1"),
+                None,
                 "hello world",
                 true,
                 "capture",
@@ -1646,7 +2030,9 @@ mod tests {
         let second = database
             .append_transcript_segment_with_metadata(
                 &session.id,
-                Some("Meeting"),
+                Some("dg:0"),
+                Some("Speaker 1"),
+                None,
                 "hello world",
                 true,
                 "capture",
@@ -1661,13 +2047,36 @@ mod tests {
     }
 
     #[test]
+    fn create_session_persists_initial_status_and_capture_metadata() {
+        let database = AppDatabase::open_in_memory().expect("database should initialize");
+        let session = database
+            .create_session(
+                "Preparing system audio session",
+                "preparing",
+                "system_audio",
+                Some("window"),
+                Some("Meet window"),
+            )
+            .expect("session should exist");
+        let loaded = database
+            .get_session(&session.id)
+            .expect("session should load")
+            .expect("session row should exist");
+
+        assert_eq!(loaded.status, "preparing");
+        assert_eq!(loaded.capture_mode, "system_audio");
+        assert_eq!(loaded.capture_target_kind.as_deref(), Some("window"));
+        assert_eq!(loaded.capture_target_label.as_deref(), Some("Meet window"));
+    }
+
+    #[test]
     fn generated_ticket_idempotency_is_scoped_per_session() {
         let database = AppDatabase::open_in_memory().expect("database should initialize");
         let first_session = database
-            .create_session("Session A")
+            .create_session("Session A", "active", "manual", None, None)
             .expect("first session should exist");
         let second_session = database
-            .create_session("Session B")
+            .create_session("Session B", "active", "manual", None, None)
             .expect("second session should exist");
 
         database
@@ -1733,7 +2142,7 @@ mod tests {
     fn generated_ticket_review_state_updates_reset_unpushed_drafts_only() {
         let database = AppDatabase::open_in_memory().expect("database should initialize");
         let session = database
-            .create_session("Review flow")
+            .create_session("Review flow", "active", "manual", None, None)
             .expect("session should exist");
 
         database
@@ -1838,7 +2247,7 @@ mod tests {
     fn message_metadata_round_trips_through_storage() {
         let database = AppDatabase::open_in_memory().expect("database should initialize");
         let session = database
-            .create_session("Assistant session")
+            .create_session("Assistant session", "active", "manual", None, None)
             .expect("session should exist");
 
         let metadata_json = "{\"responseMode\":\"gemini\",\"providerName\":\"Gemini\",\"latencyMs\":1200,\"usedScreenContext\":true,\"citations\":[\"[S4]\",\"[Screen]\"]}";

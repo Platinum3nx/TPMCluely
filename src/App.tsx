@@ -25,13 +25,21 @@ import {
   setGeneratedTicketReviewState,
   setOverlayOpen as persistOverlayOpen,
   startSession,
+  updateBrowserCaptureSession,
   updateGeneratedTicketDraft,
 } from "./lib/tauri";
 import { DashboardApp } from "./dashboard/DashboardApp";
 import { OnboardingApp } from "./onboarding/OnboardingApp";
 import { Settings } from "./dashboard/Settings";
 import { SessionWidget } from "./session/SessionWidget";
-import { getBlockingChecksForMode, getPreflightModeCanStart, getPreflightModeSummary } from "./lib/preflight";
+import {
+  getBlockingChecksForMode,
+  getPreflightModeCanStart,
+  getPreflightModeState,
+  getPreflightModeSummary,
+  getWarningChecksForMode,
+  mergeRendererPreflightReport,
+} from "./lib/preflight";
 import { matchesShortcut, normalizeGlobalShortcut } from "./lib/shortcuts";
 import type {
   BootstrapPayload,
@@ -76,6 +84,11 @@ interface WindowFrame {
   width: number;
   x: number;
   y: number;
+}
+
+interface SystemAudioPickerRequest {
+  sessionId: string | null;
+  title: string | null;
 }
 
 type AssistantRequest =
@@ -136,11 +149,11 @@ export default function App() {
   const [askInFlight, setAskInFlight] = useState(false);
   const [lastAssistantRequest, setLastAssistantRequest] = useState<AssistantRequest | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
-  const [preflightReport, setPreflightReport] = useState<PreflightReport | null>(null);
+  const [basePreflightReport, setBasePreflightReport] = useState<PreflightReport | null>(null);
   const [systemAudioPickerError, setSystemAudioPickerError] = useState<string | null>(null);
   const [systemAudioPickerLoading, setSystemAudioPickerLoading] = useState(false);
   const [systemAudioPickerOpen, setSystemAudioPickerOpen] = useState(false);
-  const [systemAudioPickerSessionId, setSystemAudioPickerSessionId] = useState<string | null>(null);
+  const [systemAudioPickerRequest, setSystemAudioPickerRequest] = useState<SystemAudioPickerRequest | null>(null);
   const [systemAudioSources, setSystemAudioSources] = useState<SystemAudioSource[]>([]);
 
   const previousWindowFrameRef = useRef<WindowFrame | null>(null);
@@ -188,15 +201,24 @@ export default function App() {
     setSelectedSessionDetail((current) => mergeCaptureSegment(current, payload));
   }
 
+  async function refreshSessionDetail(sessionId: string) {
+    const detail = await getSessionDetail(sessionId);
+    applySessionDetail(detail);
+    return detail;
+  }
+
   const {
     audioInputDevices,
     captureError,
     captureHealth,
     captureSourceLabel,
     captureState,
+    collectMicrophonePreflightChecks,
+    collectSystemAudioPreflightCheck,
     lastTranscriptFinalizedAt,
     isCapturing,
     listAvailableSystemAudioSources,
+    microphonePreflightChecks,
     microphoneSelectionWarning,
     partialTranscript,
     screenShareError,
@@ -209,8 +231,13 @@ export default function App() {
     stopCapture,
     stopScreenShare,
     captureScreenContext,
+    systemAudioPreflightCheck,
     transcriptFreshnessLabel,
   } = useLiveTranscription({
+    onCaptureSessionStateChanged: async (sessionId) => {
+      const detail = await getSessionDetail(sessionId);
+      applySessionDetail(detail);
+    },
     onMicrophoneFinalTranscript: async (segment) => {
       if (!activeSessionRef.current) {
         return;
@@ -241,12 +268,35 @@ export default function App() {
     overlayOpenRef.current = overlayOpen;
   }, [overlayOpen]);
 
-  async function refreshPreflight(surfaceError = false) {
+  function buildRendererPreflightChecks(
+    microphoneChecks = microphonePreflightChecks,
+    systemAudioCheck = systemAudioPreflightCheck
+  ) {
+    return [...microphoneChecks, systemAudioCheck];
+  }
+
+  async function refreshPreflight({
+    interactive = false,
+    mode = selectedCaptureMode,
+    surfaceError = false,
+  }: {
+    interactive?: boolean;
+    mode?: CaptureMode;
+    surfaceError?: boolean;
+  } = {}) {
     try {
       setPreflightLoading(true);
       const report = await runPreflightChecks();
-      setPreflightReport(report);
-      return report;
+      setBasePreflightReport(report);
+
+      const microphoneChecks =
+        interactive && mode === "microphone" ? await collectMicrophonePreflightChecks(true) : microphonePreflightChecks;
+      const systemAudioCheck =
+        interactive && mode === "system_audio"
+          ? await collectSystemAudioPreflightCheck(true)
+          : systemAudioPreflightCheck;
+
+      return mergeRendererPreflightReport(report, buildRendererPreflightChecks(microphoneChecks, systemAudioCheck));
     } catch (unknownError) {
       if (surfaceError) {
         const message = unknownError instanceof Error ? unknownError.message : "Failed to run the desktop preflight.";
@@ -268,7 +318,7 @@ export default function App() {
         runPreflightChecks().catch(() => null),
       ]);
       setBootstrap(payload);
-      setPreflightReport(preflight);
+      setBasePreflightReport(preflight);
       setSessions(sessionList);
       setPrompts(payload.prompts);
       setKnowledgeFiles(payload.knowledgeFiles);
@@ -346,14 +396,25 @@ export default function App() {
   const screenContextEnabled = bootstrap
     ? getSettingValue(bootstrap.settings, "screen_context_enabled", "true") === "true"
     : true;
+  const preflightReport = mergeRendererPreflightReport(basePreflightReport, buildRendererPreflightChecks());
   const selectedModeCanStart =
     preflightReport != null
       ? getPreflightModeCanStart(preflightReport, selectedCaptureMode)
       : selectedCaptureMode === "manual"
         ? Boolean(bootstrap?.diagnostics.databaseReady)
         : false;
+  const selectedModeState = getPreflightModeState(preflightReport, selectedCaptureMode);
   const selectedModePreflightSummary = getPreflightModeSummary(preflightReport, selectedCaptureMode);
   const selectedModeBlockingChecks = getBlockingChecksForMode(preflightReport, selectedCaptureMode);
+  const selectedModeWarningChecks = getWarningChecksForMode(preflightReport, selectedCaptureMode);
+
+  async function handleRefreshSelectedModePreflight() {
+    await refreshPreflight({
+      interactive: true,
+      mode: selectedCaptureMode,
+      surfaceError: true,
+    });
+  }
 
   useEffect(() => {
     if (!bootstrap) {
@@ -533,12 +594,12 @@ export default function App() {
     setSystemAudioPickerError(null);
     setSystemAudioPickerLoading(false);
     setSystemAudioPickerOpen(false);
-    setSystemAudioPickerSessionId(null);
+    setSystemAudioPickerRequest(null);
     setSystemAudioSources([]);
   }
 
-  async function openSystemAudioPicker(sessionId: string) {
-    setSystemAudioPickerSessionId(sessionId);
+  async function openSystemAudioPicker(request: SystemAudioPickerRequest) {
+    setSystemAudioPickerRequest(request);
     setSystemAudioPickerError(null);
     setSystemAudioPickerLoading(true);
     setSystemAudioPickerOpen(true);
@@ -564,7 +625,7 @@ export default function App() {
   }
 
   async function handleSelectSystemAudioSource(source: SystemAudioSource) {
-    if (!systemAudioPickerSessionId) {
+    if (!systemAudioPickerRequest?.sessionId && !systemAudioPickerRequest?.title) {
       setSystemAudioPickerError("Start or resume a meeting before selecting a system audio source.");
       return;
     }
@@ -573,12 +634,31 @@ export default function App() {
       setError(null);
       setSystemAudioPickerError(null);
       setSystemAudioPickerLoading(true);
+      let targetSessionId = systemAudioPickerRequest?.sessionId ?? null;
+      if (!targetSessionId && systemAudioPickerRequest?.title) {
+        const detail = await createSessionRecord(systemAudioPickerRequest.title, {
+          initialStatus: "preparing",
+          captureMode: "system_audio",
+          captureTargetKind: source.kind,
+          captureTargetLabel: source.sourceLabel,
+        });
+        targetSessionId = detail.session.id;
+        if (sessionWidgetEnabled && !overlayOpenRef.current) {
+          await syncOverlayWindow(true);
+        }
+      }
+
+      if (!targetSessionId) {
+        throw new Error("Start or resume a meeting before selecting a system audio source.");
+      }
+
       await startCapture({
         language: audioLanguage,
         mode: "system_audio",
-        sessionId: systemAudioPickerSessionId,
+        sessionId: targetSessionId,
         source,
       });
+      await refreshSessionDetail(targetSessionId);
       closeSystemAudioPicker();
     } catch (unknownError) {
       const message =
@@ -602,8 +682,8 @@ export default function App() {
     }
   }
 
-  async function ensureSelectedModeReady(mode: CaptureMode) {
-    const report = await refreshPreflight(true);
+  async function ensureSelectedModeReady(mode: CaptureMode, interactive = true) {
+    const report = await refreshPreflight({ interactive, mode, surfaceError: true });
     if (!report) {
       return false;
     }
@@ -622,35 +702,7 @@ export default function App() {
     return false;
   }
 
-  async function startLiveCaptureForSession(sessionId?: string) {
-    const targetSessionId = sessionId ?? activeSessionRef.current?.session.id;
-    if (!targetSessionId) {
-      setError("Start a meeting before enabling live transcription.");
-      return;
-    }
-
-    if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
-      setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
-      return;
-    }
-
-    const ready = await ensureSelectedModeReady(selectedCaptureMode);
-    if (!ready) {
-      return;
-    }
-
-    if (selectedCaptureMode === "system_audio") {
-      if (!bootstrap?.captureCapabilities.nativeSystemAudio) {
-        setError("System audio capture is available only in the native macOS desktop runtime.");
-        return;
-      }
-
-      await openSystemAudioPicker(targetSessionId);
-      return;
-    }
-
-    closeSystemAudioPicker();
-
+  async function startPreparedMicrophoneCapture(sessionId: string) {
     const apiKey = await getSecretValue("deepgram_api_key");
     if (!apiKey) {
       setError("Add a Deepgram API key from Onboarding to enable live transcription.");
@@ -664,30 +716,88 @@ export default function App() {
       language: audioLanguage,
       mode: "microphone",
       speakerLabel: "Meeting",
-      sessionId: targetSessionId,
+      sessionId,
     });
+    await refreshSessionDetail(sessionId);
   }
 
-  async function createSessionRecord(title: string) {
-    const detail = await startSession({ title });
+  async function createSessionRecord(title: string, overrides: Partial<Parameters<typeof startSession>[0]> = {}) {
+    const detail = await startSession({ title, ...overrides });
     applySessionDetail(detail);
     setView("session");
     return detail;
   }
 
+  async function transitionBrowserCaptureSession(
+    sessionId: string,
+    status: "preparing" | "active" | "permission_blocked" | "capture_error" | "provider_degraded",
+    captureMode: "microphone" = "microphone"
+  ) {
+    const detail = await updateBrowserCaptureSession({
+      sessionId,
+      status,
+      captureMode,
+    });
+    applySessionDetail(detail);
+    return detail;
+  }
+
+  async function startLiveCaptureForExistingSession(sessionId: string) {
+    if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
+      setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
+      return;
+    }
+
+    const ready = await ensureSelectedModeReady(selectedCaptureMode, true);
+    if (!ready) {
+      return;
+    }
+
+    if (selectedCaptureMode === "system_audio") {
+      if (!bootstrap?.captureCapabilities.nativeSystemAudio) {
+        setError("System audio capture is available only in the native macOS desktop runtime.");
+        return;
+      }
+
+      await openSystemAudioPicker({ sessionId, title: null });
+      return;
+    }
+
+    closeSystemAudioPicker();
+    await transitionBrowserCaptureSession(sessionId, "preparing");
+    await startPreparedMicrophoneCapture(sessionId);
+  }
+
   async function handleStartSession(title: string) {
     try {
+      setError(null);
       setAssistantError(null);
-      const detail = await createSessionRecord(title);
-      if (sessionWidgetEnabled) {
-        await syncOverlayWindow(true);
+      if (selectedCaptureMode === "manual") {
+        const detail = await createSessionRecord(title);
+        if (sessionWidgetEnabled) {
+          await syncOverlayWindow(true);
+        }
+        return;
       }
-      if (
-        bootstrap?.secrets.deepgramConfigured &&
-        (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
-      ) {
-        await startLiveCaptureForSession(detail.session.id);
+
+      const ready = await ensureSelectedModeReady(selectedCaptureMode, true);
+      if (!ready) {
+        return;
       }
+
+      if (selectedCaptureMode === "microphone") {
+        const detail = await createSessionRecord(title, {
+          initialStatus: "preparing",
+          captureMode: "microphone",
+        });
+        if (sessionWidgetEnabled) {
+          await syncOverlayWindow(true);
+        }
+        await startPreparedMicrophoneCapture(detail.session.id);
+        return;
+      }
+
+      await openSystemAudioPicker({ sessionId: null, title });
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to start session.";
       setError(message);
@@ -699,25 +809,47 @@ export default function App() {
       setError(null);
       setAssistantError(null);
       if (selectedCaptureMode === "manual") {
-        const ready = await ensureSelectedModeReady("manual");
+        const ready = await ensureSelectedModeReady("manual", false);
         if (!ready) {
           return;
         }
-      }
-      let detail = activeSessionRef.current;
-      if (!activeSessionRef.current) {
-        detail = await createSessionRecord(createOverlaySessionTitle());
+
+        let detail = activeSessionRef.current;
+        if (!detail) {
+          detail = await createSessionRecord(createOverlaySessionTitle());
+        }
+
+        if (!overlayOpenRef.current) {
+          await syncOverlayWindow(true);
+        }
+        return;
       }
 
       if (!overlayOpenRef.current) {
         await syncOverlayWindow(true);
       }
 
-      if (selectedCaptureMode === "manual") {
+      const detail = activeSessionRef.current;
+      if (detail) {
+        await startLiveCaptureForExistingSession(detail.session.id);
         return;
       }
 
-      await startLiveCaptureForSession(detail?.session.id);
+      const ready = await ensureSelectedModeReady(selectedCaptureMode, true);
+      if (!ready) {
+        return;
+      }
+
+      if (selectedCaptureMode === "microphone") {
+        const preparingDetail = await createSessionRecord(createOverlaySessionTitle(), {
+          initialStatus: "preparing",
+          captureMode: "microphone",
+        });
+        await startPreparedMicrophoneCapture(preparingDetail.session.id);
+        return;
+      }
+
+      await openSystemAudioPicker({ sessionId: null, title: createOverlaySessionTitle() });
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to start listening.";
       setError(message);
@@ -741,7 +873,7 @@ export default function App() {
       bootstrap?.secrets.deepgramConfigured &&
       (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
     ) {
-      await startLiveCaptureForSession(detail.session.id);
+      await startLiveCaptureForExistingSession(detail.session.id);
     }
   }
 
@@ -889,7 +1021,7 @@ export default function App() {
       return;
     }
 
-    await startLiveCaptureForSession(activeSessionRef.current.session.id);
+    await startLiveCaptureForExistingSession(activeSessionRef.current.session.id);
   }
 
   async function handleStopLiveCapture() {
@@ -1035,7 +1167,9 @@ export default function App() {
           preflightBlockingChecks={selectedModeBlockingChecks}
           preflightCheckedAt={preflightReport?.checkedAt ?? null}
           preflightLoading={preflightLoading}
+          preflightState={selectedModeState}
           preflightSummary={selectedModePreflightSummary}
+          preflightWarningChecks={selectedModeWarningChecks}
           screenContextEnabled={screenContextEnabled}
           screenShareError={screenShareError}
           screenShareOwnedByCapture={screenShareOwnedByCapture}
@@ -1048,7 +1182,7 @@ export default function App() {
           transcriptFreshnessLabel={transcriptFreshnessLabel}
           onStartSession={handleStartSession}
           onPauseSession={handlePauseSession}
-          onRefreshPreflight={() => refreshPreflight(true).then(() => undefined)}
+          onRefreshPreflight={handleRefreshSelectedModePreflight}
           onRetryAssistantRequest={handleRetryAssistantRequest}
           onResumeSession={handleResumeSession}
           onCompleteSession={handleCompleteSession}
@@ -1209,7 +1343,9 @@ export default function App() {
               preflightBlockingChecks={selectedModeBlockingChecks}
               preflightCheckedAt={preflightReport?.checkedAt ?? null}
               preflightLoading={preflightLoading}
+              preflightState={selectedModeState}
               preflightSummary={selectedModePreflightSummary}
+              preflightWarningChecks={selectedModeWarningChecks}
               screenContextEnabled={screenContextEnabled}
               screenShareError={screenShareError}
               screenShareOwnedByCapture={screenShareOwnedByCapture}
@@ -1222,7 +1358,7 @@ export default function App() {
               transcriptFreshnessLabel={transcriptFreshnessLabel}
               onStartSession={handleStartSession}
               onPauseSession={handlePauseSession}
-              onRefreshPreflight={() => refreshPreflight(true).then(() => undefined)}
+              onRefreshPreflight={handleRefreshSelectedModePreflight}
               onRetryAssistantRequest={handleRetryAssistantRequest}
               onResumeSession={handleResumeSession}
               onCompleteSession={handleCompleteSession}

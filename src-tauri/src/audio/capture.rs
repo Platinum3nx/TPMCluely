@@ -415,6 +415,7 @@ impl CaptureService {
             Ok(handle) => handle,
             Err(error) => {
                 task_handle.abort();
+                let _ = database.update_session_status(&input.session_id, "capture_error", None);
                 let payload = self.update_state(
                     &app,
                     CaptureStatePayload {
@@ -613,8 +614,9 @@ async fn run_capture_pipeline(
                         Some(ControlMessage::Stop) => {
                             let _ = writer.send(Message::Text("{\"type\":\"Finalize\"}".to_string())).await;
                             let _ = writer.send(Message::Text("{\"type\":\"CloseStream\"}".to_string())).await;
-                            if let Some(final_utterance) = utterance.flush() {
-                                let _ = persist_finalized_utterance(&database, &app, &session_id, final_utterance);
+                            let finalized = utterance.flush();
+                            if !finalized.is_empty() {
+                                let _ = persist_finalized_utterances(&database, &app, &session_id, finalized);
                             }
                             service.emit_partial(&app, &session_id, String::new());
                             return;
@@ -622,8 +624,9 @@ async fn run_capture_pipeline(
                         Some(ControlMessage::RestartDeepgram) => {
                             let _ = writer.send(Message::Text("{\"type\":\"Finalize\"}".to_string())).await;
                             let _ = writer.send(Message::Text("{\"type\":\"CloseStream\"}".to_string())).await;
-                            if let Some(final_utterance) = utterance.flush() {
-                                let _ = persist_finalized_utterance(&database, &app, &session_id, final_utterance);
+                            let finalized = utterance.flush();
+                            if !finalized.is_empty() {
+                                let _ = persist_finalized_utterances(&database, &app, &session_id, finalized);
                             }
                             break true;
                         }
@@ -769,8 +772,9 @@ async fn run_capture_pipeline(
             }
         };
 
-        if let Some(final_utterance) = utterance.flush() {
-            let _ = persist_finalized_utterance(&database, &app, &session_id, final_utterance);
+        let finalized = utterance.flush();
+        if !finalized.is_empty() {
+            let _ = persist_finalized_utterances(&database, &app, &session_id, finalized);
         }
         service.emit_partial(&app, &session_id, String::new());
 
@@ -809,22 +813,20 @@ async fn handle_deepgram_text(
     utterance: &mut FinalizedUtteranceBuilder,
     text: String,
 ) -> Result<(), AudioError> {
-    let payload: DeepgramMessage = serde_json::from_str(&text).map_err(|error| {
-        AudioError::Provider(format!("Failed to parse Deepgram response: {error}"))
-    })?;
+    let payload = parse_deepgram_message(&text)?;
 
     match payload {
         DeepgramMessage::Results {
             transcript,
             is_final,
             speech_final,
-            start_ms,
-            end_ms,
+            utterances: finalized_turns,
         } => {
-            if transcript.is_empty() {
+            if transcript.is_empty() && finalized_turns.is_empty() {
                 if is_final && !utterance.is_empty() && speech_final {
-                    if let Some(flushed) = utterance.flush() {
-                        persist_finalized_utterance(database, app, session_id, flushed)?;
+                    let flushed = utterance.flush();
+                    if !flushed.is_empty() {
+                        persist_finalized_utterances(database, app, session_id, flushed)?;
                     }
                     service.emit_partial(app, session_id, String::new());
                 }
@@ -832,10 +834,11 @@ async fn handle_deepgram_text(
             }
 
             if is_final {
-                utterance.push(&transcript, start_ms, end_ms);
+                utterance.push_utterances(finalized_turns);
                 if speech_final {
-                    if let Some(flushed) = utterance.flush() {
-                        persist_finalized_utterance(database, app, session_id, flushed)?;
+                    let flushed = utterance.flush();
+                    if !flushed.is_empty() {
+                        persist_finalized_utterances(database, app, session_id, flushed)?;
                     }
                     service.emit_partial(app, session_id, String::new());
                 }
@@ -844,8 +847,9 @@ async fn handle_deepgram_text(
             }
         }
         DeepgramMessage::UtteranceEnd => {
-            if let Some(flushed) = utterance.flush() {
-                persist_finalized_utterance(database, app, session_id, flushed)?;
+            let flushed = utterance.flush();
+            if !flushed.is_empty() {
+                persist_finalized_utterances(database, app, session_id, flushed)?;
             }
             service.emit_partial(app, session_id, String::new());
         }
@@ -855,34 +859,44 @@ async fn handle_deepgram_text(
     Ok(())
 }
 
-fn persist_finalized_utterance(
+fn persist_finalized_utterances(
     database: &AppDatabase,
     app: &AppHandle,
     session_id: &str,
-    utterance: FinalizedUtterance,
+    utterances: Vec<FinalizedUtterance>,
 ) -> Result<(), AudioError> {
-    let dedupe = dedupe_key(
-        "capture",
-        utterance.start_ms,
-        utterance.end_ms,
-        &utterance.text,
-    );
-    let segment = database
-        .append_transcript_segment_with_metadata(
-            session_id,
-            Some("Meeting"),
-            &utterance.text,
-            true,
+    let mut persisted_segments = Vec::new();
+    for utterance in utterances {
+        let dedupe = dedupe_key(
             "capture",
+            utterance.speaker_id.as_deref(),
             utterance.start_ms,
             utterance.end_ms,
-            Some(&dedupe),
-        )
-        .map_err(|error| AudioError::Database(error.to_string()))?;
+            &utterance.text,
+        );
+        let maybe_segment = database
+            .append_transcript_segment_with_metadata(
+                session_id,
+                utterance.speaker_id.as_deref(),
+                utterance.speaker_label.as_deref(),
+                utterance.speaker_confidence,
+                &utterance.text,
+                true,
+                "capture",
+                utterance.start_ms,
+                utterance.end_ms,
+                Some(&dedupe),
+            )
+            .map_err(|error| AudioError::Database(error.to_string()))?;
 
-    let Some(segment) = segment else {
+        if let Some(segment) = maybe_segment {
+            persisted_segments.push(segment);
+        }
+    }
+
+    if persisted_segments.is_empty() {
         return Ok(());
-    };
+    }
 
     let transcripts = database
         .list_transcript_segments(session_id)
@@ -899,14 +913,17 @@ fn persist_finalized_utterance(
             AudioError::Database("Session disappeared while persisting capture output.".to_string())
         })?;
 
-    let _ = app.emit(
-        EVENT_CAPTURE_SEGMENT,
-        CaptureSegmentEventPayload {
-            session_id: session_id.to_string(),
-            session: map_session(session),
-            segment: map_transcript(segment),
-        },
-    );
+    let session_payload = map_session(session);
+    for segment in persisted_segments {
+        let _ = app.emit(
+            EVENT_CAPTURE_SEGMENT,
+            CaptureSegmentEventPayload {
+                session_id: session_id.to_string(),
+                session: session_payload.clone(),
+                segment: map_transcript(segment),
+            },
+        );
+    }
 
     Ok(())
 }
@@ -942,84 +959,314 @@ enum DeepgramMessage {
         transcript: String,
         is_final: bool,
         speech_final: bool,
-        start_ms: Option<i64>,
-        end_ms: Option<i64>,
+        utterances: Vec<FinalizedUtterance>,
     },
     UtteranceEnd,
     Other,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 struct DeepgramChannel {
     #[serde(default)]
     alternatives: Vec<DeepgramAlternative>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 struct DeepgramAlternative {
     #[serde(default)]
     transcript: String,
+    #[serde(default)]
+    words: Vec<DeepgramWord>,
+    #[serde(default)]
+    utterances: Vec<DeepgramUtterancePayload>,
 }
 
-impl<'de> Deserialize<'de> for DeepgramMessage {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum RawMessage {
-            Results {
-                #[serde(default, rename = "type")]
-                message_type: Option<String>,
-                #[serde(default)]
-                is_final: bool,
-                #[serde(default)]
-                speech_final: bool,
-                #[serde(default)]
-                start: f64,
-                #[serde(default)]
-                duration: f64,
-                channel: Option<DeepgramChannel>,
-            },
-            Typed {
-                #[serde(rename = "type")]
-                message_type: String,
-            },
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DeepgramWord {
+    #[serde(default)]
+    word: String,
+    #[serde(default)]
+    punctuated_word: Option<String>,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+    #[serde(default)]
+    speaker: Option<usize>,
+    #[serde(default)]
+    speaker_confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DeepgramUtterancePayload {
+    #[serde(default)]
+    transcript: String,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+    #[serde(default)]
+    speaker: Option<usize>,
+    #[serde(default)]
+    words: Vec<DeepgramWord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawDeepgramMessage {
+    Results(RawDeepgramResults),
+    Typed(RawDeepgramTypedMessage),
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDeepgramTypedMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDeepgramResults {
+    #[serde(default, rename = "type")]
+    message_type: Option<String>,
+    #[serde(default)]
+    is_final: bool,
+    #[serde(default)]
+    speech_final: bool,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    utterances: Vec<DeepgramUtterancePayload>,
+    #[serde(default)]
+    results: Option<DeepgramNestedResults>,
+    channel: Option<DeepgramChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DeepgramNestedResults {
+    #[serde(default)]
+    utterances: Vec<DeepgramUtterancePayload>,
+}
+
+fn parse_deepgram_message(text: &str) -> Result<DeepgramMessage, AudioError> {
+    let raw = serde_json::from_str::<RawDeepgramMessage>(text).map_err(|error| {
+        AudioError::Provider(format!("Failed to parse Deepgram response: {error}"))
+    })?;
+
+    match raw {
+        RawDeepgramMessage::Typed(RawDeepgramTypedMessage { message_type })
+            if message_type == "UtteranceEnd" =>
+        {
+            Ok(DeepgramMessage::UtteranceEnd)
+        }
+        RawDeepgramMessage::Typed(_) => Ok(DeepgramMessage::Other),
+        RawDeepgramMessage::Results(message)
+            if message.message_type.as_deref().unwrap_or("Results") == "Results" =>
+        {
+            let alternative = message
+                .channel
+                .as_ref()
+                .and_then(|channel| channel.alternatives.first())
+                .cloned()
+                .unwrap_or_default();
+            let transcript = alternative.transcript.trim().to_string();
+            let utterances = normalize_deepgram_utterances(
+                &message.utterances,
+                message
+                    .results
+                    .as_ref()
+                    .map(|results| results.utterances.as_slice())
+                    .unwrap_or(&[]),
+                &alternative,
+                seconds_to_ms(message.start),
+                end_ms_from_duration(message.start, message.duration),
+            );
+
+            Ok(DeepgramMessage::Results {
+                transcript,
+                is_final: message.is_final,
+                speech_final: message.speech_final,
+                utterances,
+            })
+        }
+        RawDeepgramMessage::Results(_) => Ok(DeepgramMessage::Other),
+    }
+}
+
+fn normalize_deepgram_utterances(
+    top_level_utterances: &[DeepgramUtterancePayload],
+    nested_utterances: &[DeepgramUtterancePayload],
+    alternative: &DeepgramAlternative,
+    fallback_start_ms: Option<i64>,
+    fallback_end_ms: Option<i64>,
+) -> Vec<FinalizedUtterance> {
+    let utterances = if !top_level_utterances.is_empty() {
+        top_level_utterances
+    } else if !nested_utterances.is_empty() {
+        nested_utterances
+    } else if !alternative.utterances.is_empty() {
+        alternative.utterances.as_slice()
+    } else {
+        &[] as &[DeepgramUtterancePayload]
+    };
+
+    if !utterances.is_empty() {
+        let mut builder = FinalizedUtteranceBuilder::default();
+        for utterance in utterances {
+            builder.push_utterances(normalize_deepgram_utterance_payload(utterance));
+        }
+        return builder.flush();
+    }
+
+    if !alternative.words.is_empty() {
+        return group_words_by_speaker(&alternative.words);
+    }
+
+    let text = alternative.transcript.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    vec![FinalizedUtterance {
+        speaker_id: None,
+        speaker_label: None,
+        speaker_confidence: None,
+        text: text.to_string(),
+        start_ms: fallback_start_ms,
+        end_ms: fallback_end_ms,
+    }]
+}
+
+fn normalize_deepgram_utterance_payload(
+    utterance: &DeepgramUtterancePayload,
+) -> Vec<FinalizedUtterance> {
+    if utterance.speaker.is_some() {
+        let speaker_id = deepgram_speaker_id(utterance.speaker);
+        let speaker_label = deepgram_speaker_label(utterance.speaker);
+        let text = if utterance.transcript.trim().is_empty() {
+            join_word_tokens(&utterance.words)
+        } else {
+            utterance.transcript.trim().to_string()
+        };
+        let start_ms = seconds_to_ms(utterance.start)
+            .or_else(|| utterance.words.first().and_then(|word| seconds_to_ms(word.start)));
+        let end_ms = seconds_to_ms(utterance.end)
+            .or_else(|| utterance.words.last().and_then(|word| seconds_to_ms(word.end)));
+
+        return vec![FinalizedUtterance {
+            speaker_id,
+            speaker_label,
+            speaker_confidence: average_speaker_confidence(&utterance.words),
+            text,
+            start_ms,
+            end_ms,
+        }];
+    }
+
+    if utterance.words.iter().any(|word| word.speaker.is_some()) {
+        return group_words_by_speaker(&utterance.words);
+    }
+
+    let text = if utterance.transcript.trim().is_empty() {
+        join_word_tokens(&utterance.words)
+    } else {
+        utterance.transcript.trim().to_string()
+    };
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    vec![FinalizedUtterance {
+        speaker_id: None,
+        speaker_label: None,
+        speaker_confidence: None,
+        text,
+        start_ms: seconds_to_ms(utterance.start),
+        end_ms: seconds_to_ms(utterance.end),
+    }]
+}
+
+fn group_words_by_speaker(words: &[DeepgramWord]) -> Vec<FinalizedUtterance> {
+    let mut builder = FinalizedUtteranceBuilder::default();
+    for word in words {
+        let token = word_token(word);
+        if token.is_empty() {
+            continue;
         }
 
-        match RawMessage::deserialize(deserializer)? {
-            RawMessage::Results {
-                message_type,
-                is_final,
-                speech_final,
-                start,
-                duration,
-                channel,
-            } if message_type.as_deref().unwrap_or("Results") == "Results" => Ok(Self::Results {
-                transcript: channel
-                    .as_ref()
-                    .and_then(|channel| channel.alternatives.first())
-                    .map(|alternative| alternative.transcript.trim().to_string())
-                    .unwrap_or_default(),
-                is_final,
-                speech_final,
-                start_ms: if start > 0.0 {
-                    Some((start * 1_000.0).round() as i64)
-                } else {
-                    None
-                },
-                end_ms: if duration > 0.0 || start > 0.0 {
-                    Some(((start + duration) * 1_000.0).round() as i64)
-                } else {
-                    None
-                },
-            }),
-            RawMessage::Typed { message_type } if message_type == "UtteranceEnd" => {
-                Ok(Self::UtteranceEnd)
-            }
-            _ => Ok(Self::Other),
+        let speaker_id = deepgram_speaker_id(word.speaker);
+        let speaker_label = deepgram_speaker_label(word.speaker);
+        builder.push(
+            speaker_id.as_deref(),
+            speaker_label.as_deref(),
+            word.speaker_confidence,
+            &token,
+            seconds_to_ms(word.start),
+            seconds_to_ms(word.end),
+        );
+    }
+    builder.flush()
+}
+
+fn join_word_tokens(words: &[DeepgramWord]) -> String {
+    words
+        .iter()
+        .map(word_token)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn word_token(word: &DeepgramWord) -> String {
+    word.punctuated_word
+        .as_deref()
+        .unwrap_or(word.word.as_str())
+        .trim()
+        .to_string()
+}
+
+fn deepgram_speaker_id(speaker: Option<usize>) -> Option<String> {
+    speaker.map(|value| format!("dg:{value}"))
+}
+
+fn deepgram_speaker_label(speaker: Option<usize>) -> Option<String> {
+    speaker.map(|value| format!("Speaker {}", value + 1))
+}
+
+fn seconds_to_ms(value: Option<f64>) -> Option<i64> {
+    let value = value?;
+    if value.is_finite() && value >= 0.0 {
+        Some((value * 1_000.0).round() as i64)
+    } else {
+        None
+    }
+}
+
+fn end_ms_from_duration(start: Option<f64>, duration: Option<f64>) -> Option<i64> {
+    match (start, duration) {
+        (Some(start), Some(duration)) if start.is_finite() && duration.is_finite() && duration >= 0.0 => {
+            Some(((start + duration) * 1_000.0).round() as i64)
         }
+        (Some(start), None) => seconds_to_ms(Some(start)),
+        _ => None,
+    }
+}
+
+fn average_speaker_confidence(words: &[DeepgramWord]) -> Option<f64> {
+    let (sum, count) = words.iter().fold((0.0_f64, 0_u32), |(sum, count), word| {
+        match word.speaker_confidence {
+            Some(confidence) if confidence.is_finite() => (sum + confidence, count + 1),
+            _ => (sum, count),
+        }
+    });
+
+    if count == 0 {
+        None
+    } else {
+        Some(sum / count as f64)
     }
 }
 

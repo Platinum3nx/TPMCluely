@@ -1,6 +1,7 @@
 import type {
   AppendTranscriptInput,
   AskSessionInput,
+  BrowserCaptureSessionUpdateInput,
   BootstrapPayload,
   CaptureCapabilities,
   CaptureStatePayload,
@@ -12,6 +13,7 @@ import type {
   MarkGeneratedTicketPushedInput,
   MessageAttachment,
   MessageMetadata,
+  PreflightModeState,
   PreflightReport,
   PermissionSnapshot,
   PromptRecord,
@@ -363,6 +365,17 @@ function writeRuntimeState(runtime: RuntimeState): void {
   window.localStorage.setItem(RUNTIME_KEY, JSON.stringify(runtime));
 }
 
+function syncRuntimeSession(sessionId: string, status: SessionRecord["status"]): void {
+  writeRuntimeState({
+    ...readRuntimeState(),
+    session: {
+      activeSessionId: sessionId,
+      activeStatus: status,
+      lastTransitionAt: nowIso(),
+    },
+  });
+}
+
 function getSessionDetail(sessionId: string): SessionDetail | null {
   const session = readSessions().find((entry) => entry.id === sessionId);
   if (!session) {
@@ -630,6 +643,7 @@ export async function runMockPreflightChecks(): Promise<PreflightReport> {
   const geminiReady = Boolean(secrets.gemini_api_key);
   const deepgramReady = Boolean(secrets.deepgram_api_key);
   const linearReady = Boolean(secrets.linear_api_key && secrets.linear_team_id);
+  const microphoneState: PreflightModeState = deepgramReady ? "verification_required" : "blocked";
 
   return {
     checkedAt: nowIso(),
@@ -705,7 +719,7 @@ export async function runMockPreflightChecks(): Promise<PreflightReport> {
         title: "Preferred microphone",
         status: preferredMicrophoneDeviceId ? "ready" : "warning",
         message: preferredMicrophoneDeviceId
-          ? "A preferred microphone is saved and will be validated in the UI."
+          ? "A preferred microphone is saved and will be verified before live capture starts."
           : "No preferred microphone is saved yet.",
         detail: preferredMicrophoneDeviceId || null,
       },
@@ -726,18 +740,21 @@ export async function runMockPreflightChecks(): Promise<PreflightReport> {
       {
         mode: "manual",
         canStart: true,
+        state: "ready",
         summary: "Manual mode is always available in browser mock mode.",
       },
       {
         mode: "microphone",
         canStart: deepgramReady,
+        state: microphoneState,
         summary: deepgramReady
-          ? "Microphone mode is available for browser mock rehearsal."
+          ? "Microphone mode can start once TPMCluely verifies the selected input in this browser runtime."
           : "Microphone mode is blocked until a Deepgram key is configured.",
       },
       {
         mode: "system_audio",
         canStart: false,
+        state: "blocked",
         summary: "System-audio mode is unavailable in browser mock mode.",
       },
     ],
@@ -933,15 +950,16 @@ export async function deleteMockKnowledgeFile(fileId: string): Promise<Knowledge
 
 export async function startMockSession(input: StartSessionInput): Promise<SessionDetail> {
   const now = nowIso();
+  const nextStatus = input.initialStatus ?? "active";
   const session: SessionRecord = {
     id: createId("session"),
     title: input.title.trim() || "Untitled session",
-    status: "active",
+    status: nextStatus,
     startedAt: now,
     endedAt: null,
-    captureMode: "manual",
-    captureTargetKind: null,
-    captureTargetLabel: null,
+    captureMode: input.captureMode ?? "manual",
+    captureTargetKind: input.captureTargetKind ?? null,
+    captureTargetLabel: input.captureTargetLabel ?? null,
     updatedAt: now,
     rollingSummary: null,
     finalSummary: null,
@@ -955,17 +973,38 @@ export async function startMockSession(input: StartSessionInput): Promise<Sessio
   };
 
   updateSessionRecord(session);
-  writeRuntimeState({
-    ...readRuntimeState(),
-    session: {
-      activeSessionId: session.id,
-      activeStatus: "active",
-      lastTransitionAt: now,
-    },
-  });
-  appendAssistantMessage(session.id, "system", "Session started. Transcript capture is ready.");
+  syncRuntimeSession(session.id, nextStatus);
+  appendAssistantMessage(
+    session.id,
+    "system",
+    nextStatus === "preparing"
+      ? "Session created. Live capture is being verified."
+      : "Session started. Transcript capture is ready."
+  );
 
   return getSessionDetail(session.id)!;
+}
+
+export async function updateMockBrowserCaptureSession(
+  input: BrowserCaptureSessionUpdateInput
+): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(input.sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  updateSessionRecord({
+    ...detail.session,
+    status: input.status,
+    captureMode: input.captureMode ?? detail.session.captureMode,
+    captureTargetKind:
+      input.captureTargetKind === undefined ? detail.session.captureTargetKind : input.captureTargetKind,
+    captureTargetLabel:
+      input.captureTargetLabel === undefined ? detail.session.captureTargetLabel : input.captureTargetLabel,
+    updatedAt: nowIso(),
+  });
+  syncRuntimeSession(input.sessionId, input.status);
+  return getSessionDetail(input.sessionId);
 }
 
 export async function pauseMockSession(sessionId: string): Promise<SessionDetail | null> {

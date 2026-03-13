@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { captureModeLabel } from "../lib/preflight";
+import { captureModeLabel, getPreflightModeLabel } from "../lib/preflight";
 import type {
   AudioInputDevice,
   CaptureHealthPayload,
   CaptureMode,
   PreflightCheck,
+  PreflightModeState,
   ScreenShareState,
   SessionDetail,
 } from "../lib/types";
@@ -25,7 +26,9 @@ interface SessionControlsProps {
   preflightBlockingChecks: PreflightCheck[];
   preflightCheckedAt: string | null;
   preflightLoading: boolean;
+  preflightState: PreflightModeState;
   preflightSummary: string;
+  preflightWarningChecks: PreflightCheck[];
   screenContextEnabled: boolean;
   screenShareError: string | null;
   screenShareOwnedByCapture: boolean;
@@ -75,7 +78,9 @@ export function SessionControls({
   preflightBlockingChecks,
   preflightCheckedAt,
   preflightLoading,
+  preflightState,
   preflightSummary,
+  preflightWarningChecks,
   screenContextEnabled,
   screenShareError,
   screenShareOwnedByCapture,
@@ -97,8 +102,11 @@ export function SessionControls({
 }: SessionControlsProps) {
   const [title, setTitle] = useState("Sprint planning sync");
   const status = activeSession?.session.status ?? "idle";
+  const canStartMeeting = title.trim().length > 0 && (captureMode === "manual" || canStartSelectedMode);
   const selectedMicrophoneLabel =
     audioInputDevices.find((device) => device.deviceId === selectedMicrophoneDeviceId)?.label ?? "Default microphone";
+  const showVerificationGuidance = preflightState === "verification_required" && preflightWarningChecks.length > 0;
+  const showRecoveryActions = captureMode !== "manual" && (preflightState !== "ready" || Boolean(captureError));
 
   return (
     <article className="card">
@@ -118,7 +126,7 @@ export function SessionControls({
       {!activeSession ? (
         <div className="field-row">
           <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Session title" />
-          <button type="button" onClick={() => void onStartSession(title)} disabled={title.trim().length === 0}>
+          <button type="button" onClick={() => void onStartSession(title)} disabled={!canStartMeeting}>
             Start Meeting
           </button>
         </div>
@@ -195,11 +203,25 @@ export function SessionControls({
       <div className="preflight-summary">
         <div>
           <p className="muted-label">Selected mode readiness</p>
-          <strong>{canStartSelectedMode ? "Ready" : "Blocked"}</strong>
+          <strong>{getPreflightModeLabel(preflightState)}</strong>
           <p className="card-detail">{preflightSummary}</p>
         </div>
         {preflightCheckedAt ? <span className="section-meta">Checked {new Date(preflightCheckedAt).toLocaleTimeString()}</span> : null}
       </div>
+
+      {showVerificationGuidance ? (
+        <div className="inline-alert inline-alert-soft">
+          <strong>Verify this capture path before the meeting starts</strong>
+          <div className="check-list">
+            {preflightWarningChecks.map((check) => (
+              <div key={check.key} className="check-list-item">
+                <span>{check.title}</span>
+                <strong>{check.message}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {preflightBlockingChecks.length > 0 ? (
         <div className="inline-alert">
@@ -212,6 +234,22 @@ export function SessionControls({
               </div>
             ))}
           </div>
+        </div>
+      ) : null}
+
+      {showRecoveryActions ? (
+        <div className="toolbar-row">
+          <button type="button" className="secondary-button" disabled={preflightLoading} onClick={() => void onRefreshPreflight()}>
+            {preflightLoading ? "Checking..." : "Retry verification"}
+          </button>
+          {captureMode === "system_audio" ? (
+            <button type="button" className="secondary-button" onClick={() => onSetCaptureMode("microphone")}>
+              Switch to microphone
+            </button>
+          ) : null}
+          <button type="button" className="secondary-button" onClick={() => onSetCaptureMode("manual")}>
+            Switch to manual
+          </button>
         </div>
       ) : null}
 

@@ -20,6 +20,7 @@ import {
   pushMockGeneratedTicket,
   pushMockGeneratedTickets,
   regenerateMockSessionTickets,
+  renameMockSessionSpeaker,
   replaceMockGeneratedTickets,
   resumeMockSession,
   runMockDynamicAction,
@@ -34,11 +35,13 @@ import {
   startMockSession,
   startMockSystemAudioCapture,
   stopMockSystemAudioCapture,
+  updateMockBrowserCaptureSession,
   updateMockGeneratedTicketDraft,
 } from "./mock-backend";
 import type {
   AppendTranscriptInput,
   AskSessionInput,
+  BrowserCaptureSessionUpdateInput,
   BootstrapPayload,
   CaptureStatePayload,
   ExportedSessionPayload,
@@ -47,6 +50,7 @@ import type {
   PreflightReport,
   PromptRecord,
   PushGeneratedTicketInput,
+  RenameSessionSpeakerInput,
   RunDynamicActionInput,
   RuntimeSnapshot,
   SaveGeneratedTicketsInput,
@@ -170,6 +174,14 @@ export async function startSession(input: StartSessionInput): Promise<SessionDet
   return invoke<SessionDetail>("start_session", { input });
 }
 
+export async function updateBrowserCaptureSession(input: BrowserCaptureSessionUpdateInput): Promise<SessionDetail | null> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return updateMockBrowserCaptureSession(input);
+  }
+
+  return invoke<SessionDetail | null>("update_browser_capture_session", { input });
+}
+
 export async function startSystemAudioCapture(
   input: StartSystemAudioCaptureInput
 ): Promise<CaptureStatePayload> {
@@ -218,6 +230,14 @@ export async function appendTranscriptSegment(input: AppendTranscriptInput): Pro
   }
 
   return invoke<SessionDetail | null>("append_transcript_segment", { input });
+}
+
+export async function renameSessionSpeaker(input: RenameSessionSpeakerInput): Promise<SessionDetail | null> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return renameMockSessionSpeaker(input);
+  }
+
+  return invoke<SessionDetail | null>("rename_session_speaker", { input });
 }
 
 export async function runDynamicAction(input: RunDynamicActionInput): Promise<SessionDetail | null> {

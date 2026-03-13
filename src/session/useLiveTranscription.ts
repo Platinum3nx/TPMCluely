@@ -6,15 +6,18 @@ import {
   listSystemAudioSources,
   startSystemAudioCapture,
   stopSystemAudioCapture,
+  updateBrowserCaptureSession,
 } from "../lib/tauri";
 import type {
   AudioInputDevice,
+  BrowserCaptureSessionUpdateInput,
   CaptureHealthPayload,
   CapturePartialEventPayload,
   CaptureRuntimeState,
   CaptureSegmentEventPayload,
   CaptureStatePayload,
   CaptureMode,
+  PreflightCheck,
   ScreenContextInput,
   ScreenShareState,
   StartSystemAudioCaptureInput,
@@ -36,7 +39,9 @@ const TRANSCRIPT_STALE_WARNING_MS = 20_000;
 const MICROPHONE_RECONNECT_DELAYS_MS = [1_000, 2_500, 5_000];
 
 type CaptureSegment = {
-  speakerLabel?: string;
+  speakerId?: string | null;
+  speakerLabel?: string | null;
+  speakerConfidence?: number | null;
   text: string;
   source: "capture";
 };
@@ -46,7 +51,6 @@ interface StartCaptureOptions {
   deviceId?: string;
   language: string;
   mode: CaptureMode;
-  speakerLabel?: string;
   sessionId?: string;
   source?: SystemAudioSource | null;
 }
@@ -54,20 +58,76 @@ interface StartCaptureOptions {
 interface UseLiveTranscriptionOptions {
   onMicrophoneFinalTranscript: (segment: CaptureSegment) => Promise<void>;
   onNativeCaptureSegment: (payload: CaptureSegmentEventPayload) => void;
+  onCaptureSessionStateChanged: (sessionId: string) => Promise<void>;
   preferredMicrophoneDeviceId?: string;
 }
 
 interface DeepgramResultsMessage {
   type?: string;
+  speech_final?: boolean;
   is_final?: boolean;
+  utterances?: DeepgramUtterance[];
+  results?: {
+    utterances?: DeepgramUtterance[];
+  };
   channel?: {
     alternatives?: Array<{
       transcript?: string;
+      words?: DeepgramWord[];
+      utterances?: DeepgramUtterance[];
     }>;
   };
 }
 
+interface DeepgramWord {
+  word?: string;
+  punctuated_word?: string;
+  start?: number;
+  end?: number;
+  speaker?: number;
+  speaker_confidence?: number;
+}
+
+interface DeepgramUtterance {
+  transcript?: string;
+  start?: number;
+  end?: number;
+  speaker?: number;
+  words?: DeepgramWord[];
+}
+
 type ScriptProcessorNodeLike = ScriptProcessorNode;
+type BrowserCaptureSessionStatus = BrowserCaptureSessionUpdateInput["status"];
+
+interface BrowserCaptureFailure {
+  message: string;
+  sessionStatus: BrowserCaptureSessionStatus;
+}
+
+interface MicrophoneProbeState {
+  checkedAt: string | null;
+  deviceId: string;
+  check: PreflightCheck;
+}
+
+interface SystemAudioSourceCheckState {
+  checkedAt: string | null;
+  check: PreflightCheck;
+}
+
+const DEFAULT_MICROPHONE_PROBE_CHECK: PreflightCheck = {
+  key: "microphone_stream_probe",
+  title: "Microphone stream probe",
+  status: "warning",
+  message: "Run preflight or start listening to verify the selected microphone stream.",
+};
+
+const DEFAULT_SYSTEM_AUDIO_SOURCE_CHECK: PreflightCheck = {
+  key: "system_audio_source_list",
+  title: "Shareable system audio sources",
+  status: "warning",
+  message: "Run preflight or start listening to relist shareable system-audio sources before the meeting starts.",
+};
 
 function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -107,6 +167,8 @@ function deepgramListenEndpoint(language: string, sampleRate: number): URL {
   endpoint.searchParams.set("punctuate", "true");
   endpoint.searchParams.set("smart_format", "true");
   endpoint.searchParams.set("interim_results", "true");
+  endpoint.searchParams.set("diarize", "true");
+  endpoint.searchParams.set("utterances", "true");
   endpoint.searchParams.set("model", "nova-3");
   const mappedLanguage = mapAudioLanguage(language);
   if (mappedLanguage) {
@@ -119,6 +181,189 @@ function normalizeTranscript(text: string): string {
   return text.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+function captureSegmentFingerprint(segment: CaptureSegment): string {
+  return `${segment.speakerId ?? ""}:${normalizeTranscript(segment.text)}`;
+}
+
+function toSpeakerId(index: number | null | undefined): string | null {
+  return typeof index === "number" && Number.isFinite(index) ? `dg:${index}` : null;
+}
+
+function toSpeakerLabel(index: number | null | undefined): string | null {
+  return typeof index === "number" && Number.isFinite(index) ? `Speaker ${index + 1}` : null;
+}
+
+function wordToken(word: DeepgramWord): string {
+  return (word.punctuated_word ?? word.word ?? "").trim();
+}
+
+function joinWordTokens(words: DeepgramWord[] | undefined): string {
+  return (words ?? [])
+    .map(wordToken)
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+}
+
+function averageSpeakerConfidence(words: DeepgramWord[] | undefined): number | null {
+  const values = (words ?? [])
+    .map((word) => word.speaker_confidence)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  if (values.length === 0) {
+    return null;
+  }
+
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function mergeCaptureSegments(buffer: CaptureSegment[], incoming: CaptureSegment[]): CaptureSegment[] {
+  const merged = [...buffer];
+  for (const segment of incoming) {
+    const text = segment.text.trim();
+    if (!text) {
+      continue;
+    }
+
+    const previous = merged.at(-1);
+    if (
+      previous &&
+      (previous.speakerId ?? null) === (segment.speakerId ?? null) &&
+      (previous.speakerLabel ?? null) === (segment.speakerLabel ?? null)
+    ) {
+      previous.text = `${previous.text} ${text}`.replace(/\s+/g, " ").trim();
+      previous.speakerConfidence =
+        previous.speakerConfidence == null
+          ? segment.speakerConfidence ?? null
+          : segment.speakerConfidence == null
+            ? previous.speakerConfidence
+            : Math.min(previous.speakerConfidence, segment.speakerConfidence);
+      continue;
+    }
+
+    merged.push({
+      ...segment,
+      text,
+      speakerId: segment.speakerId ?? null,
+      speakerLabel: segment.speakerLabel ?? null,
+      speakerConfidence: segment.speakerConfidence ?? null,
+    });
+  }
+
+  return merged;
+}
+
+function groupWordsBySpeaker(words: DeepgramWord[] | undefined): CaptureSegment[] {
+  const grouped: CaptureSegment[] = [];
+  for (const word of words ?? []) {
+    const token = wordToken(word);
+    if (!token) {
+      continue;
+    }
+
+    const speakerId = toSpeakerId(word.speaker);
+    const speakerLabel = toSpeakerLabel(word.speaker);
+    const previous = grouped.at(-1);
+    if (
+      previous &&
+      (previous.speakerId ?? null) === speakerId &&
+      (previous.speakerLabel ?? null) === speakerLabel
+    ) {
+      previous.text = `${previous.text} ${token}`.replace(/\s+/g, " ").trim();
+      previous.speakerConfidence =
+        previous.speakerConfidence == null
+          ? word.speaker_confidence ?? null
+          : word.speaker_confidence == null
+            ? previous.speakerConfidence
+            : Math.min(previous.speakerConfidence, word.speaker_confidence);
+      continue;
+    }
+
+    grouped.push({
+      speakerId,
+      speakerLabel,
+      speakerConfidence: word.speaker_confidence ?? null,
+      text: token,
+      source: "capture",
+    });
+  }
+
+  return grouped;
+}
+
+function normalizeDeepgramUtterance(utterance: DeepgramUtterance): CaptureSegment[] {
+  if (typeof utterance.speaker === "number") {
+    const text = utterance.transcript?.trim() || joinWordTokens(utterance.words);
+    if (!text) {
+      return [];
+    }
+
+    return [
+      {
+        speakerId: toSpeakerId(utterance.speaker),
+        speakerLabel: toSpeakerLabel(utterance.speaker),
+        speakerConfidence: averageSpeakerConfidence(utterance.words),
+        text,
+        source: "capture",
+      },
+    ];
+  }
+
+  if ((utterance.words ?? []).some((word) => typeof word.speaker === "number")) {
+    return groupWordsBySpeaker(utterance.words);
+  }
+
+  const text = utterance.transcript?.trim() || joinWordTokens(utterance.words);
+  if (!text) {
+    return [];
+  }
+
+  return [
+    {
+      speakerId: null,
+      speakerLabel: null,
+      speakerConfidence: null,
+      text,
+      source: "capture",
+    },
+  ];
+}
+
+export function normalizeDeepgramFinalSegments(payload: DeepgramResultsMessage): CaptureSegment[] {
+  const alternative = payload.channel?.alternatives?.[0];
+  const transcript = alternative?.transcript?.trim() ?? "";
+  const utterances =
+    payload.utterances ??
+    payload.results?.utterances ??
+    alternative?.utterances ??
+    [];
+
+  if (utterances.length > 0) {
+    return utterances.reduce<CaptureSegment[]>(
+      (segments, utterance) => mergeCaptureSegments(segments, normalizeDeepgramUtterance(utterance)),
+      []
+    );
+  }
+
+  if ((alternative?.words?.length ?? 0) > 0) {
+    return groupWordsBySpeaker(alternative?.words);
+  }
+
+  if (!transcript) {
+    return [];
+  }
+
+  return [
+    {
+      speakerId: null,
+      speakerLabel: null,
+      speakerConfidence: null,
+      text: transcript,
+      source: "capture",
+    },
+  ];
+}
+
 function describeMicrophoneDevices(devices: MediaDeviceInfo[]): AudioInputDevice[] {
   const microphoneDevices = devices.filter((device) => device.kind === "audioinput");
   return microphoneDevices.map((device, index) => {
@@ -129,6 +374,90 @@ function describeMicrophoneDevices(devices: MediaDeviceInfo[]): AudioInputDevice
       isDefault: device.deviceId === "default" || /default/i.test(device.label ?? ""),
     };
   });
+}
+
+function microphoneDeviceCheck(
+  devices: AudioInputDevice[],
+  preferredDeviceId: string,
+  selectedDeviceId: string
+): PreflightCheck {
+  if (preferredDeviceId && !devices.some((device) => device.deviceId === preferredDeviceId)) {
+    return {
+      key: "microphone_device_available",
+      title: "Selected microphone",
+      status: "blocked",
+      message: "The saved preferred microphone is unavailable on this machine. Choose another input before the meeting starts.",
+      detail: preferredDeviceId,
+    };
+  }
+
+  if (selectedDeviceId && devices.some((device) => device.deviceId === selectedDeviceId)) {
+    const selected = devices.find((device) => device.deviceId === selectedDeviceId);
+    return {
+      key: "microphone_device_available",
+      title: "Selected microphone",
+      status: "ready",
+      message: `${selected?.label ?? "The selected microphone"} is available on this machine.`,
+      detail: selectedDeviceId,
+    };
+  }
+
+  if (devices.length === 0) {
+    return {
+      key: "microphone_device_available",
+      title: "Selected microphone",
+      status: "warning",
+      message: "No microphone inputs are visible yet. TPMCluely can verify the default input during interactive preflight.",
+    };
+  }
+
+  return {
+    key: "microphone_device_available",
+    title: "Selected microphone",
+    status: "warning",
+    message: "Select a microphone to let TPMCluely verify it before the meeting starts.",
+  };
+}
+
+function mapMicrophoneFailure(error: unknown, requestedDeviceId: string): BrowserCaptureFailure {
+  if (error instanceof DOMException) {
+    if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError" || error.name === "SecurityError") {
+      return {
+        message:
+          "Microphone permission was denied. Open System Settings -> Privacy & Security -> Microphone and enable TPMCluely before retrying.",
+        sessionStatus: "permission_blocked",
+      };
+    }
+
+    if (
+      error.name === "NotFoundError" ||
+      error.name === "OverconstrainedError" ||
+      error.name === "DevicesNotFoundError"
+    ) {
+      return {
+        message: requestedDeviceId
+          ? "The selected microphone is unavailable on this machine. Choose another input before the meeting starts."
+          : "No working microphone input is available right now. Choose another input or switch TPMCluely to manual mode.",
+        sessionStatus: "capture_error",
+      };
+    }
+
+    if (error.name === "NotReadableError" || error.name === "AbortError" || error.name === "InvalidStateError") {
+      return {
+        message:
+          "The selected microphone could not be opened cleanly. Close apps that may be holding the device, choose another input, or switch to manual mode.",
+        sessionStatus: "capture_error",
+      };
+    }
+  }
+
+  return {
+    message:
+      error instanceof Error
+        ? error.message
+        : "Live transcription could not start with the current microphone setup.",
+    sessionStatus: "capture_error",
+  };
 }
 
 function summarizeTranscriptFreshness(captureState: CaptureRuntimeState, freshnessMs: number | null): string {
@@ -148,6 +477,45 @@ function summarizeTranscriptFreshness(captureState: CaptureRuntimeState, freshne
     return `${Math.round(freshnessMs / 1_000)}s since last finalized line`;
   }
   return `Stale (${Math.round(freshnessMs / 1_000)}s)`;
+}
+
+function buildSystemAudioSourceCheck(payload: SystemAudioSourceListPayload, interactive: boolean): PreflightCheck {
+  if (payload.permissionStatus !== "granted") {
+    return {
+      key: "system_audio_source_list",
+      title: "Shareable system audio sources",
+      status: "blocked",
+      message:
+        payload.message ??
+        "Screen Recording permission is required before TPMCluely can verify shareable system-audio sources.",
+    };
+  }
+
+  if (!interactive) {
+    return {
+      key: "system_audio_source_list",
+      title: "Shareable system audio sources",
+      status: "warning",
+      message: "Run preflight or start listening to relist shareable system-audio sources before the meeting starts.",
+    };
+  }
+
+  if (payload.sources.length === 0) {
+    return {
+      key: "system_audio_source_list",
+      title: "Shareable system audio sources",
+      status: "blocked",
+      message: "No shareable system-audio sources are available right now. Join the meeting, then retry or switch TPMCluely to microphone/manual mode.",
+    };
+  }
+
+  return {
+    key: "system_audio_source_list",
+    title: "Shareable system audio sources",
+    status: "ready",
+    message: "Shareable system-audio sources are available. Choose one when TPMCluely starts listening.",
+    detail: String(payload.sources.length),
+  };
 }
 
 function stopMediaStream(stream: MediaStream | null) {
@@ -268,6 +636,7 @@ export function resolvePendingMicrophoneTranscript(interimTranscript: string, la
 export function useLiveTranscription({
   onMicrophoneFinalTranscript,
   onNativeCaptureSegment,
+  onCaptureSessionStateChanged,
   preferredMicrophoneDeviceId = "",
 }: UseLiveTranscriptionOptions) {
   const [audioInputDevices, setAudioInputDevices] = useState<AudioInputDevice[]>([]);
@@ -279,6 +648,15 @@ export function useLiveTranscription({
   const [microphoneSelectionWarning, setMicrophoneSelectionWarning] = useState<string | null>(null);
   const [partialTranscript, setPartialTranscript] = useState("");
   const [selectedMicrophoneDeviceId, setSelectedMicrophoneDeviceIdState] = useState("");
+  const [microphoneProbeState, setMicrophoneProbeState] = useState<MicrophoneProbeState>({
+    checkedAt: null,
+    deviceId: "",
+    check: DEFAULT_MICROPHONE_PROBE_CHECK,
+  });
+  const [systemAudioSourceCheckState, setSystemAudioSourceCheckState] = useState<SystemAudioSourceCheckState>({
+    checkedAt: null,
+    check: DEFAULT_SYSTEM_AUDIO_SOURCE_CHECK,
+  });
   const [screenShareState, setScreenShareState] = useState<ScreenShareState>("inactive");
   const [screenShareError, setScreenShareError] = useState<string | null>(null);
   const [screenShareOwnedByCapture] = useState(false);
@@ -294,9 +672,9 @@ export function useLiveTranscription({
   const websocketRef = useRef<WebSocket | null>(null);
   const keepAliveRef = useRef<number | null>(null);
   const captureStateRef = useRef<CaptureRuntimeState>("idle");
-  const lastFinalTranscriptRef = useRef("");
   const pendingInterimTranscriptRef = useRef("");
-  const microphoneSpeakerLabelRef = useRef("Meeting");
+  const pendingFinalSegmentsRef = useRef<CaptureSegment[]>([]);
+  const lastFinalSegmentFingerprintRef = useRef("");
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
   const screenContextCacheRef = useRef<ScreenContextInput | null>(null);
@@ -306,6 +684,15 @@ export function useLiveTranscription({
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const selectedMicrophoneDeviceIdRef = useRef("");
+  const microphoneProbeStateRef = useRef<MicrophoneProbeState>({
+    checkedAt: null,
+    deviceId: "",
+    check: DEFAULT_MICROPHONE_PROBE_CHECK,
+  });
+  const systemAudioSourceCheckStateRef = useRef<SystemAudioSourceCheckState>({
+    checkedAt: null,
+    check: DEFAULT_SYSTEM_AUDIO_SOURCE_CHECK,
+  });
 
   const clearReconnectTimer = useEffectEvent(() => {
     if (reconnectTimerRef.current !== null) {
@@ -317,7 +704,41 @@ export function useLiveTranscription({
   const updateSelectedMicrophoneDevice = useEffectEvent((deviceId: string) => {
     selectedMicrophoneDeviceIdRef.current = deviceId;
     setSelectedMicrophoneDeviceIdState(deviceId);
+    const warningCheck: PreflightCheck = {
+      ...DEFAULT_MICROPHONE_PROBE_CHECK,
+      message: deviceId
+        ? "Run preflight or start listening to verify the newly selected microphone stream."
+        : DEFAULT_MICROPHONE_PROBE_CHECK.message,
+    };
+    const nextProbeState: MicrophoneProbeState = {
+      checkedAt: null,
+      deviceId,
+      check: warningCheck,
+    };
+    microphoneProbeStateRef.current = nextProbeState;
+    setMicrophoneProbeState(nextProbeState);
   });
+
+  const persistBrowserSessionStatus = useEffectEvent(
+    async (
+      sessionId: string | undefined,
+      status: BrowserCaptureSessionStatus,
+      overrides: Partial<Pick<BrowserCaptureSessionUpdateInput, "captureMode" | "captureTargetKind" | "captureTargetLabel">> = {}
+    ) => {
+      if (!sessionId) {
+        return;
+      }
+
+      await updateBrowserCaptureSession({
+        sessionId,
+        status,
+        captureMode: overrides.captureMode,
+        captureTargetKind: overrides.captureTargetKind,
+        captureTargetLabel: overrides.captureTargetLabel,
+      }).catch(() => undefined);
+      await onCaptureSessionStateChanged(sessionId).catch(() => undefined);
+    }
+  );
 
   const recordFinalizedTranscript = useEffectEvent(() => {
     const now = Date.now();
@@ -332,10 +753,10 @@ export function useLiveTranscription({
     }
   });
 
-  const refreshAudioInputDevices = useEffectEvent(async () => {
+  const refreshAudioInputDevices = useEffectEvent(async (): Promise<AudioInputDevice[]> => {
     if (!navigator.mediaDevices?.enumerateDevices) {
       setAudioInputDevices([]);
-      return;
+      return [];
     }
 
     try {
@@ -368,10 +789,116 @@ export function useLiveTranscription({
       } else {
         setMicrophoneSelectionWarning(null);
       }
+      return devices;
     } catch {
       setAudioInputDevices([]);
+      return [];
     }
   });
+
+  const probeSelectedMicrophone = useEffectEvent(async (deviceId: string): Promise<PreflightCheck> => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      return {
+        key: "microphone_stream_probe",
+        title: "Microphone stream probe",
+        status: "blocked",
+        message: "Audio capture is unavailable in this runtime, so TPMCluely cannot verify microphone startup.",
+      };
+    }
+
+    const audioConstraints: MediaTrackConstraints = {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+    if (deviceId) {
+      audioConstraints.deviceId = { exact: deviceId };
+    }
+
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      const check: PreflightCheck = {
+        key: "microphone_stream_probe",
+        title: "Microphone stream probe",
+        status: "ready",
+        message: "The selected microphone opened successfully and can stream audio.",
+        detail: deviceId || null,
+      };
+      const nextProbeState: MicrophoneProbeState = {
+        checkedAt: new Date().toISOString(),
+        deviceId,
+        check,
+      };
+      microphoneProbeStateRef.current = nextProbeState;
+      setMicrophoneProbeState(nextProbeState);
+      return check;
+    } catch (error) {
+      const failure = mapMicrophoneFailure(error, deviceId);
+      const check: PreflightCheck = {
+        key: "microphone_stream_probe",
+        title: "Microphone stream probe",
+        status: "blocked",
+        message: failure.message,
+        detail: deviceId || null,
+      };
+      const nextProbeState: MicrophoneProbeState = {
+        checkedAt: new Date().toISOString(),
+        deviceId,
+        check,
+      };
+      microphoneProbeStateRef.current = nextProbeState;
+      setMicrophoneProbeState(nextProbeState);
+      return check;
+    } finally {
+      stopMediaStream(stream);
+    }
+  });
+
+  const collectMicrophonePreflightChecks = useEffectEvent(
+    async (interactive = false): Promise<PreflightCheck[]> => {
+      const devices = await refreshAudioInputDevices();
+      const preferredDeviceId = preferredMicrophoneDeviceId.trim();
+      const selectedDeviceId =
+        selectedMicrophoneDeviceIdRef.current.trim() ||
+        devices.find((device) => device.deviceId === preferredDeviceId)?.deviceId ||
+        devices.find((device) => device.isDefault)?.deviceId ||
+        devices[0]?.deviceId ||
+        "";
+      const deviceCheck = microphoneDeviceCheck(devices, preferredDeviceId, selectedDeviceId);
+
+      if (!interactive) {
+        const cachedProbe =
+          microphoneProbeStateRef.current.deviceId === selectedDeviceId
+            ? microphoneProbeStateRef.current.check
+            : DEFAULT_MICROPHONE_PROBE_CHECK;
+        return [deviceCheck, cachedProbe];
+      }
+
+      const probeCheck =
+        deviceCheck.status === "blocked" ? DEFAULT_MICROPHONE_PROBE_CHECK : await probeSelectedMicrophone(selectedDeviceId);
+      return [deviceCheck, probeCheck];
+    }
+  );
+
+  const collectSystemAudioPreflightCheck = useEffectEvent(
+    async (interactive = false): Promise<PreflightCheck> => {
+      if (!interactive) {
+        return systemAudioSourceCheckStateRef.current.check;
+      }
+
+      const payload = await listAvailableSystemAudioSources({ suppressCaptureError: false });
+      const nextCheck = buildSystemAudioSourceCheck(payload, true);
+      const nextState: SystemAudioSourceCheckState = {
+        checkedAt: new Date().toISOString(),
+        check: nextCheck,
+      };
+      systemAudioSourceCheckStateRef.current = nextState;
+      setSystemAudioSourceCheckState(nextState);
+      return nextCheck;
+    }
+  );
 
   const applyNativeCaptureState = useEffectEvent((payload: CaptureStatePayload) => {
     const nextState = normalizeCaptureState(payload.runtimeState);
@@ -411,6 +938,16 @@ export function useLiveTranscription({
     }
 
     const handleDeviceChange = () => {
+      const nextProbeState: MicrophoneProbeState = {
+        checkedAt: null,
+        deviceId: selectedMicrophoneDeviceIdRef.current.trim(),
+        check: {
+          ...DEFAULT_MICROPHONE_PROBE_CHECK,
+          message: "Microphone devices changed. Run preflight again before TPMCluely starts listening.",
+        },
+      };
+      microphoneProbeStateRef.current = nextProbeState;
+      setMicrophoneProbeState(nextProbeState);
       void refreshAudioInputDevices();
     };
 
@@ -420,13 +957,9 @@ export function useLiveTranscription({
     };
   }, [refreshAudioInputDevices]);
 
-  const handleMicrophoneFinalTranscript = useEffectEvent(async (text: string, speakerLabel: string) => {
+  const handleMicrophoneFinalTranscript = useEffectEvent(async (segment: CaptureSegment) => {
     recordFinalizedTranscript();
-    await onMicrophoneFinalTranscript({
-      text,
-      speakerLabel,
-      source: "capture",
-    });
+    await onMicrophoneFinalTranscript(segment);
   });
 
   const resetScreenContextCache = useEffectEvent(() => {
@@ -499,22 +1032,20 @@ export function useLiveTranscription({
     setScreenShareError(null);
   });
 
-  const flushPendingBrowserTranscript = useEffectEvent(async () => {
-    const speakerLabel = microphoneSpeakerLabelRef.current;
-    const finalTranscript = resolvePendingMicrophoneTranscript(
-      pendingInterimTranscriptRef.current,
-      lastFinalTranscriptRef.current
-    );
-
+  const flushPendingBrowserSegments = useEffectEvent(async () => {
+    const segments = pendingFinalSegmentsRef.current;
+    pendingFinalSegmentsRef.current = [];
     pendingInterimTranscriptRef.current = "";
     setPartialTranscript("");
 
-    if (!finalTranscript) {
-      return;
+    for (const segment of segments) {
+      const fingerprint = captureSegmentFingerprint(segment);
+      if (!segment.text.trim() || fingerprint === lastFinalSegmentFingerprintRef.current) {
+        continue;
+      }
+      lastFinalSegmentFingerprintRef.current = fingerprint;
+      await handleMicrophoneFinalTranscript(segment);
     }
-
-    lastFinalTranscriptRef.current = finalTranscript;
-    await handleMicrophoneFinalTranscript(finalTranscript, speakerLabel);
   });
 
   const stopBrowserMicrophoneCapture = useEffectEvent(async () => {
@@ -524,7 +1055,7 @@ export function useLiveTranscription({
     }
 
     clearReconnectTimer();
-    await flushPendingBrowserTranscript();
+    await flushPendingBrowserSegments();
 
     if (keepAliveRef.current !== null) {
       window.clearInterval(keepAliveRef.current);
@@ -556,10 +1087,11 @@ export function useLiveTranscription({
     setCaptureHealth(null);
     setCaptureSourceLabel(null);
     setLastTranscriptFinalizedAt(null);
-    lastFinalTranscriptRef.current = "";
     lastTranscriptFinalizedAtRef.current = null;
     listeningStartedAtRef.current = null;
     pendingInterimTranscriptRef.current = "";
+    pendingFinalSegmentsRef.current = [];
+    lastFinalSegmentFingerprintRef.current = "";
     browserCaptureOptionsRef.current = null;
     reconnectAttemptRef.current = 0;
   });
@@ -591,6 +1123,9 @@ export function useLiveTranscription({
       reconnectAttempt: nextAttempt,
       message: "Live transcription dropped. TPMCluely is reconnecting the microphone stream.",
     });
+    void persistBrowserSessionStatus(options.sessionId, "provider_degraded", {
+      captureMode: "microphone",
+    });
 
     reconnectTimerRef.current = window.setTimeout(() => {
       const reconnectOptions = browserCaptureOptionsRef.current;
@@ -604,11 +1139,14 @@ export function useLiveTranscription({
   });
 
   const startBrowserMicrophoneCapture = useEffectEvent(
-    async ({ apiKey, deviceId, language, speakerLabel = "Meeting", sessionId }: StartCaptureOptions) => {
+    async ({ apiKey, deviceId, language, sessionId }: StartCaptureOptions) => {
       if (!navigator.mediaDevices?.getUserMedia) {
         setCaptureError("Audio capture is not available in this runtime.");
         setCaptureState("unsupported");
         captureStateRef.current = "unsupported";
+        void persistBrowserSessionStatus(sessionId, "capture_error", {
+          captureMode: "microphone",
+        });
         return;
       }
 
@@ -620,6 +1158,9 @@ export function useLiveTranscription({
         setCaptureError("AudioContext is unavailable, so live transcription cannot start.");
         setCaptureState("unsupported");
         captureStateRef.current = "unsupported";
+        void persistBrowserSessionStatus(sessionId, "capture_error", {
+          captureMode: "microphone",
+        });
         return;
       }
 
@@ -635,11 +1176,10 @@ export function useLiveTranscription({
           language,
           mode: "microphone",
           sessionId,
-          speakerLabel,
         };
-        microphoneSpeakerLabelRef.current = speakerLabel;
-        lastFinalTranscriptRef.current = "";
         pendingInterimTranscriptRef.current = "";
+        pendingFinalSegmentsRef.current = [];
+        lastFinalSegmentFingerprintRef.current = "";
         lastTranscriptFinalizedAtRef.current = null;
         setLastTranscriptFinalizedAt(null);
         setCaptureError(null);
@@ -691,6 +1231,9 @@ export function useLiveTranscription({
             setCaptureError("The microphone stream ended unexpectedly. Start listening again.");
             setCaptureState("error");
             captureStateRef.current = "error";
+            void persistBrowserSessionStatus(sessionId, "capture_error", {
+              captureMode: "microphone",
+            });
           }
         };
 
@@ -706,25 +1249,30 @@ export function useLiveTranscription({
             return;
           }
 
+          if (payload.type === "UtteranceEnd") {
+            void flushPendingBrowserSegments();
+            return;
+          }
+
           if (payload.type !== "Results") {
             return;
           }
 
           const transcript = payload.channel?.alternatives?.[0]?.transcript?.trim() ?? "";
-          if (!transcript) {
-            if (payload.is_final) {
-              pendingInterimTranscriptRef.current = "";
-              setPartialTranscript("");
-            }
-            return;
-          }
 
           if (payload.is_final) {
+            const finalizedSegments = normalizeDeepgramFinalSegments(payload);
+            if (finalizedSegments.length > 0) {
+              pendingFinalSegmentsRef.current = mergeCaptureSegments(
+                pendingFinalSegmentsRef.current,
+                finalizedSegments
+              );
+            }
             pendingInterimTranscriptRef.current = "";
             setPartialTranscript("");
-            if (normalizeTranscript(transcript) !== normalizeTranscript(lastFinalTranscriptRef.current)) {
-              lastFinalTranscriptRef.current = transcript;
-              void handleMicrophoneFinalTranscript(transcript, speakerLabel);
+
+            if (payload.speech_final || (!transcript && finalizedSegments.length === 0)) {
+              void flushPendingBrowserSegments();
             }
             return;
           }
@@ -740,6 +1288,7 @@ export function useLiveTranscription({
         };
 
         websocket.onclose = () => {
+          void flushPendingBrowserSegments();
           websocketRef.current = null;
           if (keepAliveRef.current !== null) {
             window.clearInterval(keepAliveRef.current);
@@ -766,6 +1315,9 @@ export function useLiveTranscription({
               setCaptureError("Live transcription disconnected. You can start it again.");
               setCaptureState("error");
               captureStateRef.current = "error";
+              void persistBrowserSessionStatus(sessionId, "capture_error", {
+                captureMode: "microphone",
+              });
             }
           }
         };
@@ -805,17 +1357,22 @@ export function useLiveTranscription({
           setCaptureError(null);
           setCaptureHealth(null);
           setCaptureSourceLabel(audioTrack.label?.trim() || "Microphone");
+          void persistBrowserSessionStatus(sessionId, "active", {
+            captureMode: "microphone",
+          });
         };
       } catch (error) {
         const reconnectOptions = browserCaptureOptionsRef.current;
         await stopBrowserMicrophoneCapture();
         browserCaptureOptionsRef.current = reconnectOptions;
-        const message =
-          error instanceof Error ? error.message : "Live transcription could not start with the current microphone setup.";
-        if (!scheduleBrowserReconnect(message)) {
-          setCaptureError(message);
+        const failure = mapMicrophoneFailure(error, deviceId?.trim() || selectedMicrophoneDeviceIdRef.current.trim());
+        if (!scheduleBrowserReconnect(failure.message)) {
+          setCaptureError(failure.message);
           setCaptureState("error");
           captureStateRef.current = "error";
+          await persistBrowserSessionStatus(sessionId, failure.sessionStatus, {
+            captureMode: "microphone",
+          });
         }
       }
     }
@@ -848,18 +1405,20 @@ export function useLiveTranscription({
     activeModeRef.current = "manual";
   });
 
-  const listAvailableSystemAudioSources = useEffectEvent(async (): Promise<SystemAudioSourceListPayload> => {
+  const listAvailableSystemAudioSources = useEffectEvent(
+    async ({ suppressCaptureError = false }: { suppressCaptureError?: boolean } = {}): Promise<SystemAudioSourceListPayload> => {
     const payload = await listSystemAudioSources();
-    if (payload.permissionStatus !== "granted") {
+    if (!suppressCaptureError && payload.permissionStatus !== "granted") {
       setCaptureError(
         payload.message ??
           "Screen Recording permission is required before TPMCluely can capture system audio."
       );
-    } else {
+    } else if (!suppressCaptureError) {
       setCaptureError(null);
     }
     return payload;
-  });
+    }
+  );
 
   const startCapture = useEffectEvent(async (options: StartCaptureOptions) => {
     if (options.mode === "manual") {
@@ -1020,6 +1579,9 @@ export function useLiveTranscription({
       listen<CaptureStatePayload>("capture:state", (event) => {
         if (!disposed) {
           applyNativeCaptureState(event.payload);
+          if (event.payload.sessionId) {
+            void onCaptureSessionStateChanged(event.payload.sessionId);
+          }
         }
       }),
       listen<CapturePartialEventPayload>("capture:partial", (event) => {
@@ -1052,6 +1614,9 @@ export function useLiveTranscription({
       .then((payload) => {
         if (!disposed) {
           applyNativeCaptureState(payload);
+          if (payload.sessionId) {
+            void onCaptureSessionStateChanged(payload.sessionId);
+          }
         }
       })
       .catch(() => undefined);
@@ -1062,7 +1627,7 @@ export function useLiveTranscription({
         unlistenFn();
       }
     };
-  }, [applyNativeCaptureState, onNativeCaptureSegment, recordFinalizedTranscript]);
+  }, [applyNativeCaptureState, onCaptureSessionStateChanged, onNativeCaptureSegment, recordFinalizedTranscript]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1108,15 +1673,31 @@ export function useLiveTranscription({
     };
   }, [stopCapture, stopScreenShare]);
 
+  const currentSelectedMicrophoneDeviceId =
+    selectedMicrophoneDeviceIdRef.current.trim() ||
+    audioInputDevices.find((device) => device.deviceId === preferredMicrophoneDeviceId.trim())?.deviceId ||
+    audioInputDevices.find((device) => device.isDefault)?.deviceId ||
+    audioInputDevices[0]?.deviceId ||
+    "";
+  const microphonePreflightChecks = [
+    microphoneDeviceCheck(audioInputDevices, preferredMicrophoneDeviceId.trim(), currentSelectedMicrophoneDeviceId),
+    microphoneProbeState.check,
+  ];
+  const systemAudioPreflightCheck = systemAudioSourceCheckState.check;
+
   return {
     audioInputDevices,
     captureError,
     captureHealth,
     captureSourceLabel,
     captureState,
+    collectMicrophonePreflightChecks,
+    collectSystemAudioPreflightCheck,
     lastTranscriptFinalizedAt,
     isCapturing: ["starting", "connecting", "listening", "degraded", "stopping"].includes(captureState),
     listAvailableSystemAudioSources,
+    microphoneProbeCheck: microphoneProbeState.check,
+    microphonePreflightChecks,
     microphoneSelectionWarning,
     partialTranscript,
     refreshAudioInputDevices,
@@ -1129,6 +1710,7 @@ export function useLiveTranscription({
     startScreenShare,
     stopCapture,
     stopScreenShare,
+    systemAudioPreflightCheck,
     captureScreenContext,
     transcriptFreshnessLabel: summarizeTranscriptFreshness(
       captureState,
