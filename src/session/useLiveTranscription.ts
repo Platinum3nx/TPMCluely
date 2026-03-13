@@ -198,6 +198,15 @@ function normalizeCaptureState(state: CaptureRuntimeState): CaptureRuntimeState 
   return state;
 }
 
+export function resolvePendingMicrophoneTranscript(interimTranscript: string, lastFinalTranscript: string): string | null {
+  const normalizedInterim = interimTranscript.trim();
+  if (!normalizedInterim || normalizedInterim === lastFinalTranscript.trim()) {
+    return null;
+  }
+
+  return normalizedInterim;
+}
+
 export function useLiveTranscription({
   onMicrophoneFinalTranscript,
   onNativeCaptureSegment,
@@ -223,6 +232,8 @@ export function useLiveTranscription({
   const keepAliveRef = useRef<number | null>(null);
   const captureStateRef = useRef<CaptureRuntimeState>("idle");
   const lastFinalTranscriptRef = useRef("");
+  const pendingInterimTranscriptRef = useRef("");
+  const microphoneSpeakerLabelRef = useRef("Meeting");
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
   const screenContextCacheRef = useRef<ScreenContextInput | null>(null);
@@ -330,13 +341,31 @@ export function useLiveTranscription({
     setScreenShareError(null);
   });
 
+  const flushPendingBrowserTranscript = useEffectEvent(async () => {
+    const speakerLabel = microphoneSpeakerLabelRef.current;
+    const finalTranscript = resolvePendingMicrophoneTranscript(
+      pendingInterimTranscriptRef.current,
+      lastFinalTranscriptRef.current
+    );
+
+    pendingInterimTranscriptRef.current = "";
+    setPartialTranscript("");
+
+    if (!finalTranscript) {
+      return;
+    }
+
+    lastFinalTranscriptRef.current = finalTranscript;
+    await handleMicrophoneFinalTranscript(finalTranscript, speakerLabel);
+  });
+
   const stopBrowserMicrophoneCapture = useEffectEvent(async () => {
     if (captureStateRef.current !== "idle") {
       captureStateRef.current = "stopping";
       setCaptureState("stopping");
     }
-    setPartialTranscript("");
-    lastFinalTranscriptRef.current = "";
+
+    await flushPendingBrowserTranscript();
 
     if (keepAliveRef.current !== null) {
       window.clearInterval(keepAliveRef.current);
@@ -366,6 +395,8 @@ export function useLiveTranscription({
     setCaptureState("idle");
     setCaptureError(null);
     setCaptureSourceLabel(null);
+    lastFinalTranscriptRef.current = "";
+    pendingInterimTranscriptRef.current = "";
   });
 
   const startBrowserMicrophoneCapture = useEffectEvent(
@@ -393,6 +424,9 @@ export function useLiveTranscription({
       }
 
       try {
+        microphoneSpeakerLabelRef.current = speakerLabel;
+        lastFinalTranscriptRef.current = "";
+        pendingInterimTranscriptRef.current = "";
         setCaptureError(null);
         setCaptureState("connecting");
         captureStateRef.current = "connecting";
@@ -453,12 +487,14 @@ export function useLiveTranscription({
           const transcript = payload.channel?.alternatives?.[0]?.transcript?.trim() ?? "";
           if (!transcript) {
             if (payload.is_final) {
+              pendingInterimTranscriptRef.current = "";
               setPartialTranscript("");
             }
             return;
           }
 
           if (payload.is_final) {
+            pendingInterimTranscriptRef.current = "";
             setPartialTranscript("");
             if (transcript !== lastFinalTranscriptRef.current) {
               lastFinalTranscriptRef.current = transcript;
@@ -467,6 +503,7 @@ export function useLiveTranscription({
             return;
           }
 
+          pendingInterimTranscriptRef.current = transcript;
           setPartialTranscript(transcript);
         };
 

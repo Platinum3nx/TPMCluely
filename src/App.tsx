@@ -9,8 +9,11 @@ import {
   exportSessionMarkdown,
   getSecretValue,
   getSessionDetail,
+  generateSessionTickets,
   listSessions,
   pauseSession,
+  pushGeneratedTicket,
+  pushGeneratedTickets,
   resumeSession,
   runDynamicAction,
   saveKnowledgeFile,
@@ -696,6 +699,21 @@ export default function App() {
     setSelectedSessionDetail(await getSessionDetail(sessionId));
   }
 
+  async function handleGenerateTickets(sessionId: string) {
+    const detail = await generateSessionTickets(sessionId);
+    applySessionDetail(detail);
+  }
+
+  async function handlePushGeneratedTicket(sessionId: string, idempotencyKey: string) {
+    const detail = await pushGeneratedTicket({ sessionId, idempotencyKey });
+    applySessionDetail(detail);
+  }
+
+  async function handlePushGeneratedTickets(sessionId: string) {
+    const detail = await pushGeneratedTickets(sessionId);
+    applySessionDetail(detail);
+  }
+
   async function handleStartLiveCapture() {
     if (!activeSessionRef.current) {
       return;
@@ -1031,6 +1049,9 @@ export default function App() {
               onSearchSessions={handleSearchSessions}
               onSelectSession={handleSelectSession}
               onExportSession={handleExportSession}
+              onGenerateTickets={handleGenerateTickets}
+              onPushGeneratedTicket={handlePushGeneratedTicket}
+              onPushGeneratedTickets={handlePushGeneratedTickets}
               allowTicketPreview={bootstrap.diagnostics.mode === "browser-mock"}
             />
           ) : null}

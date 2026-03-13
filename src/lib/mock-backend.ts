@@ -13,6 +13,7 @@ import type {
   MessageAttachment,
   PermissionSnapshot,
   PromptRecord,
+  PushGeneratedTicketInput,
   RunDynamicActionInput,
   RuntimeSnapshot,
   SaveKnowledgeFileInput,
@@ -32,6 +33,7 @@ import type {
   TranscriptSegment,
 } from "./types";
 import { buildSessionMarkdown } from "./export";
+import { generateTicketsFromSession } from "./ticket-engine";
 
 const SETTINGS_KEY = "cluely.desktop.settings";
 const SECRETS_KEY = "cluely.desktop.secrets";
@@ -88,6 +90,10 @@ interface DerivedSessionArtifacts {
 interface RuntimeState {
   session: RuntimeSnapshot["session"];
   window: RuntimeSnapshot["window"];
+}
+
+function getSettingValue(key: string, fallback: string): string {
+  return readSettings().find((setting) => setting.key === key)?.value ?? fallback;
 }
 
 function nowIso(): string {
@@ -159,6 +165,9 @@ function readSessions(): SessionRecord[] {
           actionItemsMd: session.actionItemsMd ?? null,
           followUpEmailMd: session.followUpEmailMd ?? null,
           notesMd: session.notesMd ?? null,
+          ticketGenerationState: session.ticketGenerationState ?? "not_started",
+          ticketGenerationError: session.ticketGenerationError ?? null,
+          ticketGeneratedAt: session.ticketGeneratedAt ?? null,
         }))
       : [];
   } catch {
@@ -236,8 +245,30 @@ function readGeneratedTickets(): GeneratedTicket[] {
   }
 
   try {
-    const parsed = JSON.parse(raw) as GeneratedTicket[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw) as Partial<GeneratedTicket>[];
+    return Array.isArray(parsed)
+      ? parsed.map((ticket) => ({
+          id: ticket.id ?? createId("ticket"),
+          sessionId: ticket.sessionId ?? "",
+          idempotencyKey: ticket.idempotencyKey ?? createId("ticket-key"),
+          title: ticket.title ?? "Untitled ticket",
+          description: ticket.description ?? "",
+          acceptanceCriteria: Array.isArray(ticket.acceptanceCriteria) ? ticket.acceptanceCriteria : [],
+          type: ticket.type ?? "Task",
+          sourceLine: ticket.sourceLine ?? null,
+          linearIssueId: ticket.linearIssueId ?? null,
+          linearIssueKey: ticket.linearIssueKey ?? null,
+          linearIssueUrl: ticket.linearIssueUrl ?? null,
+          pushedAt: ticket.pushedAt ?? null,
+          linearPushState:
+            ticket.linearPushState ??
+            (ticket.linearIssueId || ticket.pushedAt ? "pushed" : "pending"),
+          linearLastError: ticket.linearLastError ?? null,
+          linearLastAttemptAt: ticket.linearLastAttemptAt ?? null,
+          linearDeduped: ticket.linearDeduped ?? false,
+          createdAt: ticket.createdAt ?? nowIso(),
+        }))
+      : [];
   } catch {
     return [];
   }
@@ -450,6 +481,63 @@ function appendAssistantMessage(
   });
   writeMessages(messages);
   return messages;
+}
+
+function shouldMockTicketGenerationFail(detail: SessionDetail): boolean {
+  return (
+    detail.session.title.includes("[generate-fail]") ||
+    detail.transcripts.some((segment) => segment.text.includes("__mock_ticket_generation_fail__"))
+  );
+}
+
+function shouldMockLinearPushFail(ticket: GeneratedTicket): boolean {
+  return (
+    ticket.title.includes("[push-fail]") ||
+    ticket.description.includes("__mock_linear_push_fail__")
+  );
+}
+
+function updateGeneratedTicketRecord(next: GeneratedTicket): GeneratedTicket[] {
+  const tickets = readGeneratedTickets();
+  const index = tickets.findIndex(
+    (ticket) => ticket.sessionId === next.sessionId && ticket.idempotencyKey === next.idempotencyKey
+  );
+
+  if (index >= 0) {
+    tickets[index] = next;
+  } else {
+    tickets.push(next);
+  }
+
+  writeGeneratedTickets(tickets);
+  return tickets;
+}
+
+function replaceGeneratedTicketsForSession(sessionId: string, tickets: GeneratedTicket[]): void {
+  writeGeneratedTickets([
+    ...readGeneratedTickets().filter((ticket) => ticket.sessionId !== sessionId),
+    ...tickets,
+  ]);
+}
+
+function buildMockLinearIssue(ticket: GeneratedTicket): Pick<
+  GeneratedTicket,
+  "linearIssueId" | "linearIssueKey" | "linearIssueUrl"
+> {
+  const issueKeySeed = Math.abs(
+    `${ticket.sessionId}:${ticket.idempotencyKey}`
+      .split("")
+      .reduce((sum, character) => sum + character.charCodeAt(0), 0)
+  )
+    .toString()
+    .padStart(4, "0")
+    .slice(0, 4);
+
+  return {
+    linearIssueId: `linear_${ticket.sessionId}_${ticket.idempotencyKey}`,
+    linearIssueKey: `ENG-${issueKeySeed}`,
+    linearIssueUrl: `https://linear.app/mock/issue/ENG-${issueKeySeed}`,
+  };
 }
 
 export async function bootstrapMockApp(): Promise<BootstrapPayload> {
@@ -704,6 +792,9 @@ export async function startMockSession(input: StartSessionInput): Promise<Sessio
     actionItemsMd: null,
     followUpEmailMd: null,
     notesMd: null,
+    ticketGenerationState: "not_started",
+    ticketGenerationError: null,
+    ticketGeneratedAt: null,
   };
 
   updateSessionRecord(session);
@@ -789,8 +880,24 @@ export async function completeMockSession(sessionId: string): Promise<SessionDet
     },
   });
   appendAssistantMessage(sessionId, "assistant", derived.finalSummary);
+  let nextDetail = getSessionDetail(sessionId);
+  if (!nextDetail) {
+    return null;
+  }
 
-  return getSessionDetail(sessionId);
+  if (getSettingValue("ticket_generation_enabled", "true") === "true" && getSettingValue("auto_generate_tickets", "true") === "true") {
+    nextDetail = await regenerateMockSessionTickets(sessionId);
+  }
+
+  if (
+    nextDetail &&
+    nextDetail.generatedTickets.length > 0 &&
+    getSettingValue("auto_push_linear", "true") === "true"
+  ) {
+    nextDetail = await pushMockGeneratedTickets(sessionId);
+  }
+
+  return nextDetail;
 }
 
 export async function appendMockTranscriptSegment(input: AppendTranscriptInput): Promise<SessionDetail | null> {
@@ -824,6 +931,144 @@ export async function appendMockTranscriptSegment(input: AppendTranscriptInput):
   return getSessionDetail(input.sessionId);
 }
 
+export async function regenerateMockSessionTickets(sessionId: string): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  if (shouldMockTicketGenerationFail(detail)) {
+    updateSessionRecord({
+      ...detail.session,
+      updatedAt: nowIso(),
+      ticketGenerationState: "failed",
+      ticketGenerationError: "Mock ticket generation failed for this session.",
+    });
+    appendAssistantMessage(sessionId, "system", "Ticket generation could not finish automatically: Mock ticket generation failed for this session.");
+    return getSessionDetail(sessionId);
+  }
+
+  const nextTickets = generateTicketsFromSession(detail).map((ticket) => {
+    const existing = detail.generatedTickets.find((entry) => entry.idempotencyKey === ticket.idempotencyKey);
+    return {
+      ...ticket,
+      linearIssueId: existing?.linearIssueId ?? ticket.linearIssueId,
+      linearIssueKey: existing?.linearIssueKey ?? ticket.linearIssueKey,
+      linearIssueUrl: existing?.linearIssueUrl ?? ticket.linearIssueUrl,
+      pushedAt: existing?.pushedAt ?? ticket.pushedAt,
+      linearPushState: existing?.linearPushState ?? ticket.linearPushState,
+      linearLastError: existing?.linearLastError ?? ticket.linearLastError,
+      linearLastAttemptAt: existing?.linearLastAttemptAt ?? ticket.linearLastAttemptAt,
+      linearDeduped: existing?.linearDeduped ?? ticket.linearDeduped,
+      createdAt: existing?.createdAt ?? ticket.createdAt,
+    } satisfies GeneratedTicket;
+  });
+
+  replaceGeneratedTicketsForSession(sessionId, nextTickets);
+  updateSessionRecord({
+    ...detail.session,
+    updatedAt: nowIso(),
+    ticketGenerationState: "succeeded",
+    ticketGenerationError: null,
+    ticketGeneratedAt: nowIso(),
+  });
+  appendAssistantMessage(
+    sessionId,
+    "system",
+    nextTickets.length > 0
+      ? `Generated ${nextTickets.length} ticket(s) from the completed session.`
+      : "No engineering tickets were generated from this meeting transcript."
+  );
+
+  return getSessionDetail(sessionId);
+}
+
+export async function pushMockGeneratedTicket(
+  input: PushGeneratedTicketInput
+): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(input.sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  const ticket = detail.generatedTickets.find((entry) => entry.idempotencyKey === input.idempotencyKey);
+  if (!ticket) {
+    return detail;
+  }
+
+  if (ticket.linearPushState === "pushed" && ticket.linearIssueId && ticket.linearIssueKey && ticket.linearIssueUrl) {
+    return detail;
+  }
+
+  const linearConfigured = Boolean(readSecrets().linear_api_key && readSecrets().linear_team_id);
+  if (!linearConfigured) {
+    updateGeneratedTicketRecord({
+      ...ticket,
+      linearPushState: "failed",
+      linearLastError: "Linear is not configured in the browser mock runtime.",
+      linearLastAttemptAt: nowIso(),
+    });
+    return getSessionDetail(input.sessionId);
+  }
+
+  if (shouldMockLinearPushFail(ticket)) {
+    updateGeneratedTicketRecord({
+      ...ticket,
+      linearPushState: "failed",
+      linearLastError: "Mock Linear push failed for this ticket.",
+      linearLastAttemptAt: nowIso(),
+    });
+    return getSessionDetail(input.sessionId);
+  }
+
+  const issue = buildMockLinearIssue(ticket);
+  updateGeneratedTicketRecord({
+    ...ticket,
+    ...issue,
+    pushedAt: nowIso(),
+    linearPushState: "pushed",
+    linearLastError: null,
+    linearLastAttemptAt: nowIso(),
+    linearDeduped: false,
+  });
+
+  return getSessionDetail(input.sessionId);
+}
+
+export async function pushMockGeneratedTickets(sessionId: string): Promise<SessionDetail | null> {
+  let detail = getSessionDetail(sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  let createdCount = 0;
+  let failedCount = 0;
+  for (const ticket of detail.generatedTickets.filter((entry) => entry.linearPushState !== "pushed")) {
+    const previous = ticket.linearPushState;
+    detail = await pushMockGeneratedTicket({
+      sessionId,
+      idempotencyKey: ticket.idempotencyKey,
+    });
+    if (!detail) {
+      return null;
+    }
+    const nextTicket = detail.generatedTickets.find((entry) => entry.idempotencyKey === ticket.idempotencyKey);
+    if (nextTicket?.linearPushState === "pushed" && previous !== "pushed") {
+      createdCount += 1;
+    } else if (nextTicket?.linearPushState === "failed") {
+      failedCount += 1;
+    }
+  }
+
+  appendAssistantMessage(
+    sessionId,
+    "system",
+    `Generated ${detail.generatedTickets.length} ticket(s) and pushed ${createdCount} to Linear.${failedCount > 0 ? ` ${failedCount} push attempt(s) failed.` : ""}`
+  );
+
+  return getSessionDetail(sessionId);
+}
+
 export async function replaceMockGeneratedTickets(input: SaveGeneratedTicketsInput): Promise<SessionDetail | null> {
   const detail = getSessionDetail(input.sessionId);
   if (!detail) {
@@ -846,6 +1091,10 @@ export async function replaceMockGeneratedTickets(input: SaveGeneratedTicketsInp
       linearIssueKey: existing?.linearIssueKey ?? null,
       linearIssueUrl: existing?.linearIssueUrl ?? null,
       pushedAt: existing?.pushedAt ?? null,
+      linearPushState: existing?.linearPushState ?? "pending",
+      linearLastError: existing?.linearLastError ?? null,
+      linearLastAttemptAt: existing?.linearLastAttemptAt ?? null,
+      linearDeduped: existing?.linearDeduped ?? false,
       createdAt: existing?.createdAt ?? now,
     };
   });
@@ -880,12 +1129,14 @@ export async function getMockCaptureStatus(): Promise<CaptureStatePayload> {
 }
 
 export async function startMockSystemAudioCapture(
-  _input: StartSystemAudioCaptureInput
+  input: StartSystemAudioCaptureInput
 ): Promise<CaptureStatePayload> {
+  void input;
   return getMockCaptureStatus();
 }
 
-export async function stopMockSystemAudioCapture(_sessionId: string): Promise<CaptureStatePayload> {
+export async function stopMockSystemAudioCapture(sessionId: string): Promise<CaptureStatePayload> {
+  void sessionId;
   return {
     sessionId: null,
     runtimeState: "idle",
@@ -916,6 +1167,10 @@ export async function markMockGeneratedTicketPushed(
     linearIssueKey: input.linearIssueKey,
     linearIssueUrl: input.linearIssueUrl,
     pushedAt: input.pushedAt ?? nowIso(),
+    linearPushState: "pushed",
+    linearLastError: null,
+    linearLastAttemptAt: input.pushedAt ?? nowIso(),
+    linearDeduped: false,
   };
 
   writeGeneratedTickets(tickets);

@@ -16,6 +16,9 @@ import {
   listMockSessions,
   listMockSystemAudioSources,
   markMockGeneratedTicketPushed,
+  pushMockGeneratedTicket,
+  pushMockGeneratedTickets,
+  regenerateMockSessionTickets,
   pauseMockSession,
   replaceMockGeneratedTickets,
   resumeMockSession,
@@ -38,6 +41,7 @@ import type {
   ExportedSessionPayload,
   KnowledgeFileRecord,
   MarkGeneratedTicketPushedInput,
+  PushGeneratedTicketInput,
   PromptRecord,
   RunDynamicActionInput,
   RuntimeSnapshot,
@@ -215,6 +219,32 @@ export async function markGeneratedTicketPushed(
   }
 
   return invoke<SessionDetail | null>("mark_generated_ticket_pushed", { input });
+}
+
+export async function generateSessionTickets(sessionId: string): Promise<SessionDetail | null> {
+  if (!isTauriRuntime()) {
+    return regenerateMockSessionTickets(sessionId);
+  }
+
+  return invoke<SessionDetail | null>("generate_session_tickets", { sessionId });
+}
+
+export async function pushGeneratedTicket(
+  input: PushGeneratedTicketInput
+): Promise<SessionDetail | null> {
+  if (!isTauriRuntime()) {
+    return pushMockGeneratedTicket(input);
+  }
+
+  return invoke<SessionDetail | null>("push_generated_ticket", { input });
+}
+
+export async function pushGeneratedTickets(sessionId: string): Promise<SessionDetail | null> {
+  if (!isTauriRuntime()) {
+    return pushMockGeneratedTickets(sessionId);
+  }
+
+  return invoke<SessionDetail | null>("push_generated_tickets", { sessionId });
 }
 
 export async function getRuntimeState(): Promise<RuntimeSnapshot> {

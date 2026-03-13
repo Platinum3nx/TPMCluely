@@ -17,12 +17,13 @@ use std::fs;
 
 use app::commands::{
     append_transcript_segment, ask_assistant, bootstrap_app, complete_session,
-    delete_knowledge_file, delete_system_prompt, export_session_markdown, get_runtime_state,
-    get_capture_status, get_session_detail, list_knowledge_files, list_sessions,
+    delete_knowledge_file, delete_system_prompt, export_session_markdown, generate_session_tickets,
+    get_capture_status, get_runtime_state, get_session_detail, list_knowledge_files, list_sessions,
     list_system_audio_sources, list_system_prompts, mark_generated_ticket_pushed, pause_session,
-    read_secret_value, resume_session, run_dynamic_action, save_generated_tickets,
-    save_knowledge_file, save_secret, save_setting, save_system_prompt, search_sessions,
-    set_overlay_open, start_session, start_system_audio_capture, stop_system_audio_capture,
+    push_generated_ticket, push_generated_tickets, read_secret_value, resume_session,
+    run_dynamic_action, save_generated_tickets, save_knowledge_file, save_secret, save_setting,
+    save_system_prompt, search_sessions, set_overlay_open, start_session,
+    start_system_audio_capture, stop_system_audio_capture,
 };
 use app::state::AppState;
 use tauri::Manager;
@@ -58,6 +59,9 @@ pub fn run() {
             resume_session,
             stop_system_audio_capture,
             complete_session,
+            generate_session_tickets,
+            push_generated_ticket,
+            push_generated_tickets,
             append_transcript_segment,
             run_dynamic_action,
             ask_assistant,

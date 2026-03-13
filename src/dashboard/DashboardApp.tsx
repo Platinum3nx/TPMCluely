@@ -14,6 +14,9 @@ interface DashboardAppProps {
   onSearchSessions: (query: string) => Promise<void>;
   onSelectSession: (sessionId: string, transcriptSequenceNo?: number | null) => Promise<void>;
   onExportSession: (sessionDetail: SessionDetailModel) => void;
+  onGenerateTickets: (sessionId: string) => Promise<void>;
+  onPushGeneratedTicket: (sessionId: string, idempotencyKey: string) => Promise<void>;
+  onPushGeneratedTickets: (sessionId: string) => Promise<void>;
   allowTicketPreview: boolean;
 }
 
@@ -26,6 +29,9 @@ export function DashboardApp({
   onSearchSessions,
   onSelectSession,
   onExportSession,
+  onGenerateTickets,
+  onPushGeneratedTicket,
+  onPushGeneratedTickets,
   allowTicketPreview,
 }: DashboardAppProps) {
   const [query, setQuery] = useState("");
@@ -79,7 +85,13 @@ export function DashboardApp({
             highlightedSequenceNo={highlightedSequenceNo}
             onExportSession={onExportSession}
           />
-          <TicketDashboard sessionDetail={sessionDetail} allowPreview={allowTicketPreview} />
+          <TicketDashboard
+            sessionDetail={sessionDetail}
+            allowPreview={allowTicketPreview}
+            onGenerateTickets={onGenerateTickets}
+            onPushGeneratedTicket={onPushGeneratedTicket}
+            onPushGeneratedTickets={onPushGeneratedTickets}
+          />
         </div>
       </div>
     </section>

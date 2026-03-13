@@ -21,7 +21,10 @@ use crate::exports::build_session_markdown;
 use crate::knowledge::{delete_file, ingest_text_file, list_files, KnowledgeFileRecord, SaveKnowledgeFileInput};
 use crate::permissions::PermissionSnapshot;
 use crate::providers::ProviderSnapshot;
-use crate::providers::linear::{create_issue, LinearIssueRequest};
+use crate::providers::linear::{
+    build_linear_dedupe_key, build_linear_dedupe_marker, choose_canonical_issue, create_issue,
+    find_issues_by_marker, LinearIssue, LinearIssueMatch, LinearIssueRequest,
+};
 use crate::providers::llm::{generate_text, generate_text_multimodal, LlmPart};
 use crate::prompts::{list_prompts, save_prompt, PromptRecord, SavePromptInput};
 use crate::screenshot::ScreenshotStore;
@@ -112,6 +115,9 @@ pub struct SessionRecordPayload {
     pub action_items_md: Option<String>,
     pub follow_up_email_md: Option<String>,
     pub notes_md: Option<String>,
+    pub ticket_generation_state: String,
+    pub ticket_generation_error: Option<String>,
+    pub ticket_generated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +176,10 @@ pub struct GeneratedTicketPayload {
     pub linear_issue_key: Option<String>,
     pub linear_issue_url: Option<String>,
     pub pushed_at: Option<String>,
+    pub linear_push_state: String,
+    pub linear_last_error: Option<String>,
+    pub linear_last_attempt_at: Option<String>,
+    pub linear_deduped: bool,
     pub created_at: String,
 }
 
@@ -289,6 +299,13 @@ pub struct MarkGeneratedTicketPushedInput {
     pub pushed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushGeneratedTicketInput {
+    pub session_id: String,
+    pub idempotency_key: String,
+}
+
 fn secret_snapshot(presence: &SecretPresence) -> SecretSnapshot {
     SecretSnapshot {
         gemini_configured: presence.gemini_configured,
@@ -314,6 +331,9 @@ pub(crate) fn map_session(row: SessionRow) -> SessionRecordPayload {
         action_items_md: row.action_items_md,
         follow_up_email_md: row.follow_up_email_md,
         notes_md: row.notes_md,
+        ticket_generation_state: row.ticket_generation_state,
+        ticket_generation_error: row.ticket_generation_error,
+        ticket_generated_at: row.ticket_generated_at,
     }
 }
 
@@ -362,6 +382,10 @@ fn map_generated_ticket(row: GeneratedTicketRow) -> GeneratedTicketPayload {
         linear_issue_key: row.linear_issue_key,
         linear_issue_url: row.linear_issue_url,
         pushed_at: row.pushed_at,
+        linear_push_state: row.linear_push_state,
+        linear_last_error: row.linear_last_error,
+        linear_last_attempt_at: row.linear_last_attempt_at,
+        linear_deduped: row.linear_deduped,
         created_at: row.created_at,
     }
 }
@@ -723,31 +747,126 @@ fn maybe_store_screen_artifact(
     )])
 }
 
-async fn maybe_generate_and_push_tickets(
-    state: &AppState,
-    session_id: &str,
-    transcripts: &[TranscriptRow],
-) -> Result<(), String> {
-    let settings = load_settings_map(state)?;
-    if !setting_enabled(&settings, "ticket_generation_enabled", true)
-        || !setting_enabled(&settings, "auto_generate_tickets", true)
-    {
-        return Ok(());
+struct LinearConfig {
+    api_key: String,
+    team_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TicketPushStatus {
+    AlreadyPushed,
+    Created,
+    LinkedExisting,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct TicketPushOutcome {
+    status: TicketPushStatus,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct TicketPushSummary {
+    created: usize,
+    linked: usize,
+    failed: usize,
+}
+
+fn load_linear_config(state: &AppState) -> Result<Option<LinearConfig>, String> {
+    let api_key = state
+        .secret_store()
+        .read_secret("linear_api_key")
+        .map_err(|error| error.to_string())?
+        .filter(|value| !value.trim().is_empty());
+    let team_id = state
+        .secret_store()
+        .read_secret("linear_team_id")
+        .map_err(|error| error.to_string())?
+        .filter(|value| !value.trim().is_empty());
+
+    match (api_key, team_id) {
+        (Some(api_key), Some(team_id)) => Ok(Some(LinearConfig { api_key, team_id })),
+        _ => Ok(None),
+    }
+}
+
+fn append_system_message(state: &AppState, session_id: &str, content: &str) -> Result<(), String> {
+    state
+        .database()
+        .append_message(session_id, "system", content)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn generate_session_tickets_inner(state: &AppState, session_id: &str) -> Result<usize, String> {
+    let database = state.database();
+    let session = database
+        .get_session(session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "session not found".to_string())?;
+
+    if session.status != "completed" {
+        return Err("Tickets can only be generated after the session is completed.".to_string());
     }
 
-    let gemini_api_key = match state
-        .secret_store()
-        .read_secret("gemini_api_key")
-        .map_err(|error| error.to_string())?
+    let existing = database
+        .list_generated_tickets(session_id)
+        .map_err(|error| error.to_string())?;
+    if existing
+        .iter()
+        .any(|ticket| ticket.linear_push_state == "pushed" && ticket.linear_issue_url.is_some())
     {
-        Some(key) if !key.trim().is_empty() => key,
-        _ => return Ok(()),
+        let message = "Tickets already linked to Linear cannot be regenerated for this session.";
+        database
+            .update_session_ticket_generation(session_id, "failed", Some(message), None)
+            .map_err(|error| error.to_string())?;
+        append_system_message(state, session_id, message)?;
+        return Err(message.to_string());
+    }
+
+    let gemini_api_key = match load_gemini_api_key(state)? {
+        Some(key) => key,
+        None => {
+            let message = "Gemini API key is required before TPMCluely can generate tickets.".to_string();
+            database
+                .update_session_ticket_generation(session_id, "failed", Some(&message), None)
+                .map_err(|error| error.to_string())?;
+            append_system_message(state, session_id, &message)?;
+            return Err(message);
+        }
     };
 
-    let transcript_text = format_transcript_document(transcripts);
-    let generated = generate_tickets(&transcript_text, &gemini_api_key)
-        .await
+    let transcripts = database
+        .list_transcript_segments(session_id)
         .map_err(|error| error.to_string())?;
+    let transcript_text = format_transcript_document(&transcripts);
+
+    let generated = match generate_tickets(&transcript_text, &gemini_api_key).await {
+        Ok(generated) => generated,
+        Err(error) => {
+            let message = error.to_string();
+            database
+                .update_session_ticket_generation(session_id, "failed", Some(&message), None)
+                .map_err(|db_error| db_error.to_string())?;
+            append_system_message(
+                state,
+                session_id,
+                &format!("Ticket generation could not finish automatically: {message}"),
+            )?;
+            return Err(message);
+        }
+    };
+
+    if generated.raw_ticket_count > 0 && generated.tickets.is_empty() {
+        let message =
+            "Ticket generation returned output, but none of the tickets were valid enough to keep.".to_string();
+        database
+            .update_session_ticket_generation(session_id, "failed", Some(&message), None)
+            .map_err(|error| error.to_string())?;
+        append_system_message(state, session_id, &message)?;
+        return Err(message);
+    }
 
     let mut ticket_rows = Vec::with_capacity(generated.tickets.len());
     for ticket in &generated.tickets {
@@ -762,110 +881,213 @@ async fn maybe_generate_and_push_tickets(
         });
     }
 
-    state
-        .database()
+    database
         .replace_generated_tickets(session_id, &ticket_rows)
         .map_err(|error| error.to_string())?;
 
-    let persisted_tickets = state
-        .database()
-        .list_generated_tickets(session_id)
+    let generated_at = Utc::now().to_rfc3339();
+    database
+        .update_session_ticket_generation(session_id, "succeeded", None, Some(&generated_at))
         .map_err(|error| error.to_string())?;
 
     if !generated.warnings.is_empty() {
-        state
-            .database()
-            .append_message(
-                session_id,
-                "system",
-                &generated.warnings.join(" "),
-            )
-            .map_err(|error| error.to_string())?;
+        append_system_message(state, session_id, &generated.warnings.join(" "))?;
     }
 
     if generated.tickets.is_empty() {
-        state
-            .database()
-            .append_message(
-                session_id,
-                "system",
-                "No engineering tickets were generated from this meeting transcript.",
-            )
-            .map_err(|error| error.to_string())?;
-        return Ok(());
+        append_system_message(
+            state,
+            session_id,
+            "No engineering tickets were generated from this meeting transcript.",
+        )?;
+    } else {
+        append_system_message(
+            state,
+            session_id,
+            &format!("Generated {} ticket(s) from this meeting transcript.", generated.tickets.len()),
+        )?;
     }
 
-    if !setting_enabled(&settings, "auto_push_linear", true) {
-        return Ok(());
-    }
+    Ok(generated.tickets.len())
+}
 
-    let linear_api_key = match state
-        .secret_store()
-        .read_secret("linear_api_key")
-        .map_err(|error| error.to_string())?
-    {
-        Some(key) if !key.trim().is_empty() => key,
-        _ => return Ok(()),
-    };
-    let linear_team_id = match state
-        .secret_store()
-        .read_secret("linear_team_id")
-        .map_err(|error| error.to_string())?
-    {
-        Some(team_id) if !team_id.trim().is_empty() => team_id,
-        _ => return Ok(()),
-    };
-
-    let mut pushed_count = 0;
-    for ticket in persisted_tickets.iter().filter(|ticket| {
-        ticket.linear_issue_id.is_none()
-            || ticket.linear_issue_key.is_none()
-            || ticket.linear_issue_url.is_none()
-            || ticket.pushed_at.is_none()
-    }) {
-        let acceptance_criteria = serde_json::from_str::<Vec<String>>(&ticket.acceptance_criteria)
-            .unwrap_or_default();
-        let issue = create_issue(
-            &linear_api_key,
-            &linear_team_id,
-            &LinearIssueRequest {
-                title: ticket.title.clone(),
-                description: ticket.description.clone(),
-                acceptance_criteria,
-                idempotency_key: Some(ticket.idempotency_key.clone()),
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-
-        state
-            .database()
-            .mark_generated_ticket_pushed(
-                session_id,
-                &ticket.idempotency_key,
-                &issue.id,
-                &issue.identifier,
-                &issue.url,
-                &Utc::now().to_rfc3339(),
-            )
-            .map_err(|error| error.to_string())?;
-        pushed_count += 1;
-    }
-
+fn mark_ticket_pushed(
+    state: &AppState,
+    session_id: &str,
+    idempotency_key: &str,
+    issue: &LinearIssue,
+    linear_deduped: bool,
+) -> Result<(), String> {
     state
         .database()
-            .append_message(
-                session_id,
-                "system",
-                &format!(
-                    "Generated {} ticket(s) and pushed {} to Linear.",
-                    generated.tickets.len(),
-                    pushed_count
-            ),
+        .mark_generated_ticket_pushed(
+            session_id,
+            idempotency_key,
+            &issue.id,
+            &issue.identifier,
+            &issue.url,
+            &Utc::now().to_rfc3339(),
+            linear_deduped,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
 
-    Ok(())
+fn linear_issue_from_match(issue: &LinearIssueMatch) -> LinearIssue {
+    LinearIssue {
+        id: issue.id.clone(),
+        identifier: issue.identifier.clone(),
+        title: issue.title.clone(),
+        url: issue.url.clone(),
+    }
+}
+
+async fn push_generated_ticket_inner(
+    state: &AppState,
+    session_id: &str,
+    idempotency_key: &str,
+) -> Result<TicketPushOutcome, String> {
+    let database = state.database();
+    let Some(ticket) = database
+        .get_generated_ticket(session_id, idempotency_key)
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("generated ticket not found".to_string());
+    };
+
+    if ticket.linear_push_state == "pushed"
+        && ticket.linear_issue_id.is_some()
+        && ticket.linear_issue_key.is_some()
+        && ticket.linear_issue_url.is_some()
+    {
+        return Ok(TicketPushOutcome {
+            status: TicketPushStatus::AlreadyPushed,
+            warning: None,
+        });
+    }
+
+    let Some(linear_config) = load_linear_config(state)? else {
+        let message = "Linear API key and team ID are required before TPMCluely can push tickets.";
+        let attempted_at = Utc::now().to_rfc3339();
+        database
+            .mark_generated_ticket_push_failed(session_id, idempotency_key, message, &attempted_at)
+            .map_err(|error| error.to_string())?;
+        return Ok(TicketPushOutcome {
+            status: TicketPushStatus::Failed,
+            warning: Some(message.to_string()),
+        });
+    };
+
+    let linear_dedupe_key = build_linear_dedupe_key(session_id, idempotency_key);
+    let marker = build_linear_dedupe_marker(&linear_dedupe_key);
+    let remote_matches = match find_issues_by_marker(&linear_config.api_key, &linear_config.team_id, &marker).await {
+        Ok(matches) => matches,
+        Err(error) => {
+            let message = error.to_string();
+            let attempted_at = Utc::now().to_rfc3339();
+            database
+                .mark_generated_ticket_push_failed(session_id, idempotency_key, &message, &attempted_at)
+                .map_err(|db_error| db_error.to_string())?;
+            return Ok(TicketPushOutcome {
+                status: TicketPushStatus::Failed,
+                warning: Some(message),
+            });
+        }
+    };
+
+    if !remote_matches.is_empty() {
+        let canonical = choose_canonical_issue(&remote_matches)
+            .ok_or_else(|| "Linear issue lookup returned no canonical issue.".to_string())?;
+        let linked_issue = linear_issue_from_match(&canonical);
+        mark_ticket_pushed(state, session_id, idempotency_key, &linked_issue, true)?;
+
+        let warning = if remote_matches.len() > 1 {
+            let message = format!(
+                "Multiple existing Linear issues matched ticket \"{}\". TPMCluely linked the earliest issue {}.",
+                ticket.title, canonical.identifier
+            );
+            append_system_message(state, session_id, &message)?;
+            Some(message)
+        } else {
+            None
+        };
+
+        return Ok(TicketPushOutcome {
+            status: TicketPushStatus::LinkedExisting,
+            warning,
+        });
+    }
+
+    let acceptance_criteria =
+        serde_json::from_str::<Vec<String>>(&ticket.acceptance_criteria).unwrap_or_default();
+    let created_issue = match create_issue(
+        &linear_config.api_key,
+        &linear_config.team_id,
+        &LinearIssueRequest {
+            title: ticket.title.clone(),
+            description: ticket.description.clone(),
+            acceptance_criteria,
+            idempotency_key: Some(ticket.idempotency_key.clone()),
+            linear_dedupe_key: Some(linear_dedupe_key),
+        },
+    )
+    .await
+    {
+        Ok(issue) => issue,
+        Err(error) => {
+            let message = error.to_string();
+            let attempted_at = Utc::now().to_rfc3339();
+            database
+                .mark_generated_ticket_push_failed(session_id, idempotency_key, &message, &attempted_at)
+                .map_err(|db_error| db_error.to_string())?;
+            return Ok(TicketPushOutcome {
+                status: TicketPushStatus::Failed,
+                warning: Some(message),
+            });
+        }
+    };
+
+    mark_ticket_pushed(state, session_id, idempotency_key, &created_issue, false)?;
+    Ok(TicketPushOutcome {
+        status: TicketPushStatus::Created,
+        warning: None,
+    })
+}
+
+async fn push_generated_tickets_inner(
+    state: &AppState,
+    session_id: &str,
+) -> Result<TicketPushSummary, String> {
+    let database = state.database();
+    let tickets = database
+        .list_generated_tickets(session_id)
+        .map_err(|error| error.to_string())?;
+    let mut summary = TicketPushSummary::default();
+
+    for ticket in tickets
+        .iter()
+        .filter(|ticket| ticket.linear_push_state == "pending" || ticket.linear_push_state == "failed")
+    {
+        let outcome = push_generated_ticket_inner(state, session_id, &ticket.idempotency_key).await?;
+        let _ = outcome.warning.as_deref();
+
+        match outcome.status {
+            TicketPushStatus::Created => summary.created += 1,
+            TicketPushStatus::LinkedExisting => summary.linked += 1,
+            TicketPushStatus::Failed => summary.failed += 1,
+            TicketPushStatus::AlreadyPushed => {}
+        }
+    }
+
+    append_system_message(
+        state,
+        session_id,
+        &format!(
+            "Linear sync finished: created {}, linked {}, failed {}.",
+            summary.created, summary.linked, summary.failed
+        ),
+    )?;
+
+    Ok(summary)
 }
 
 fn load_gemini_api_key(state: &AppState) -> Result<Option<String>, String> {
@@ -1201,16 +1423,57 @@ pub async fn complete_session(
         .session_manager()
         .clear(&session_id);
 
-    if let Err(error) = maybe_generate_and_push_tickets(&state, &session_id, &transcripts).await {
-        database
-            .append_message(
-                &session_id,
-                "system",
-                &format!("Ticket generation could not finish automatically: {error}"),
-            )
-            .map_err(|append_error| append_error.to_string())?;
+    let settings = load_settings_map(&state)?;
+    let should_auto_generate = setting_enabled(&settings, "ticket_generation_enabled", true)
+        && setting_enabled(&settings, "auto_generate_tickets", true);
+    let should_auto_push = setting_enabled(&settings, "auto_push_linear", true);
+
+    if should_auto_generate {
+        match generate_session_tickets_inner(&state, &session_id).await {
+            Ok(_) if should_auto_push => {
+                if let Err(error) = push_generated_tickets_inner(&state, &session_id).await {
+                    append_system_message(
+                        &state,
+                        &session_id,
+                        &format!("Linear sync could not finish automatically: {error}"),
+                    )?;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
     }
 
+    load_session_detail(&state, &session_id)
+}
+
+#[tauri::command]
+pub async fn generate_session_tickets(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let state = state.inner().clone();
+    generate_session_tickets_inner(&state, &session_id).await?;
+    load_session_detail(&state, &session_id)
+}
+
+#[tauri::command]
+pub async fn push_generated_ticket(
+    state: State<'_, AppState>,
+    input: PushGeneratedTicketInput,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let state = state.inner().clone();
+    let _ = push_generated_ticket_inner(&state, &input.session_id, &input.idempotency_key).await?;
+    load_session_detail(&state, &input.session_id)
+}
+
+#[tauri::command]
+pub async fn push_generated_tickets(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let state = state.inner().clone();
+    let _ = push_generated_tickets_inner(&state, &session_id).await?;
     load_session_detail(&state, &session_id)
 }
 
@@ -1453,6 +1716,7 @@ pub fn mark_generated_ticket_pushed(
             &input.linear_issue_key,
             &input.linear_issue_url,
             &pushed_at,
+            false,
         )
         .map_err(|error| error.to_string())?;
 

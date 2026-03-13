@@ -114,6 +114,9 @@ export interface SessionRecord {
   actionItemsMd: string | null;
   followUpEmailMd: string | null;
   notesMd: string | null;
+  ticketGenerationState: TicketGenerationState;
+  ticketGenerationError: string | null;
+  ticketGeneratedAt: string | null;
 }
 
 export type TranscriptSource = "manual" | "capture";
@@ -208,6 +211,8 @@ export interface RunDynamicActionInput {
 }
 
 export type TicketType = "Bug" | "Feature" | "Task";
+export type TicketGenerationState = "not_started" | "succeeded" | "failed";
+export type LinearPushState = "pending" | "pushed" | "failed";
 
 export type CaptureMode = "system_audio" | "microphone" | "manual";
 
@@ -296,6 +301,10 @@ export interface GeneratedTicket {
   linearIssueKey: string | null;
   linearIssueUrl: string | null;
   pushedAt: string | null;
+  linearPushState: LinearPushState;
+  linearLastError: string | null;
+  linearLastAttemptAt: string | null;
+  linearDeduped: boolean;
   createdAt: string;
 }
 
@@ -320,6 +329,11 @@ export interface MarkGeneratedTicketPushedInput {
   linearIssueKey: string;
   linearIssueUrl: string;
   pushedAt?: string;
+}
+
+export interface PushGeneratedTicketInput {
+  sessionId: string;
+  idempotencyKey: string;
 }
 
 export interface ExportedSessionPayload {

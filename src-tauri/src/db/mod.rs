@@ -36,6 +36,9 @@ pub struct SessionRow {
     pub action_items_md: Option<String>,
     pub follow_up_email_md: Option<String>,
     pub notes_md: Option<String>,
+    pub ticket_generation_state: String,
+    pub ticket_generation_error: Option<String>,
+    pub ticket_generated_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +80,10 @@ pub struct GeneratedTicketRow {
     pub linear_issue_key: Option<String>,
     pub linear_issue_url: Option<String>,
     pub pushed_at: Option<String>,
+    pub linear_push_state: String,
+    pub linear_last_error: Option<String>,
+    pub linear_last_attempt_at: Option<String>,
+    pub linear_deduped: bool,
     pub created_at: String,
 }
 
@@ -144,6 +151,14 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn touch_session(connection: &Connection, session_id: &str) -> Result<(), rusqlite::Error> {
+    connection.execute(
+        "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+        params![session_id, now_iso()],
+    )?;
+    Ok(())
+}
+
 fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
         id: row.get(0)?,
@@ -161,6 +176,9 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         action_items_md: row.get(12)?,
         follow_up_email_md: row.get(13)?,
         notes_md: row.get(14)?,
+        ticket_generation_state: row.get(15)?,
+        ticket_generation_error: row.get(16)?,
+        ticket_generated_at: row.get(17)?,
     })
 }
 
@@ -378,7 +396,10 @@ impl AppDatabase {
                     decisions_md,
                     action_items_md,
                     follow_up_email_md,
-                    notes_md
+                    notes_md,
+                    ticket_generation_state,
+                    ticket_generation_error,
+                    ticket_generated_at
                 FROM sessions
                 ORDER BY updated_at DESC
                 ",
@@ -409,8 +430,11 @@ impl AppDatabase {
                     final_summary,
                     decisions_md,
                     action_items_md,
-                        follow_up_email_md,
-                        notes_md
+                    follow_up_email_md,
+                    notes_md,
+                    ticket_generation_state,
+                    ticket_generation_error,
+                    ticket_generated_at
                     FROM sessions
                     WHERE id = ?1
                     ",
@@ -491,7 +515,10 @@ impl AppDatabase {
                         decisions_md,
                         action_items_md,
                         follow_up_email_md,
-                        notes_md
+                        notes_md,
+                        ticket_generation_state,
+                        ticket_generation_error,
+                        ticket_generated_at
                     FROM sessions
                     WHERE id = ?1
                     ",
@@ -618,6 +645,31 @@ impl AppDatabase {
         })
     }
 
+    pub fn update_session_ticket_generation(
+        &self,
+        session_id: &str,
+        state: &str,
+        error: Option<&str>,
+        generated_at: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let now = now_iso();
+        self.with_connection(|connection| {
+            connection.execute(
+                "
+                UPDATE sessions
+                SET ticket_generation_state = ?2,
+                    ticket_generation_error = ?3,
+                    ticket_generated_at = ?4,
+                    updated_at = ?5
+                WHERE id = ?1
+                ",
+                params![session_id, state, error, generated_at, now],
+            )?;
+            refresh_session_search(connection, session_id)?;
+            Ok(())
+        })
+    }
+
     pub fn list_transcript_segments(&self, session_id: &str) -> Result<Vec<TranscriptRow>, DatabaseError> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
@@ -731,10 +783,7 @@ impl AppDatabase {
                 Err(error) => return Err(error),
             }
 
-            connection.execute(
-                "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
-                params![session_id, now_iso()],
-            )?;
+            touch_session(connection, session_id)?;
             refresh_session_search(connection, session_id)?;
 
             Ok(Some(TranscriptRow {
@@ -772,6 +821,10 @@ impl AppDatabase {
                     linear_issue_key,
                     linear_issue_url,
                     pushed_at,
+                    linear_push_state,
+                    linear_last_error,
+                    linear_last_attempt_at,
+                    linear_deduped,
                     created_at
                 FROM generated_tickets
                 WHERE session_id = ?1
@@ -793,11 +846,72 @@ impl AppDatabase {
                     linear_issue_key: row.get(9)?,
                     linear_issue_url: row.get(10)?,
                     pushed_at: row.get(11)?,
-                    created_at: row.get(12)?,
+                    linear_push_state: row.get(12)?,
+                    linear_last_error: row.get(13)?,
+                    linear_last_attempt_at: row.get(14)?,
+                    linear_deduped: row.get::<_, i64>(15)? == 1,
+                    created_at: row.get(16)?,
                 })
             })?;
 
             rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    pub fn get_generated_ticket(
+        &self,
+        session_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<GeneratedTicketRow>, DatabaseError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "
+                    SELECT
+                        id,
+                        session_id,
+                        title,
+                        description,
+                        acceptance_criteria,
+                        type,
+                        idempotency_key,
+                        source_line,
+                        linear_issue_id,
+                        linear_issue_key,
+                        linear_issue_url,
+                        pushed_at,
+                        linear_push_state,
+                        linear_last_error,
+                        linear_last_attempt_at,
+                        linear_deduped,
+                        created_at
+                    FROM generated_tickets
+                    WHERE session_id = ?1 AND idempotency_key = ?2
+                    ",
+                    params![session_id, idempotency_key],
+                    |row| {
+                        Ok(GeneratedTicketRow {
+                            id: row.get(0)?,
+                            session_id: row.get(1)?,
+                            title: row.get(2)?,
+                            description: row.get(3)?,
+                            acceptance_criteria: row.get(4)?,
+                            ticket_type: row.get(5)?,
+                            idempotency_key: row.get(6)?,
+                            source_line: row.get(7)?,
+                            linear_issue_id: row.get(8)?,
+                            linear_issue_key: row.get(9)?,
+                            linear_issue_url: row.get(10)?,
+                            pushed_at: row.get(11)?,
+                            linear_push_state: row.get(12)?,
+                            linear_last_error: row.get(13)?,
+                            linear_last_attempt_at: row.get(14)?,
+                            linear_deduped: row.get::<_, i64>(15)? == 1,
+                            created_at: row.get(16)?,
+                        })
+                    },
+                )
+                .optional()
         })
     }
 
@@ -833,8 +947,12 @@ impl AppDatabase {
                         linear_issue_key,
                         linear_issue_url,
                         pushed_at,
+                        linear_push_state,
+                        linear_last_error,
+                        linear_last_attempt_at,
+                        linear_deduped,
                         created_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                     ",
                     params![
                         previous
@@ -852,11 +970,23 @@ impl AppDatabase {
                         previous.and_then(|entry| entry.linear_issue_url.clone()),
                         previous.and_then(|entry| entry.pushed_at.clone()),
                         previous
+                            .map(|entry| entry.linear_push_state.clone())
+                            .unwrap_or_else(|| "pending".to_string()),
+                        previous.and_then(|entry| entry.linear_last_error.clone()),
+                        previous.and_then(|entry| entry.linear_last_attempt_at.clone()),
+                        if previous.map(|entry| entry.linear_deduped).unwrap_or(false) {
+                            1
+                        } else {
+                            0
+                        },
+                        previous
                             .map(|entry| entry.created_at.clone())
                             .unwrap_or_else(now_iso),
                     ],
                 )?;
             }
+
+            touch_session(connection, session_id)?;
 
             Ok(())
         })
@@ -870,6 +1000,7 @@ impl AppDatabase {
         linear_issue_key: &str,
         linear_issue_url: &str,
         pushed_at: &str,
+        linear_deduped: bool,
     ) -> Result<(), DatabaseError> {
         self.with_connection(|connection| {
             connection.execute(
@@ -878,7 +1009,11 @@ impl AppDatabase {
                 SET linear_issue_id = ?3,
                     linear_issue_key = ?4,
                     linear_issue_url = ?5,
-                    pushed_at = ?6
+                    pushed_at = ?6,
+                    linear_push_state = 'pushed',
+                    linear_last_error = NULL,
+                    linear_last_attempt_at = ?6,
+                    linear_deduped = ?7
                 WHERE session_id = ?1 AND idempotency_key = ?2
                 ",
                 params![
@@ -887,10 +1022,35 @@ impl AppDatabase {
                     linear_issue_id,
                     linear_issue_key,
                     linear_issue_url,
-                    pushed_at
+                    pushed_at,
+                    if linear_deduped { 1 } else { 0 }
                 ],
             )?;
+            touch_session(connection, session_id)?;
 
+            Ok(())
+        })
+    }
+
+    pub fn mark_generated_ticket_push_failed(
+        &self,
+        session_id: &str,
+        idempotency_key: &str,
+        error: &str,
+        attempted_at: &str,
+    ) -> Result<(), DatabaseError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "
+                UPDATE generated_tickets
+                SET linear_push_state = 'failed',
+                    linear_last_error = ?3,
+                    linear_last_attempt_at = ?4
+                WHERE session_id = ?1 AND idempotency_key = ?2
+                ",
+                params![session_id, idempotency_key, error, attempted_at],
+            )?;
+            touch_session(connection, session_id)?;
             Ok(())
         })
     }
@@ -969,10 +1129,7 @@ impl AppDatabase {
                 ],
             )?;
 
-            connection.execute(
-                "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
-                params![session_id, now_iso()],
-            )?;
+            touch_session(connection, session_id)?;
             refresh_session_search(connection, session_id)?;
 
             Ok(MessageRow {
@@ -1268,6 +1425,8 @@ impl AppDatabase {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::ErrorCode;
+
     use super::AppDatabase;
 
     #[test]
@@ -1316,5 +1475,74 @@ mod tests {
 
         assert!(first.is_some());
         assert!(second.is_none());
+    }
+
+    #[test]
+    fn generated_ticket_idempotency_is_scoped_per_session() {
+        let database = AppDatabase::open_in_memory().expect("database should initialize");
+        let first_session = database
+            .create_session("Session A")
+            .expect("first session should exist");
+        let second_session = database
+            .create_session("Session B")
+            .expect("second session should exist");
+
+        database
+            .replace_generated_tickets(
+                &first_session.id,
+                &[super::GeneratedTicketInputRow {
+                    idempotency_key: "same-key".to_string(),
+                    title: "First".to_string(),
+                    description: "Description".to_string(),
+                    acceptance_criteria: "[\"one\"]".to_string(),
+                    ticket_type: "Task".to_string(),
+                    source_line: None,
+                }],
+            )
+            .expect("first session ticket should save");
+        database
+            .replace_generated_tickets(
+                &second_session.id,
+                &[super::GeneratedTicketInputRow {
+                    idempotency_key: "same-key".to_string(),
+                    title: "Second".to_string(),
+                    description: "Description".to_string(),
+                    acceptance_criteria: "[\"one\"]".to_string(),
+                    ticket_type: "Task".to_string(),
+                    source_line: None,
+                }],
+            )
+            .expect("second session ticket should save");
+
+        let connection = database.connect().expect("database connection should open");
+        let duplicate = connection.execute(
+            "
+            INSERT INTO generated_tickets (
+                id,
+                session_id,
+                title,
+                description,
+                acceptance_criteria,
+                type,
+                idempotency_key
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ",
+            rusqlite::params![
+                "duplicate",
+                first_session.id,
+                "Duplicate",
+                "Description",
+                "[\"one\"]",
+                "Task",
+                "same-key"
+            ],
+        );
+
+        match duplicate {
+            Err(rusqlite::Error::SqliteFailure(error, _)) => {
+                assert_eq!(error.code, ErrorCode::ConstraintViolation);
+            }
+            other => panic!("expected duplicate constraint violation, got {other:?}"),
+        }
     }
 }

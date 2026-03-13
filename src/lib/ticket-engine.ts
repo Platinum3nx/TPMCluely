@@ -67,6 +67,10 @@ export function generateTicketsFromSession(detail: SessionDetail): GeneratedTick
         linearIssueKey: null,
         linearIssueUrl: null,
         pushedAt: null,
+        linearPushState: "pending",
+        linearLastError: null,
+        linearLastAttemptAt: null,
+        linearDeduped: false,
         createdAt: detail.session.updatedAt,
       } satisfies GeneratedTicket;
     })

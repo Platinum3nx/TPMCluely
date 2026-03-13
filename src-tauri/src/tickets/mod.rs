@@ -57,6 +57,7 @@ pub struct TicketCandidate {
 pub struct TicketGenerationResult {
     pub tickets: Vec<TicketCandidate>,
     pub warnings: Vec<String>,
+    pub raw_ticket_count: usize,
 }
 
 #[derive(Debug, Error)]
@@ -314,8 +315,11 @@ pub async fn generate_tickets(
         }
     };
 
+    let raw_ticket_count = parsed.len();
+
     Ok(TicketGenerationResult {
         tickets: normalize_and_validate_tickets(parsed),
         warnings,
+        raw_ticket_count,
     })
 }

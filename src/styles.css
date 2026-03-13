@@ -277,6 +277,11 @@ button {
   padding: 12px 14px;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .secondary-button {
   background: rgba(15, 31, 35, 0.9);
 }
@@ -361,6 +366,35 @@ button {
 
 .section-meta {
   font-size: 0.85rem;
+}
+
+.ticket-dashboard-toolbar,
+.ticket-dashboard-meta {
+  display: flex;
+  gap: 16px;
+}
+
+.ticket-dashboard-toolbar {
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.ticket-dashboard-meta {
+  flex-direction: column;
+}
+
+.ticket-dashboard-meta span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ticket-status-error {
+  margin: 12px 0 0;
+  color: var(--danger);
 }
 
 .field-grid {

@@ -66,6 +66,11 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           action_items_md       TEXT,
           follow_up_email_md    TEXT,
           notes_md              TEXT,
+          ticket_generation_state TEXT NOT NULL DEFAULT 'not_started' CHECK (
+            ticket_generation_state IN ('not_started', 'succeeded', 'failed')
+          ),
+          ticket_generation_error TEXT,
+          ticket_generated_at   TEXT,
           created_at            TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -147,11 +152,15 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           linear_issue_key      TEXT,
           linear_issue_url      TEXT,
           pushed_at             TEXT,
+          linear_push_state     TEXT NOT NULL DEFAULT 'pending' CHECK (linear_push_state IN ('pending', 'pushed', 'failed')),
+          linear_last_error     TEXT,
+          linear_last_attempt_at TEXT,
+          linear_deduped        INTEGER NOT NULL DEFAULT 0,
           created_at            TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_tickets_idempotency
-          ON generated_tickets(idempotency_key);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_tickets_session_idempotency
+          ON generated_tickets(session_id, idempotency_key);
 
         CREATE TABLE IF NOT EXISTS settings (
           key                   TEXT PRIMARY KEY,
@@ -203,11 +212,41 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
     add_column_if_missing(connection, "chat_messages", "context_snapshot", "TEXT")?;
     add_column_if_missing(connection, "chat_messages", "attachments_json", "TEXT")?;
     add_column_if_missing(connection, "generated_tickets", "source_line", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "sessions",
+        "ticket_generation_state",
+        "TEXT NOT NULL DEFAULT 'not_started'",
+    )?;
+    add_column_if_missing(connection, "sessions", "ticket_generation_error", "TEXT")?;
+    add_column_if_missing(connection, "sessions", "ticket_generated_at", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "generated_tickets",
+        "linear_push_state",
+        "TEXT NOT NULL DEFAULT 'pending'",
+    )?;
+    add_column_if_missing(connection, "generated_tickets", "linear_last_error", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "generated_tickets",
+        "linear_last_attempt_at",
+        "TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "generated_tickets",
+        "linear_deduped",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     connection.execute_batch(
         "
         CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_session_dedupe
           ON transcript_segments(session_id, dedupe_key)
           WHERE dedupe_key IS NOT NULL;
+        DROP INDEX IF EXISTS idx_generated_tickets_idempotency;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_tickets_session_idempotency
+          ON generated_tickets(session_id, idempotency_key);
         ",
     )?;
 
