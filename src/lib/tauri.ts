@@ -336,6 +336,14 @@ export async function setOverlayOpen(open: boolean): Promise<RuntimeSnapshot> {
   return invoke<RuntimeSnapshot>("set_overlay_open", { open });
 }
 
+export async function setStealthMode(enabled: boolean): Promise<RuntimeSnapshot> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return getMockRuntimeState();
+  }
+
+  return invoke<RuntimeSnapshot>("set_stealth_mode", { enabled });
+}
+
 export async function searchSessions(query: string): Promise<SearchSessionResult[]> {
   if (assertSupportedRuntime() === "browser-mock") {
     return searchMockSessions(query);

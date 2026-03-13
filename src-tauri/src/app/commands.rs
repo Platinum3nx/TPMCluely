@@ -6,7 +6,7 @@ use base64::Engine as _;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::app::state::AppState;
@@ -2586,6 +2586,20 @@ pub fn get_runtime_state(state: State<'_, AppState>) -> RuntimeSnapshot {
 #[tauri::command]
 pub fn set_overlay_open(state: State<'_, AppState>, open: bool) -> RuntimeSnapshot {
     state.window_controller().set_overlay_open(open);
+    get_runtime_state(state)
+}
+
+#[tauri::command]
+pub fn set_stealth_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> RuntimeSnapshot {
+    use crate::window::set_stealth_enabled;
+    if let Some(window) = app.get_webview_window("main") {
+        set_stealth_enabled(&window, enabled);
+    }
+    state.window_controller().set_stealth_active(enabled);
     get_runtime_state(state)
 }
 

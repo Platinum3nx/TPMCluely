@@ -25,6 +25,7 @@ import {
   searchSessions,
   setGeneratedTicketReviewState,
   setOverlayOpen as persistOverlayOpen,
+  setStealthMode as persistStealthMode,
   startSession,
   updateBrowserCaptureSession,
   updateGeneratedTicketDraft,
@@ -156,10 +157,12 @@ export default function App() {
   const [systemAudioPickerOpen, setSystemAudioPickerOpen] = useState(false);
   const [systemAudioPickerRequest, setSystemAudioPickerRequest] = useState<SystemAudioPickerRequest | null>(null);
   const [systemAudioSources, setSystemAudioSources] = useState<SystemAudioSource[]>([]);
+  const [stealthMode, setStealthMode] = useState(false);
 
   const previousWindowFrameRef = useRef<WindowFrame | null>(null);
   const overlayOpenRef = useRef(false);
   const activeSessionRef = useRef<SessionDetail | null>(null);
+  const stealthModeRef = useRef(false);
 
   function applySessionDetail(detail: SessionDetail | null) {
     if (!detail) {
@@ -272,6 +275,10 @@ export default function App() {
     overlayOpenRef.current = overlayOpen;
   }, [overlayOpen]);
 
+  useEffect(() => {
+    stealthModeRef.current = stealthMode;
+  }, [stealthMode]);
+
   function buildRendererPreflightChecks(
     microphoneChecks = microphonePreflightChecks,
     systemAudioCheck = systemAudioPreflightCheck
@@ -327,6 +334,12 @@ export default function App() {
       setPrompts(payload.prompts);
       setKnowledgeFiles(payload.knowledgeFiles);
       setOverlayOpen(payload.runtime.window.overlayOpen);
+
+      const stealthEnabled = getSettingValue(payload.settings, "stealth_mode", "true") === "true";
+      setStealthMode(stealthEnabled);
+      if (stealthEnabled) {
+        void persistStealthMode(true).catch(() => undefined);
+      }
 
       const runtimeActiveSessionId = payload.runtime.session.activeSessionId;
       const activeSession =
@@ -455,14 +468,25 @@ export default function App() {
 
       const appWindow = getCurrentWindow();
       const monitor = await currentMonitor();
-      const width = activeSessionRef.current ? 468 : 430;
-      const height = activeSessionRef.current ? 780 : 440;
 
-      await appWindow.setSize(new LogicalSize(width, height));
-      if (monitor) {
-        const x = monitor.workArea.position.x + monitor.workArea.size.width - width - 28;
-        const y = monitor.workArea.position.y + 28;
-        await appWindow.setPosition(new LogicalPosition(x, y));
+      if (stealthModeRef.current) {
+        const width = 440;
+        const height = activeSessionRef.current ? 520 : 52;
+        await appWindow.setSize(new LogicalSize(width, height));
+        if (monitor) {
+          const x = monitor.workArea.position.x + Math.round((monitor.workArea.size.width - width) / 2);
+          const y = monitor.workArea.position.y;
+          await appWindow.setPosition(new LogicalPosition(x, y));
+        }
+      } else {
+        const width = activeSessionRef.current ? 468 : 430;
+        const height = activeSessionRef.current ? 780 : 440;
+        await appWindow.setSize(new LogicalSize(width, height));
+        if (monitor) {
+          const x = monitor.workArea.position.x + monitor.workArea.size.width - width - 28;
+          const y = monitor.workArea.position.y + 28;
+          await appWindow.setPosition(new LogicalPosition(x, y));
+        }
       }
     } catch {
       return;
@@ -499,14 +523,20 @@ export default function App() {
         await appWindow.setAlwaysOnTop(overlayAlwaysOnTop).catch(() => undefined);
         await appWindow.setVisibleOnAllWorkspaces(true).catch(() => undefined);
         await appWindow.setTitleBarStyle("overlay").catch(() => undefined);
-        await appWindow.setShadow(true).catch(() => undefined);
+        await appWindow.setShadow(!stealthModeRef.current).catch(() => undefined);
         overlayOpenRef.current = true;
+        if (stealthModeRef.current) {
+          await persistStealthMode(true).catch(() => undefined);
+        }
         await updateOverlayWindowLayout();
         await appWindow.show();
         await appWindow.setFocus().catch(() => undefined);
         return;
       }
 
+      if (stealthModeRef.current) {
+        await persistStealthMode(false).catch(() => undefined);
+      }
       await appWindow.setDecorations(true).catch(() => undefined);
       await appWindow.setAlwaysOnTop(false).catch(() => undefined);
       await appWindow.setVisibleOnAllWorkspaces(false).catch(() => undefined);
@@ -1149,7 +1179,7 @@ export default function App() {
   if (overlayOpen) {
     return (
       <main className="app-shell app-shell-overlay">
-        {error ? (
+        {error && !stealthMode ? (
           <div className="inline-alert">
             <strong>Last error</strong>
             <p>{error}</p>
@@ -1187,6 +1217,7 @@ export default function App() {
           screenShareOwnedByCapture={screenShareOwnedByCapture}
           screenShareState={screenShareState}
           selectedMicrophoneDeviceId={selectedMicrophoneDeviceId}
+          stealthMode={stealthMode}
           systemAudioPickerError={systemAudioPickerError}
           systemAudioPickerLoading={systemAudioPickerLoading}
           systemAudioPickerOpen={systemAudioPickerOpen}
