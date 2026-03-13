@@ -1,5 +1,12 @@
+import { SpeakerRoster } from "../components/SpeakerRoster";
 import { useState } from "react";
-import type { CaptureMode, TranscriptSegment } from "../lib/types";
+import type { CaptureMode, SessionSpeaker, TranscriptSegment } from "../lib/types";
+
+const LOW_CONFIDENCE_THRESHOLD = 0.6;
+
+function displaySpeakerLabel(label: string | null): string {
+  return label?.trim() || "Unattributed";
+}
 
 interface TranscriptPanelProps {
   captureMode: CaptureMode;
@@ -7,9 +14,11 @@ interface TranscriptPanelProps {
   overlayOpen: boolean;
   partialTranscript: string;
   sessionId: string | null;
+  speakers: SessionSpeaker[];
   showManualComposer?: boolean;
   transcripts: TranscriptSegment[];
   onAppendTranscript: (speakerLabel: string, text: string) => Promise<void>;
+  onRenameSpeaker: (sessionId: string, speakerId: string, displayLabel: string) => Promise<void>;
 }
 
 export function TranscriptPanel({
@@ -18,9 +27,11 @@ export function TranscriptPanel({
   overlayOpen,
   partialTranscript,
   sessionId,
+  speakers,
   showManualComposer = true,
   transcripts,
   onAppendTranscript,
+  onRenameSpeaker,
 }: TranscriptPanelProps) {
   const [speaker, setSpeaker] = useState("PM");
   const [line, setLine] = useState("");
@@ -39,6 +50,14 @@ export function TranscriptPanel({
           <p>{partialTranscript}</p>
         </div>
       ) : null}
+      {sessionId ? (
+        <SpeakerRoster
+          sessionId={sessionId}
+          speakers={speakers}
+          onRenameSpeaker={onRenameSpeaker}
+          title="Session Speakers"
+        />
+      ) : null}
       <div className="transcript-feed">
         {transcripts.length === 0 ? (
           <div className="empty-block">
@@ -54,7 +73,12 @@ export function TranscriptPanel({
         ) : (
           transcripts.map((segment) => (
             <div key={segment.id} className="transcript-line">
-              <span>{segment.speakerLabel ?? "Speaker"}</span>
+              <span>
+                {displaySpeakerLabel(segment.speakerLabel)}
+                {segment.speakerConfidence != null && segment.speakerConfidence < LOW_CONFIDENCE_THRESHOLD ? (
+                  <small className="speaker-confidence-flag">Low confidence</small>
+                ) : null}
+              </span>
               <p>{segment.text}</p>
             </div>
           ))

@@ -23,7 +23,9 @@ Quality rules:
 - Generate between 3 and 8 tickets depending on transcript density
 - Keep titles specific and action-oriented
 - Avoid duplicate tickets
-- Ensure every acceptance criterion can be objectively verified`;
+- Ensure every acceptance criterion can be objectively verified
+- Treat speaker-attributed commitments as grounded ownership evidence only when the transcript explicitly supports that attribution
+- Do not invent owners or certainty when the transcript is unattributed or ambiguous`;
 
 const REPAIR_PROMPT = `Repair the provided content into a strict JSON array of ticket objects.
 Rules:

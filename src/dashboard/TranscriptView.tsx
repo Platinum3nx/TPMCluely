@@ -1,5 +1,11 @@
 import type { TranscriptSegment } from "../lib/types";
 
+const LOW_CONFIDENCE_THRESHOLD = 0.6;
+
+function displaySpeakerLabel(label: string | null): string {
+  return label?.trim() || "Unattributed";
+}
+
 interface TranscriptViewProps {
   transcripts: TranscriptSegment[];
   highlightedSequenceNo?: number | null;
@@ -18,7 +24,12 @@ export function TranscriptView({ transcripts, highlightedSequenceNo = null }: Tr
             key={segment.id}
             className={`transcript-line ${highlightedSequenceNo === segment.sequenceNo ? "session-list-item-active" : ""}`}
           >
-            <span>{segment.speakerLabel ?? "Speaker"}</span>
+            <span>
+              {displaySpeakerLabel(segment.speakerLabel)}
+              {segment.speakerConfidence != null && segment.speakerConfidence < LOW_CONFIDENCE_THRESHOLD ? (
+                <small className="speaker-confidence-flag">Low confidence</small>
+              ) : null}
+            </span>
             <p>{segment.text}</p>
           </div>
         ))}

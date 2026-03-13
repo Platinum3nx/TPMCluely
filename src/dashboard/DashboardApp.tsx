@@ -14,6 +14,7 @@ interface DashboardAppProps {
   onSearchSessions: (query: string) => Promise<void>;
   onSelectSession: (sessionId: string, transcriptSequenceNo?: number | null) => Promise<void>;
   onExportSession: (sessionDetail: SessionDetailModel) => void;
+  onRenameSpeaker: (sessionId: string, speakerId: string, displayLabel: string) => Promise<void>;
   onGenerateTickets: (sessionId: string) => Promise<void>;
   onPushGeneratedTicket: (sessionId: string, idempotencyKey: string) => Promise<void>;
   onPushGeneratedTickets: (sessionId: string) => Promise<void>;
@@ -40,6 +41,7 @@ export function DashboardApp({
   onSearchSessions,
   onSelectSession,
   onExportSession,
+  onRenameSpeaker,
   onGenerateTickets,
   onPushGeneratedTicket,
   onPushGeneratedTickets,
@@ -94,6 +96,7 @@ export function DashboardApp({
             sessionDetail={sessionDetail}
             highlightedSequenceNo={highlightedSequenceNo}
             onExportSession={onExportSession}
+            onRenameSpeaker={onRenameSpeaker}
           />
           <TicketDashboard
             sessionDetail={sessionDetail}

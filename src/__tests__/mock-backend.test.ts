@@ -5,6 +5,7 @@ import {
   completeMockSession,
   pushMockGeneratedTicket,
   regenerateMockSessionTickets,
+  renameMockSessionSpeaker,
   saveMockSecret,
   setMockGeneratedTicketReviewState,
   startMockSession,
@@ -78,5 +79,37 @@ describe("mock ticket pipeline", () => {
     expect(
       regenerated?.generatedTickets.find((ticket) => ticket.idempotencyKey === firstTicket?.idempotencyKey)?.linearPushState
     ).toBe("pushed");
+  });
+
+  it("reuses existing manual speakers and renames them across the session", async () => {
+    const session = await startMockSession({ title: "Ownership review" });
+    const first = await appendMockTranscriptSegment({
+      sessionId: session.session.id,
+      speakerLabel: "PM",
+      text: "I will coordinate the rollout checklist.",
+      source: "manual",
+    });
+    const firstSpeakerId = first?.transcripts[0]?.speakerId;
+    expect(firstSpeakerId).toBeTruthy();
+    expect(first?.speakers).toHaveLength(1);
+
+    const second = await appendMockTranscriptSegment({
+      sessionId: session.session.id,
+      speakerLabel: "pm",
+      text: "I will follow up with QA.",
+      source: "manual",
+    });
+    expect(second?.transcripts[1]?.speakerId).toBe(firstSpeakerId);
+    expect(second?.speakers).toHaveLength(1);
+
+    const renamed = await renameMockSessionSpeaker({
+      sessionId: session.session.id,
+      speakerId: firstSpeakerId ?? "",
+      displayLabel: "Alice",
+    });
+
+    expect(renamed?.speakers[0]?.displayLabel).toBe("Alice");
+    expect(renamed?.transcripts.every((segment) => segment.speakerLabel === "Alice")).toBe(true);
+    expect(renamed?.session.actionItemsMd).toContain("Alice:");
   });
 });

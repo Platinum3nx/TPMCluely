@@ -1,11 +1,12 @@
 import { AssistantFeed } from "../components/AssistantFeed";
-import { captureModeLabel } from "../lib/preflight";
+import { captureModeLabel, getPreflightModeLabel } from "../lib/preflight";
 import type {
   AudioInputDevice,
   CaptureHealthPayload,
   CaptureMode,
   DynamicActionKey,
   PreflightCheck,
+  PreflightModeState,
   ScreenShareState,
   SessionDetail,
   SystemAudioSource,
@@ -40,7 +41,9 @@ interface SessionWidgetProps {
   preflightBlockingChecks: PreflightCheck[];
   preflightCheckedAt: string | null;
   preflightLoading: boolean;
+  preflightState: PreflightModeState;
   preflightSummary: string;
+  preflightWarningChecks: PreflightCheck[];
   screenContextEnabled: boolean;
   screenShareError: string | null;
   screenShareOwnedByCapture: boolean;
@@ -52,6 +55,7 @@ interface SessionWidgetProps {
   systemAudioSources: SystemAudioSource[];
   transcriptFreshnessLabel: string;
   onAppendTranscript: (speakerLabel: string, text: string) => Promise<void>;
+  onRenameSpeaker: (sessionId: string, speakerId: string, displayLabel: string) => Promise<void>;
   onAsk: (prompt: string) => Promise<void>;
   onCompleteSession: (sessionId: string) => Promise<void>;
   onDynamicAction: (action: DynamicActionKey) => Promise<void>;
@@ -136,6 +140,26 @@ function renderBlockingChecks(checks: PreflightCheck[]) {
   );
 }
 
+function renderVerificationChecks(checks: PreflightCheck[]) {
+  if (checks.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="inline-alert inline-alert-soft">
+      <strong>Selected mode still needs verification</strong>
+      <div className="check-list">
+        {checks.map((check) => (
+          <div key={check.key} className="check-list-item">
+            <span>{check.title}</span>
+            <strong>{check.message}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SessionWidget({
   activeSession,
   assistantError,
@@ -160,7 +184,9 @@ export function SessionWidget({
   preflightBlockingChecks,
   preflightCheckedAt,
   preflightLoading,
+  preflightState,
   preflightSummary,
+  preflightWarningChecks,
   screenContextEnabled,
   screenShareError,
   screenShareOwnedByCapture,
@@ -172,6 +198,7 @@ export function SessionWidget({
   systemAudioSources,
   transcriptFreshnessLabel,
   onAppendTranscript,
+  onRenameSpeaker,
   onAsk,
   onCompleteSession,
   onDynamicAction,
@@ -194,6 +221,29 @@ export function SessionWidget({
   const status = activeSession?.session.status ?? "idle";
   const overlayPrimaryLabel = captureMode === "manual" ? "Start Meeting" : "Start Listening";
   const listeningLabel = formatListeningLabel(captureState, isCapturing);
+  const showRecoveryActions = captureMode !== "manual" && (preflightState !== "ready" || Boolean(captureError));
+
+  function renderRecoveryActions() {
+    if (!showRecoveryActions) {
+      return null;
+    }
+
+    return (
+      <div className="toolbar-row">
+        <button type="button" className="secondary-button" disabled={preflightLoading} onClick={() => void onRefreshPreflight()}>
+          {preflightLoading ? "Checking..." : "Retry verification"}
+        </button>
+        {captureMode === "system_audio" ? (
+          <button type="button" className="secondary-button" onClick={() => onSetCaptureMode("microphone")}>
+            Switch to microphone
+          </button>
+        ) : null}
+        <button type="button" className="secondary-button" onClick={() => onSetCaptureMode("manual")}>
+          Switch to manual
+        </button>
+      </div>
+    );
+  }
 
   if (overlayOpen) {
     return (
@@ -279,7 +329,7 @@ export function SessionWidget({
                 <div className="preflight-summary preflight-summary-overlay">
                   <div>
                     <p className="muted-label">{captureModeLabel(captureMode)} readiness</p>
-                    <strong>{canStartSelectedMode ? "Ready" : "Blocked"}</strong>
+                    <strong>{getPreflightModeLabel(preflightState)}</strong>
                     <p className="card-detail">{preflightSummary}</p>
                   </div>
                   <button type="button" className="secondary-button" disabled={preflightLoading} onClick={() => void onRefreshPreflight()}>
@@ -287,7 +337,9 @@ export function SessionWidget({
                   </button>
                 </div>
 
+                {preflightState === "verification_required" ? renderVerificationChecks(preflightWarningChecks) : null}
                 {renderBlockingChecks(preflightBlockingChecks)}
+                {renderRecoveryActions()}
 
                 <div className="overlay-launch-actions">
                   <button
@@ -358,7 +410,7 @@ export function SessionWidget({
                     </div>
                     <div className="health-pill">
                       <span>Preflight</span>
-                      <strong>{canStartSelectedMode ? "Ready" : "Blocked"}</strong>
+                      <strong>{getPreflightModeLabel(preflightState)}</strong>
                     </div>
                   </div>
 
@@ -418,7 +470,9 @@ export function SessionWidget({
                       <p>{microphoneSelectionWarning}</p>
                     </div>
                   ) : null}
+                  {preflightState === "verification_required" ? renderVerificationChecks(preflightWarningChecks) : null}
                   {renderBlockingChecks(preflightBlockingChecks)}
+                  {renderRecoveryActions()}
                   {captureError ? (
                     <div className="inline-alert inline-alert-soft">
                       <strong>Listening needs attention</strong>
@@ -457,9 +511,11 @@ export function SessionWidget({
                     overlayOpen
                     partialTranscript={partialTranscript}
                     sessionId={activeSession.session.id}
+                    speakers={activeSession.speakers}
                     showManualComposer={false}
                     transcripts={activeSession.transcripts.slice(-8)}
                     onAppendTranscript={onAppendTranscript}
+                    onRenameSpeaker={onRenameSpeaker}
                   />
                   <AssistantFeed messages={activeSession.messages} maxItems={5} />
                 </div>
@@ -508,7 +564,9 @@ export function SessionWidget({
             preflightBlockingChecks={preflightBlockingChecks}
             preflightCheckedAt={preflightCheckedAt}
             preflightLoading={preflightLoading}
+            preflightState={preflightState}
             preflightSummary={preflightSummary}
+            preflightWarningChecks={preflightWarningChecks}
             screenContextEnabled={screenContextEnabled}
             screenShareError={screenShareError}
             screenShareOwnedByCapture={screenShareOwnedByCapture}
@@ -553,8 +611,10 @@ export function SessionWidget({
             overlayOpen={overlayOpen}
             partialTranscript={partialTranscript}
             sessionId={activeSession?.session.id ?? null}
+            speakers={activeSession?.speakers ?? []}
             transcripts={activeSession?.transcripts ?? []}
             onAppendTranscript={onAppendTranscript}
+            onRenameSpeaker={onRenameSpeaker}
           />
 
           <AssistantFeed messages={activeSession?.messages ?? []} />

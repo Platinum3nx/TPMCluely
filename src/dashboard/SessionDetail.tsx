@@ -1,4 +1,5 @@
 import { AssistantFeed } from "../components/AssistantFeed";
+import { SpeakerRoster } from "../components/SpeakerRoster";
 import type { SessionDetail as SessionDetailModel } from "../lib/types";
 import { NotesView } from "./NotesView";
 import { TranscriptView } from "./TranscriptView";
@@ -6,10 +7,16 @@ import { TranscriptView } from "./TranscriptView";
 interface SessionDetailProps {
   highlightedSequenceNo?: number | null;
   onExportSession: (sessionDetail: SessionDetailModel) => void;
+  onRenameSpeaker: (sessionId: string, speakerId: string, displayLabel: string) => Promise<void>;
   sessionDetail: SessionDetailModel | null;
 }
 
-export function SessionDetail({ highlightedSequenceNo = null, onExportSession, sessionDetail }: SessionDetailProps) {
+export function SessionDetail({
+  highlightedSequenceNo = null,
+  onExportSession,
+  onRenameSpeaker,
+  sessionDetail,
+}: SessionDetailProps) {
   if (!sessionDetail) {
     return (
       <article className="card">
@@ -45,6 +52,11 @@ export function SessionDetail({ highlightedSequenceNo = null, onExportSession, s
         </div>
       </article>
       <NotesView session={sessionDetail.session} />
+      <SpeakerRoster
+        sessionId={sessionDetail.session.id}
+        speakers={sessionDetail.speakers}
+        onRenameSpeaker={onRenameSpeaker}
+      />
       <AssistantFeed
         messages={sessionDetail.messages}
         title="Assistant Trace"

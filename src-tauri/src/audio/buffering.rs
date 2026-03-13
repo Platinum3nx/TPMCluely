@@ -104,8 +104,11 @@ fn to_int16_le_bytes(samples: &[f32]) -> Vec<u8> {
     bytes
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct FinalizedUtterance {
+    pub speaker_id: Option<String>,
+    pub speaker_label: Option<String>,
+    pub speaker_confidence: Option<f64>,
     pub text: String,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
@@ -113,48 +116,95 @@ pub struct FinalizedUtterance {
 
 #[derive(Debug, Default)]
 pub struct FinalizedUtteranceBuilder {
-    parts: Vec<String>,
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
+    utterances: Vec<FinalizedUtterance>,
 }
 
 impl FinalizedUtteranceBuilder {
-    pub fn push(&mut self, text: &str, start_ms: Option<i64>, end_ms: Option<i64>) {
-        let normalized = normalize_transcript_text(text);
-        if normalized.is_empty() {
+    pub fn push(
+        &mut self,
+        speaker_id: Option<&str>,
+        speaker_label: Option<&str>,
+        speaker_confidence: Option<f64>,
+        text: &str,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    ) {
+        let utterance = FinalizedUtterance {
+            speaker_id: speaker_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            speaker_label: speaker_label
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            speaker_confidence,
+            text: normalize_transcript_text(text),
+            start_ms,
+            end_ms,
+        };
+        self.push_utterance(utterance);
+    }
+
+    pub fn push_utterance(&mut self, utterance: FinalizedUtterance) {
+        if utterance.text.is_empty() {
             return;
         }
 
-        if self.start_ms.is_none() {
-            self.start_ms = start_ms;
+        if let Some(last) = self.utterances.last_mut() {
+            if can_merge_utterances(last, &utterance) {
+                last.text = normalize_transcript_text(&format!("{} {}", last.text, utterance.text));
+                if last.start_ms.is_none() {
+                    last.start_ms = utterance.start_ms;
+                }
+                last.end_ms = utterance.end_ms.or(last.end_ms);
+                last.speaker_confidence =
+                    merge_confidence(last.speaker_confidence, utterance.speaker_confidence);
+                if last.speaker_label.is_none() {
+                    last.speaker_label = utterance.speaker_label;
+                }
+                return;
+            }
         }
-        self.end_ms = end_ms.or(self.end_ms);
-        self.parts.push(normalized);
+
+        self.utterances.push(utterance);
     }
 
-    pub fn flush(&mut self) -> Option<FinalizedUtterance> {
-        let text = normalize_transcript_text(&self.parts.join(" "));
-        if text.is_empty() {
-            self.parts.clear();
-            self.start_ms = None;
-            self.end_ms = None;
-            return None;
+    pub fn push_utterances<I>(&mut self, utterances: I)
+    where
+        I: IntoIterator<Item = FinalizedUtterance>,
+    {
+        for utterance in utterances {
+            self.push_utterance(utterance);
+        }
+    }
+
+    pub fn flush(&mut self) -> Vec<FinalizedUtterance> {
+        if self.utterances.is_empty() {
+            return Vec::new();
         }
 
-        let utterance = FinalizedUtterance {
-            text,
-            start_ms: self.start_ms,
-            end_ms: self.end_ms,
-        };
-
-        self.parts.clear();
-        self.start_ms = None;
-        self.end_ms = None;
-        Some(utterance)
+        std::mem::take(&mut self.utterances)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.parts.is_empty()
+        self.utterances.is_empty()
+    }
+}
+
+fn can_merge_utterances(left: &FinalizedUtterance, right: &FinalizedUtterance) -> bool {
+    left.speaker_id == right.speaker_id
+        && left.speaker_label == right.speaker_label
+        && !left.text.is_empty()
+        && !right.text.is_empty()
+}
+
+fn merge_confidence(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
     }
 }
 
@@ -167,10 +217,18 @@ pub fn normalize_transcript_text(input: &str) -> String {
         .to_string()
 }
 
-pub fn dedupe_key(source: &str, start_ms: Option<i64>, end_ms: Option<i64>, text: &str) -> String {
+pub fn dedupe_key(
+    source: &str,
+    speaker_id: Option<&str>,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    text: &str,
+) -> String {
     let normalized = normalize_transcript_text(text).to_lowercase();
     let mut digest = Sha256::new();
     digest.update(source.as_bytes());
+    digest.update(b":");
+    digest.update(speaker_id.unwrap_or_default().trim().as_bytes());
     digest.update(b":");
     digest.update(start_ms.unwrap_or_default().to_string().as_bytes());
     digest.update(b":");
@@ -208,22 +266,67 @@ mod tests {
     }
 
     #[test]
-    fn utterance_builder_concatenates_and_clears() {
+    fn utterance_builder_merges_same_speaker_and_clears() {
         let mut builder = FinalizedUtteranceBuilder::default();
-        builder.push("I can own", Some(10), Some(100));
-        builder.push("the backend fix", Some(101), Some(200));
+        builder.push(
+            Some("dg:0"),
+            Some("Speaker 1"),
+            Some(0.8),
+            "I can own",
+            Some(10),
+            Some(100),
+        );
+        builder.push(
+            Some("dg:0"),
+            Some("Speaker 1"),
+            Some(0.7),
+            "the backend fix",
+            Some(101),
+            Some(200),
+        );
 
-        let utterance = builder.flush().expect("utterance should flush");
-        assert_eq!(utterance.text, "I can own the backend fix");
-        assert_eq!(utterance.start_ms, Some(10));
-        assert_eq!(utterance.end_ms, Some(200));
+        let utterances = builder.flush();
+        assert_eq!(utterances.len(), 1);
+        assert_eq!(utterances[0].speaker_id.as_deref(), Some("dg:0"));
+        assert_eq!(utterances[0].speaker_label.as_deref(), Some("Speaker 1"));
+        assert_eq!(utterances[0].speaker_confidence, Some(0.7));
+        assert_eq!(utterances[0].text, "I can own the backend fix");
+        assert_eq!(utterances[0].start_ms, Some(10));
+        assert_eq!(utterances[0].end_ms, Some(200));
+        assert!(builder.is_empty());
+    }
+
+    #[test]
+    fn utterance_builder_splits_speaker_switches() {
+        let mut builder = FinalizedUtteranceBuilder::default();
+        builder.push(
+            Some("dg:0"),
+            Some("Speaker 1"),
+            None,
+            "I can take the backend fix.",
+            Some(10),
+            Some(200),
+        );
+        builder.push(
+            Some("dg:1"),
+            Some("Speaker 2"),
+            None,
+            "I will handle the frontend follow-up.",
+            Some(201),
+            Some(400),
+        );
+
+        let utterances = builder.flush();
+        assert_eq!(utterances.len(), 2);
+        assert_eq!(utterances[0].speaker_id.as_deref(), Some("dg:0"));
+        assert_eq!(utterances[1].speaker_id.as_deref(), Some("dg:1"));
         assert!(builder.is_empty());
     }
 
     #[test]
     fn dedupe_key_is_stable() {
-        let left = dedupe_key("capture", Some(1_000), Some(2_000), "Hello   world");
-        let right = dedupe_key("capture", Some(1_000), Some(2_000), "hello world");
+        let left = dedupe_key("capture", Some("dg:0"), Some(1_000), Some(2_000), "Hello   world");
+        let right = dedupe_key("capture", Some("dg:0"), Some(1_000), Some(2_000), "hello world");
         assert_eq!(left, right);
     }
 }

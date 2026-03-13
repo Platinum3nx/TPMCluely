@@ -2,6 +2,89 @@ use rusqlite::Connection;
 
 use super::DatabaseError;
 
+fn normalize_legacy_speaker_id(label: &str) -> String {
+    let mut token = String::new();
+    let mut last_was_separator = false;
+
+    for character in label.trim().chars().flat_map(|value| value.to_lowercase()) {
+        if character.is_ascii_alphanumeric() {
+            token.push(character);
+            last_was_separator = false;
+        } else if !token.is_empty() && !last_was_separator {
+            token.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    let normalized = token.trim_matches('-');
+    if normalized.is_empty() {
+        "speaker".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn backfill_session_speakers(connection: &Connection) -> Result<(), DatabaseError> {
+    connection.execute(
+        "
+        UPDATE transcript_segments
+        SET speaker_label = NULL,
+            speaker_id = NULL,
+            speaker_confidence = NULL
+        WHERE lower(trim(COALESCE(speaker_label, ''))) = 'meeting'
+        ",
+        [],
+    )?;
+
+    let mut statement = connection.prepare(
+        "
+        SELECT DISTINCT session_id, speaker_label
+        FROM transcript_segments
+        WHERE speaker_label IS NOT NULL
+          AND trim(speaker_label) != ''
+          AND lower(trim(speaker_label)) != 'meeting'
+        ORDER BY session_id ASC, speaker_label ASC
+        ",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in rows {
+        let (session_id, speaker_label) = row?;
+        let display_label = speaker_label.trim();
+        let speaker_id = format!("legacy:{}", normalize_legacy_speaker_id(display_label));
+
+        connection.execute(
+            "
+            INSERT OR IGNORE INTO session_speakers (
+                session_id,
+                speaker_id,
+                provider_label,
+                display_label,
+                source,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, 'manual', datetime('now'), datetime('now'))
+            ",
+            rusqlite::params![session_id, speaker_id, display_label, display_label],
+        )?;
+        connection.execute(
+            "
+            UPDATE transcript_segments
+            SET speaker_id = COALESCE(speaker_id, ?3),
+                speaker_label = ?4
+            WHERE session_id = ?1
+              AND speaker_label IS NOT NULL
+              AND lower(trim(speaker_label)) = lower(trim(?2))
+            ",
+            rusqlite::params![session_id, speaker_label, speaker_id, display_label],
+        )?;
+    }
+
+    Ok(())
+}
+
 fn column_exists(
     connection: &Connection,
     table: &str,
@@ -83,6 +166,7 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           id                    TEXT PRIMARY KEY,
           session_id            TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
           sequence_no           INTEGER NOT NULL,
+          speaker_id            TEXT,
           speaker_label         TEXT,
           speaker_confidence    REAL,
           start_ms              INTEGER,
@@ -100,6 +184,21 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_session_dedupe
           ON transcript_segments(session_id, dedupe_key)
           WHERE dedupe_key IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_transcript_session_speaker
+          ON transcript_segments(session_id, speaker_id)
+          WHERE speaker_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS session_speakers (
+          session_id            TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          speaker_id            TEXT NOT NULL,
+          provider_label        TEXT,
+          display_label         TEXT NOT NULL,
+          source                TEXT NOT NULL CHECK (source IN ('provider', 'manual')),
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (session_id, speaker_id)
+        );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
           id                    TEXT PRIMARY KEY,
@@ -213,6 +312,18 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
     add_column_if_missing(
         connection,
         "transcript_segments",
+        "speaker_id",
+        "TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "transcript_segments",
+        "speaker_confidence",
+        "REAL",
+    )?;
+    add_column_if_missing(
+        connection,
+        "transcript_segments",
         "source",
         "TEXT NOT NULL DEFAULT 'manual'",
     )?;
@@ -281,11 +392,15 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_session_dedupe
           ON transcript_segments(session_id, dedupe_key)
           WHERE dedupe_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_transcript_session_speaker
+          ON transcript_segments(session_id, speaker_id)
+          WHERE speaker_id IS NOT NULL;
         DROP INDEX IF EXISTS idx_generated_tickets_idempotency;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_tickets_session_idempotency
           ON generated_tickets(session_id, idempotency_key);
         ",
     )?;
+    backfill_session_speakers(connection)?;
 
     Ok(())
 }

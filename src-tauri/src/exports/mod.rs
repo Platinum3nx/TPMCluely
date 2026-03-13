@@ -7,7 +7,10 @@ pub fn build_session_markdown(detail: &SessionDetailPayload) -> String {
         .map(|segment| {
             format!(
                 "- {}: {}",
-                segment.speaker_label.as_deref().unwrap_or("Speaker"),
+                segment
+                    .speaker_label
+                    .as_deref()
+                    .unwrap_or("Unattributed"),
                 segment.text
             )
         })

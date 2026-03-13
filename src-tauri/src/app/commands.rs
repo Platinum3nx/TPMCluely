@@ -16,7 +16,7 @@ use crate::audio::{
 };
 use crate::db::{
     GeneratedTicketInputRow, GeneratedTicketRow, MessageRow, SearchResultRow, SessionDerivedUpdate,
-    SessionRow, TranscriptRow,
+    SessionRow, SessionSpeakerRow, TranscriptRow,
 };
 use crate::exports::build_session_markdown;
 use crate::knowledge::{
@@ -133,13 +133,27 @@ pub struct TranscriptSegmentPayload {
     pub id: String,
     pub session_id: String,
     pub sequence_no: i64,
+    pub speaker_id: Option<String>,
     pub speaker_label: Option<String>,
+    pub speaker_confidence: Option<f64>,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
     pub text: String,
     pub is_final: bool,
     pub source: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSpeakerPayload {
+    pub session_id: String,
+    pub speaker_id: String,
+    pub provider_label: Option<String>,
+    pub display_label: String,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,6 +225,7 @@ pub struct GeneratedTicketPayload {
 #[serde(rename_all = "camelCase")]
 pub struct SessionDetailPayload {
     pub session: SessionRecordPayload,
+    pub speakers: Vec<SessionSpeakerPayload>,
     pub transcripts: Vec<TranscriptSegmentPayload>,
     pub messages: Vec<ChatMessagePayload>,
     pub generated_tickets: Vec<GeneratedTicketPayload>,
@@ -252,6 +267,7 @@ pub struct PreflightCheckPayload {
 pub struct PreflightModePayload {
     pub mode: String,
     pub can_start: bool,
+    pub state: String,
     pub summary: String,
 }
 
@@ -279,16 +295,40 @@ pub struct SaveSecretInput {
 #[serde(rename_all = "camelCase")]
 pub struct StartSessionInput {
     pub title: String,
+    pub initial_status: Option<String>,
+    pub capture_mode: Option<String>,
+    pub capture_target_kind: Option<String>,
+    pub capture_target_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCaptureSessionUpdateInput {
+    pub session_id: String,
+    pub status: String,
+    pub capture_mode: Option<String>,
+    pub capture_target_kind: Option<String>,
+    pub capture_target_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppendTranscriptInput {
     pub session_id: String,
+    pub speaker_id: Option<String>,
     pub speaker_label: Option<String>,
+    pub speaker_confidence: Option<f64>,
     pub text: String,
     pub is_final: Option<bool>,
     pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameSessionSpeakerInput {
+    pub session_id: String,
+    pub speaker_id: String,
+    pub display_label: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -408,18 +448,44 @@ pub(crate) fn map_session(row: SessionRow) -> SessionRecordPayload {
     }
 }
 
+fn parse_session_status(value: &str) -> Result<SessionStatus, String> {
+    match value {
+        "preparing" => Ok(SessionStatus::Preparing),
+        "active" => Ok(SessionStatus::Active),
+        "paused" => Ok(SessionStatus::Paused),
+        "permission_blocked" => Ok(SessionStatus::PermissionBlocked),
+        "capture_error" => Ok(SessionStatus::CaptureError),
+        "provider_degraded" => Ok(SessionStatus::ProviderDegraded),
+        other => Err(format!("Unsupported session status: {other}")),
+    }
+}
+
 pub(crate) fn map_transcript(row: TranscriptRow) -> TranscriptSegmentPayload {
     TranscriptSegmentPayload {
         id: row.id,
         session_id: row.session_id,
         sequence_no: row.sequence_no,
+        speaker_id: row.speaker_id,
         speaker_label: row.speaker_label,
+        speaker_confidence: row.speaker_confidence,
         start_ms: row.start_ms,
         end_ms: row.end_ms,
         text: row.text,
         is_final: row.is_final,
         source: row.source,
         created_at: row.created_at,
+    }
+}
+
+fn map_session_speaker(row: SessionSpeakerRow) -> SessionSpeakerPayload {
+    SessionSpeakerPayload {
+        session_id: row.session_id,
+        speaker_id: row.speaker_id,
+        provider_label: row.provider_label,
+        display_label: row.display_label,
+        source: row.source,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     }
 }
 
@@ -483,18 +549,33 @@ fn to_bullet_md(lines: &[String]) -> String {
         .join("\n")
 }
 
+fn transcript_line_with_speaker(segment: &TranscriptRow) -> String {
+    let label = segment
+        .speaker_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Unattributed");
+    format!("{label}: {}", segment.text.trim())
+}
+
 pub(crate) fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDerivedUpdate {
     let lines = transcripts
         .iter()
         .map(|segment| segment.text.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
+    let attributed_lines = transcripts
+        .iter()
+        .filter(|segment| !segment.text.trim().is_empty())
+        .map(transcript_line_with_speaker)
+        .collect::<Vec<_>>();
 
     let summary_lines = lines.iter().take(4).cloned().collect::<Vec<_>>();
-    let decision_lines = lines
+    let decision_lines = transcripts
         .iter()
-        .filter(|line| {
-            let lowercase = line.to_lowercase();
+        .filter(|segment| {
+            let lowercase = segment.text.to_lowercase();
             lowercase.contains("decid")
                 || lowercase.contains("agree")
                 || lowercase.contains("plan")
@@ -503,12 +584,12 @@ pub(crate) fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDer
                 || lowercase.contains("confirm")
         })
         .take(4)
-        .cloned()
+        .map(transcript_line_with_speaker)
         .collect::<Vec<_>>();
-    let action_lines = lines
+    let action_lines = transcripts
         .iter()
-        .filter(|line| {
-            let lowercase = line.to_lowercase();
+        .filter(|segment| {
+            let lowercase = segment.text.to_lowercase();
             lowercase.contains("will")
                 || lowercase.contains("owner")
                 || lowercase.contains("todo")
@@ -518,7 +599,7 @@ pub(crate) fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDer
                 || lowercase.contains("handle")
         })
         .take(5)
-        .cloned()
+        .map(transcript_line_with_speaker)
         .collect::<Vec<_>>();
 
     let rolling_summary = if summary_lines.is_empty() {
@@ -532,7 +613,7 @@ pub(crate) fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDer
     let final_summary = rolling_summary.clone();
     let decisions_md = to_bullet_md(&decision_lines);
     let action_items_md = to_bullet_md(&action_lines);
-    let notes_md = to_bullet_md(&lines.iter().take(6).cloned().collect::<Vec<_>>());
+    let notes_md = to_bullet_md(&attributed_lines.iter().take(6).cloned().collect::<Vec<_>>());
     let follow_up_email_md = [
         "Team,",
         "",
@@ -1153,6 +1234,11 @@ fn build_preflight_report(input: PreflightInputs) -> PreflightReportPayload {
             PreflightModePayload {
                 mode: "manual".to_string(),
                 can_start: input.database_ready,
+                state: if input.database_ready {
+                    "ready".to_string()
+                } else {
+                    "blocked".to_string()
+                },
                 summary: if input.database_ready {
                     "Manual mode is ready. You can start the meeting even if providers are still being configured.".to_string()
                 } else {
@@ -1162,8 +1248,13 @@ fn build_preflight_report(input: PreflightInputs) -> PreflightReportPayload {
             PreflightModePayload {
                 mode: "microphone".to_string(),
                 can_start: microphone_ready,
+                state: if microphone_ready {
+                    "verification_required".to_string()
+                } else {
+                    "blocked".to_string()
+                },
                 summary: if microphone_ready {
-                    "Microphone capture is ready for a real meeting.".to_string()
+                    "Microphone capture can start once TPMCluely verifies the selected input on this machine.".to_string()
                 } else {
                     "Microphone capture is blocked until Deepgram is configured and microphone permission is available.".to_string()
                 },
@@ -1171,8 +1262,13 @@ fn build_preflight_report(input: PreflightInputs) -> PreflightReportPayload {
             PreflightModePayload {
                 mode: "system_audio".to_string(),
                 can_start: system_audio_ready,
+                state: if system_audio_ready {
+                    "verification_required".to_string()
+                } else {
+                    "blocked".to_string()
+                },
                 summary: if system_audio_ready {
-                    "System-audio capture is ready once you choose a source.".to_string()
+                    "System-audio capture can start once TPMCluely verifies a shareable source on this machine.".to_string()
                 } else {
                     "System-audio capture is blocked until Deepgram, native capture, and Screen Recording are ready.".to_string()
                 },
@@ -1704,6 +1800,12 @@ fn load_session_detail(
 
     match session {
         Some(session_row) => {
+            let speakers = database
+                .list_session_speakers(session_id)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(map_session_speaker)
+                .collect::<Vec<_>>();
             let transcripts = database
                 .list_transcript_segments(session_id)
                 .map_err(|error| error.to_string())?
@@ -1725,6 +1827,7 @@ fn load_session_detail(
 
             Ok(Some(SessionDetailPayload {
                 session: map_session(session_row),
+                speakers,
                 transcripts,
                 messages,
                 generated_tickets,
@@ -1930,23 +2033,82 @@ pub fn start_session(
     state: State<'_, AppState>,
     input: StartSessionInput,
 ) -> Result<SessionDetailPayload, String> {
+    let initial_status = input
+        .initial_status
+        .clone()
+        .unwrap_or_else(|| "active".to_string());
+    let session_status = parse_session_status(&initial_status)?;
+    let capture_mode = input
+        .capture_mode
+        .clone()
+        .unwrap_or_else(|| "manual".to_string());
     let database = state.database();
     let session = database
-        .create_session(input.title.trim())
+        .create_session(
+            input.title.trim(),
+            &initial_status,
+            &capture_mode,
+            input.capture_target_kind.as_deref(),
+            input.capture_target_label.as_deref(),
+        )
         .map_err(|error| error.to_string())?;
     database
         .append_message(
             &session.id,
             "system",
-            "Session started. Transcript capture is ready.",
+            if initial_status == "preparing" {
+                "Session created. Live capture is being verified."
+            } else {
+                "Session started. Transcript capture is ready."
+            },
         )
         .map_err(|error| error.to_string())?;
-    state
-        .session_manager()
-        .mark_active(&session.id, SessionStatus::Active);
+    state.session_manager().mark_active(&session.id, session_status);
 
     load_session_detail(&state, &session.id)?
         .ok_or_else(|| "session detail missing after creation".to_string())
+}
+
+#[tauri::command]
+pub fn update_browser_capture_session(
+    state: State<'_, AppState>,
+    input: BrowserCaptureSessionUpdateInput,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let session_status = parse_session_status(&input.status)?;
+    let existing_detail = load_session_detail(&state, &input.session_id)?
+        .ok_or_else(|| format!("Session {} could not be found.", input.session_id))?;
+
+    let capture_mode = input
+        .capture_mode
+        .clone()
+        .unwrap_or_else(|| existing_detail.session.capture_mode.clone());
+    let capture_target_kind = input
+        .capture_target_kind
+        .clone()
+        .or_else(|| existing_detail.session.capture_target_kind.clone());
+    let capture_target_label = input
+        .capture_target_label
+        .clone()
+        .or_else(|| existing_detail.session.capture_target_label.clone());
+
+    state
+        .database()
+        .update_session_capture_metadata(
+            &input.session_id,
+            &capture_mode,
+            capture_target_kind.as_deref(),
+            capture_target_label.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+    state
+        .database()
+        .update_session_status(&input.session_id, &input.status, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .session_manager()
+        .mark_active(&input.session_id, session_status);
+
+    load_session_detail(&state, &input.session_id)
 }
 
 #[tauri::command]
@@ -2101,11 +2263,39 @@ pub fn append_transcript_segment(
     database
         .append_transcript_segment(
             &input.session_id,
+            input.speaker_id.as_deref(),
             input.speaker_label.as_deref(),
+            input.speaker_confidence,
             input.text.trim(),
             input.is_final.unwrap_or(true),
             input.source.as_deref().unwrap_or("manual"),
         )
+        .map_err(|error| error.to_string())?;
+
+    let transcripts = database
+        .list_transcript_segments(&input.session_id)
+        .map_err(|error| error.to_string())?;
+    let derived = derive_session_update(&transcripts);
+    database
+        .update_session_derived(&input.session_id, &derived)
+        .map_err(|error| error.to_string())?;
+
+    load_session_detail(&state, &input.session_id)
+}
+
+#[tauri::command]
+pub fn rename_session_speaker(
+    state: State<'_, AppState>,
+    input: RenameSessionSpeakerInput,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let trimmed_label = input.display_label.trim();
+    if trimmed_label.is_empty() {
+        return Err("Speaker name cannot be empty.".to_string());
+    }
+
+    let database = state.database();
+    database
+        .rename_session_speaker(&input.session_id, &input.speaker_id, trimmed_label)
         .map_err(|error| error.to_string())?;
 
     let transcripts = database
@@ -2545,18 +2735,22 @@ mod tests {
     use super::{
         build_preflight_report, build_question_prompt, extract_citations,
         format_screen_context_note, generate_grounded_response, map_message,
-        MessageAttachmentPayload, PreflightInputs, ScreenContextInput,
+        parse_session_status, MessageAttachmentPayload, PreflightInputs,
+        ScreenContextInput,
     };
     use crate::audio::CaptureCapabilities;
     use crate::db::{MessageRow, SessionDerivedUpdate, TranscriptRow};
     use crate::permissions::PermissionSnapshot;
+    use crate::session::state_machine::SessionStatus;
 
     fn sample_transcript(sequence_no: i64, text: &str) -> TranscriptRow {
         TranscriptRow {
             id: format!("seg-{sequence_no}"),
             session_id: "session-1".to_string(),
             sequence_no,
+            speaker_id: Some("manual:engineer".to_string()),
             speaker_label: Some("Engineer".to_string()),
+            speaker_confidence: None,
             start_ms: None,
             end_ms: None,
             text: text.to_string(),
@@ -2726,7 +2920,9 @@ mod tests {
             .expect("deepgram key check should exist");
 
         assert!(manual.can_start);
+        assert_eq!(manual.state, "ready");
         assert!(!microphone.can_start);
+        assert_eq!(microphone.state, "blocked");
         assert_eq!(deepgram_key.status, "blocked");
         assert!(microphone.summary.contains("blocked"));
     }
@@ -2769,7 +2965,29 @@ mod tests {
             .expect("screen context check should exist");
 
         assert!(system_audio.can_start);
+        assert_eq!(system_audio.state, "verification_required");
         assert_eq!(screen_context.status, "ready");
-        assert!(system_audio.summary.contains("ready"));
+        assert!(system_audio.summary.contains("verifies a shareable source on this machine"));
+    }
+
+    #[test]
+    fn parse_session_status_accepts_preparing_and_live_error_states() {
+        assert!(matches!(
+            parse_session_status("preparing"),
+            Ok(SessionStatus::Preparing)
+        ));
+        assert!(matches!(
+            parse_session_status("permission_blocked"),
+            Ok(SessionStatus::PermissionBlocked)
+        ));
+        assert!(matches!(
+            parse_session_status("capture_error"),
+            Ok(SessionStatus::CaptureError)
+        ));
+        assert!(matches!(
+            parse_session_status("provider_degraded"),
+            Ok(SessionStatus::ProviderDegraded)
+        ));
+        assert!(parse_session_status("completed").is_err());
     }
 }

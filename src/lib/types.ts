@@ -127,13 +127,25 @@ export interface TranscriptSegment {
   id: string;
   sessionId: string;
   sequenceNo: number;
+  speakerId: string | null;
   speakerLabel: string | null;
+  speakerConfidence: number | null;
   startMs: number | null;
   endMs: number | null;
   text: string;
   isFinal: boolean;
   source: TranscriptSource;
   createdAt: string;
+}
+
+export interface SessionSpeaker {
+  sessionId: string;
+  speakerId: string;
+  providerLabel: string | null;
+  displayLabel: string;
+  source: "provider" | "manual";
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ScreenContextInput {
@@ -182,6 +194,7 @@ export interface ChatMessage {
 export interface SessionDetail {
   session: SessionRecord;
   transcripts: TranscriptSegment[];
+  speakers: SessionSpeaker[];
   messages: ChatMessage[];
   generatedTickets: GeneratedTicket[];
 }
@@ -198,14 +211,26 @@ export interface SearchSessionResult {
 
 export interface StartSessionInput {
   title: string;
+  initialStatus?: Exclude<SessionStatus, "idle" | "completed" | "finishing" | "finalization_failed">;
+  captureMode?: CaptureMode;
+  captureTargetKind?: SystemAudioSourceKind | null;
+  captureTargetLabel?: string | null;
 }
 
 export interface AppendTranscriptInput {
   sessionId: string;
-  speakerLabel?: string;
+  speakerId?: string | null;
+  speakerLabel?: string | null;
+  speakerConfidence?: number | null;
   text: string;
   isFinal?: boolean;
   source?: TranscriptSource;
+}
+
+export interface RenameSessionSpeakerInput {
+  sessionId: string;
+  speakerId: string;
+  displayLabel: string;
 }
 
 export interface AskSessionInput {
@@ -307,6 +332,7 @@ export interface AudioInputDevice {
 }
 
 export type PreflightCheckStatus = "ready" | "warning" | "blocked";
+export type PreflightModeState = "ready" | "verification_required" | "blocked";
 
 export interface PreflightCheck {
   key: string;
@@ -319,6 +345,7 @@ export interface PreflightCheck {
 export interface PreflightModeReport {
   mode: CaptureMode;
   canStart: boolean;
+  state: PreflightModeState;
   summary: string;
 }
 
@@ -326,6 +353,14 @@ export interface PreflightReport {
   checkedAt: string;
   checks: PreflightCheck[];
   modes: PreflightModeReport[];
+}
+
+export interface BrowserCaptureSessionUpdateInput {
+  sessionId: string;
+  status: Exclude<SessionStatus, "idle" | "completed" | "finishing" | "finalization_failed" | "paused">;
+  captureMode?: Extract<CaptureMode, "microphone">;
+  captureTargetKind?: SystemAudioSourceKind | null;
+  captureTargetLabel?: string | null;
 }
 
 export interface GeneratedTicket {

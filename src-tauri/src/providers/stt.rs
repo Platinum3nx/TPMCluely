@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio_tungstenite::connect_async;
 
 const DEFAULT_DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
-const DEEPGRAM_QUERY: &str = "encoding=linear16&channels=1&sample_rate=16000&punctuate=true&smart_format=true&interim_results=true&model=nova-3&endpointing=300&utterance_end_ms=1000";
+const DEEPGRAM_QUERY: &str = "encoding=linear16&channels=1&sample_rate=16000&punctuate=true&smart_format=true&interim_results=true&diarize=true&utterances=true&model=nova-3&endpointing=300&utterance_end_ms=1000";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SttConfig {
@@ -93,6 +93,8 @@ mod tests {
 
         assert!(endpoint.starts_with("ws://127.0.0.1:9001/listen?"));
         assert!(endpoint.contains("model=nova-3"));
+        assert!(endpoint.contains("diarize=true"));
+        assert!(endpoint.contains("utterances=true"));
         assert!(endpoint.contains("language=en-US"));
     }
 }
