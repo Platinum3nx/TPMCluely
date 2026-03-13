@@ -2,7 +2,11 @@ use rusqlite::Connection;
 
 use super::DatabaseError;
 
-fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool, DatabaseError> {
+fn column_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, DatabaseError> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
 
@@ -104,6 +108,7 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           content               TEXT NOT NULL,
           context_snapshot      TEXT,
           attachments_json      TEXT,
+          metadata_json         TEXT,
           created_at            TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -156,6 +161,11 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           linear_last_error     TEXT,
           linear_last_attempt_at TEXT,
           linear_deduped        INTEGER NOT NULL DEFAULT 0,
+          review_state          TEXT NOT NULL DEFAULT 'draft' CHECK (review_state IN ('draft', 'approved', 'rejected', 'pushed', 'push_failed')),
+          approved_at           TEXT,
+          rejected_at           TEXT,
+          rejection_reason      TEXT,
+          reviewed_at           TEXT,
           created_at            TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -193,7 +203,9 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           ('persist_screen_artifacts', 'false'),
           ('ticket_generation_enabled', 'true'),
           ('auto_generate_tickets', 'true'),
-          ('auto_push_linear', 'true'),
+          ('auto_push_linear', 'false'),
+          ('ticket_push_mode', 'review_before_push'),
+          ('preferred_microphone_device_id', ''),
           ('overlay_shortcut', 'CmdOrCtrl+Shift+K');
         ",
     )?;
@@ -204,13 +216,19 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         "source",
         "TEXT NOT NULL DEFAULT 'manual'",
     )?;
-    add_column_if_missing(connection, "sessions", "capture_mode", "TEXT NOT NULL DEFAULT 'manual'")?;
+    add_column_if_missing(
+        connection,
+        "sessions",
+        "capture_mode",
+        "TEXT NOT NULL DEFAULT 'manual'",
+    )?;
     add_column_if_missing(connection, "sessions", "capture_target_kind", "TEXT")?;
     add_column_if_missing(connection, "sessions", "capture_target_label", "TEXT")?;
     add_column_if_missing(connection, "sessions", "session_prompt_snapshot", "TEXT")?;
     add_column_if_missing(connection, "transcript_segments", "dedupe_key", "TEXT")?;
     add_column_if_missing(connection, "chat_messages", "context_snapshot", "TEXT")?;
     add_column_if_missing(connection, "chat_messages", "attachments_json", "TEXT")?;
+    add_column_if_missing(connection, "chat_messages", "metadata_json", "TEXT")?;
     add_column_if_missing(connection, "generated_tickets", "source_line", "TEXT")?;
     add_column_if_missing(
         connection,
@@ -238,6 +256,25 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         "generated_tickets",
         "linear_deduped",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        connection,
+        "generated_tickets",
+        "review_state",
+        "TEXT NOT NULL DEFAULT 'draft'",
+    )?;
+    add_column_if_missing(connection, "generated_tickets", "approved_at", "TEXT")?;
+    add_column_if_missing(connection, "generated_tickets", "rejected_at", "TEXT")?;
+    add_column_if_missing(connection, "generated_tickets", "rejection_reason", "TEXT")?;
+    add_column_if_missing(connection, "generated_tickets", "reviewed_at", "TEXT")?;
+    add_column_if_missing(connection, "settings", "value", "TEXT NOT NULL DEFAULT ''")?;
+    connection.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ticket_push_mode', 'review_before_push')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('preferred_microphone_device_id', '')",
+        [],
     )?;
     connection.execute_batch(
         "

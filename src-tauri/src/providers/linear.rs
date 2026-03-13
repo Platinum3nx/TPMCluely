@@ -1,3 +1,4 @@
+use std::env;
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
@@ -9,6 +10,7 @@ use tokio::time::sleep;
 
 const LINEAR_TIMEOUT_SECS: u64 = 12;
 const MAX_LOOKUP_ISSUES: usize = 25;
+const DEFAULT_LINEAR_BASE_URL: &str = "https://api.linear.app/graphql";
 
 const ISSUE_CREATE_MUTATION: &str = r#"
   mutation IssueCreate($input: IssueCreateInput!) {
@@ -40,6 +42,15 @@ const ISSUE_LOOKUP_QUERY: &str = r#"
           createdAt
         }
       }
+    }
+  }
+"#;
+
+const TEAM_LOOKUP_QUERY: &str = r#"
+  query CluelyTeamLookup($teamId: String!) {
+    team(id: $teamId) {
+      id
+      name
     }
   }
 "#;
@@ -155,6 +166,13 @@ fn select_canonical_issue(matches: &[LinearIssueMatch]) -> Option<LinearIssueMat
     })
 }
 
+fn linear_graphql_endpoint() -> String {
+    env::var("TPMCLUELY_LINEAR_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_LINEAR_BASE_URL.to_string())
+}
+
 async fn linear_graphql_request(
     api_key: &str,
     query: &str,
@@ -166,7 +184,7 @@ async fn linear_graphql_request(
 
     for attempt in 0..3 {
         let response = client
-            .post("https://api.linear.app/graphql")
+            .post(linear_graphql_endpoint())
             .header("Content-Type", "application/json")
             .header("Authorization", api_key)
             .json(&json!({
@@ -242,6 +260,32 @@ pub async fn find_issues_by_marker(
     Ok(matches)
 }
 
+pub async fn check_connectivity(api_key: &str, team_id: &str) -> Result<(), LinearProviderError> {
+    let value = linear_graphql_request(
+        api_key,
+        TEAM_LOOKUP_QUERY,
+        json!({
+            "teamId": team_id,
+        }),
+    )
+    .await?;
+
+    let has_team = value
+        .get("data")
+        .and_then(|data| data.get("team"))
+        .and_then(|team| team.get("id"))
+        .and_then(|id| id.as_str())
+        .is_some();
+
+    if has_team {
+        Ok(())
+    } else {
+        Err(LinearProviderError::Graphql(
+            "Linear team lookup returned no team.".to_string(),
+        ))
+    }
+}
+
 pub async fn create_issue(
     api_key: &str,
     team_id: &str,
@@ -285,16 +329,92 @@ pub fn choose_canonical_issue(matches: &[LinearIssueMatch]) -> Option<LinearIssu
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread;
+
     use super::{
         build_linear_dedupe_key, build_linear_dedupe_marker, build_linear_description,
-        choose_canonical_issue, LinearIssueMatch,
+        check_connectivity, choose_canonical_issue, LinearIssueMatch,
     };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let mut header_end = None;
+        let mut content_length = 0usize;
+
+        loop {
+            let read = stream.read(&mut chunk).expect("request should read");
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+
+            if header_end.is_none() {
+                if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                    header_end = Some(index + 4);
+                    let headers = String::from_utf8_lossy(&buffer[..index + 4]);
+                    for line in headers.lines() {
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("Content-Length") {
+                                content_length = value.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(index) = header_end {
+                if buffer.len() >= index + content_length {
+                    break;
+                }
+            }
+        }
+
+        String::from_utf8(buffer).expect("request should be utf8")
+    }
+
+    fn spawn_http_json_server(
+        response_body: &'static str,
+    ) -> (String, Arc<Mutex<Option<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let request = Arc::new(Mutex::new(None));
+        let request_clone = Arc::clone(&request);
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection should arrive");
+            let captured_request = read_http_request(&mut stream);
+            *request_clone.lock().expect("request lock should hold") = Some(captured_request);
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
+        });
+
+        (format!("http://{address}/graphql"), request, handle)
+    }
 
     #[test]
     fn description_includes_both_dedupe_markers() {
         let description = build_linear_description(
             "Implement retry middleware",
-            &["Retries only on 429/5xx".to_string(), "Timeout at 12 seconds".to_string()],
+            &[
+                "Retries only on 429/5xx".to_string(),
+                "Timeout at 12 seconds".to_string(),
+            ],
             Some("abc123"),
             Some("dedupe456"),
         );
@@ -311,7 +431,10 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(first.len(), 24);
-        assert_eq!(build_linear_dedupe_marker(&first), format!("<!-- cluely-linear-dedupe:{first} -->"));
+        assert_eq!(
+            build_linear_dedupe_marker(&first),
+            format!("<!-- cluely-linear-dedupe:{first} -->")
+        );
     }
 
     #[test]
@@ -335,5 +458,35 @@ mod tests {
 
         let chosen = choose_canonical_issue(&matches).expect("canonical issue should exist");
         assert_eq!(chosen.identifier, "ENG-1");
+    }
+
+    #[tokio::test]
+    async fn connectivity_check_uses_base_url_override_against_stub_server() {
+        let _guard = env_lock().lock().expect("env lock should hold");
+        let (base_url, request, handle) =
+            spawn_http_json_server(r#"{"data":{"team":{"id":"team_123","name":"Platform"}}}"#);
+        unsafe {
+            std::env::set_var("TPMCLUELY_LINEAR_BASE_URL", &base_url);
+        }
+
+        check_connectivity("linear-api-key", "team_123")
+            .await
+            .expect("stub connectivity should succeed");
+
+        unsafe {
+            std::env::remove_var("TPMCLUELY_LINEAR_BASE_URL");
+        }
+        handle.join().expect("server should finish");
+
+        let captured_request = request
+            .lock()
+            .expect("request lock should hold")
+            .clone()
+            .expect("request should be captured");
+        let normalized_request = captured_request.to_ascii_lowercase();
+        assert!(captured_request.starts_with("POST /graphql HTTP/1.1"));
+        assert!(normalized_request.contains("authorization: linear-api-key"));
+        assert!(captured_request.contains("CluelyTeamLookup"));
+        assert!(captured_request.contains("\"teamId\":\"team_123\""));
     }
 }

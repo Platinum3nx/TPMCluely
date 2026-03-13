@@ -63,6 +63,7 @@ pub struct MessageRow {
     pub content: String,
     pub context_snapshot: Option<String>,
     pub attachments_json: Option<String>,
+    pub metadata_json: Option<String>,
     pub created_at: String,
 }
 
@@ -84,6 +85,11 @@ pub struct GeneratedTicketRow {
     pub linear_last_error: Option<String>,
     pub linear_last_attempt_at: Option<String>,
     pub linear_deduped: bool,
+    pub review_state: String,
+    pub approved_at: Option<String>,
+    pub rejected_at: Option<String>,
+    pub rejection_reason: Option<String>,
+    pub reviewed_at: Option<String>,
     pub created_at: String,
 }
 
@@ -193,7 +199,10 @@ fn map_prompt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptRow> {
     })
 }
 
-fn refresh_session_search(connection: &Connection, session_id: &str) -> Result<(), rusqlite::Error> {
+fn refresh_session_search(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<(), rusqlite::Error> {
     let session_doc = connection
         .query_row(
             "
@@ -236,8 +245,15 @@ fn refresh_session_search(connection: &Connection, session_id: &str) -> Result<(
         params![session_id],
     )?;
 
-    if let Some((title, rolling_summary, final_summary, decisions_md, action_items_md, notes_md, transcript_text)) =
-        session_doc
+    if let Some((
+        title,
+        rolling_summary,
+        final_summary,
+        decisions_md,
+        action_items_md,
+        notes_md,
+        transcript_text,
+    )) = session_doc
     {
         connection.execute(
             "
@@ -497,9 +513,8 @@ impl AppDatabase {
             )?;
             refresh_session_search(connection, &session_id)?;
 
-            connection
-                .query_row(
-                    "
+            connection.query_row(
+                "
                     SELECT
                         id,
                         title,
@@ -522,9 +537,9 @@ impl AppDatabase {
                     FROM sessions
                     WHERE id = ?1
                     ",
-                    params![session_id],
-                    map_session_row,
-                )
+                params![session_id],
+                map_session_row,
+            )
         })
     }
 
@@ -670,7 +685,10 @@ impl AppDatabase {
         })
     }
 
-    pub fn list_transcript_segments(&self, session_id: &str) -> Result<Vec<TranscriptRow>, DatabaseError> {
+    pub fn list_transcript_segments(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TranscriptRow>, DatabaseError> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "
@@ -825,6 +843,11 @@ impl AppDatabase {
                     linear_last_error,
                     linear_last_attempt_at,
                     linear_deduped,
+                    review_state,
+                    approved_at,
+                    rejected_at,
+                    rejection_reason,
+                    reviewed_at,
                     created_at
                 FROM generated_tickets
                 WHERE session_id = ?1
@@ -850,7 +873,12 @@ impl AppDatabase {
                     linear_last_error: row.get(13)?,
                     linear_last_attempt_at: row.get(14)?,
                     linear_deduped: row.get::<_, i64>(15)? == 1,
-                    created_at: row.get(16)?,
+                    review_state: row.get(16)?,
+                    approved_at: row.get(17)?,
+                    rejected_at: row.get(18)?,
+                    rejection_reason: row.get(19)?,
+                    reviewed_at: row.get(20)?,
+                    created_at: row.get(21)?,
                 })
             })?;
 
@@ -884,6 +912,11 @@ impl AppDatabase {
                         linear_last_error,
                         linear_last_attempt_at,
                         linear_deduped,
+                        review_state,
+                        approved_at,
+                        rejected_at,
+                        rejection_reason,
+                        reviewed_at,
                         created_at
                     FROM generated_tickets
                     WHERE session_id = ?1 AND idempotency_key = ?2
@@ -907,7 +940,12 @@ impl AppDatabase {
                             linear_last_error: row.get(13)?,
                             linear_last_attempt_at: row.get(14)?,
                             linear_deduped: row.get::<_, i64>(15)? == 1,
-                            created_at: row.get(16)?,
+                            review_state: row.get(16)?,
+                            approved_at: row.get(17)?,
+                            rejected_at: row.get(18)?,
+                            rejection_reason: row.get(19)?,
+                            reviewed_at: row.get(20)?,
+                            created_at: row.get(21)?,
                         })
                     },
                 )
@@ -951,8 +989,13 @@ impl AppDatabase {
                         linear_last_error,
                         linear_last_attempt_at,
                         linear_deduped,
+                        review_state,
+                        approved_at,
+                        rejected_at,
+                        rejection_reason,
+                        reviewed_at,
                         created_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                     ",
                     params![
                         previous
@@ -979,6 +1022,13 @@ impl AppDatabase {
                         } else {
                             0
                         },
+                        previous
+                            .map(|entry| entry.review_state.clone())
+                            .unwrap_or_else(|| "draft".to_string()),
+                        previous.and_then(|entry| entry.approved_at.clone()),
+                        previous.and_then(|entry| entry.rejected_at.clone()),
+                        previous.and_then(|entry| entry.rejection_reason.clone()),
+                        previous.and_then(|entry| entry.reviewed_at.clone()),
                         previous
                             .map(|entry| entry.created_at.clone())
                             .unwrap_or_else(now_iso),
@@ -1013,7 +1063,10 @@ impl AppDatabase {
                     linear_push_state = 'pushed',
                     linear_last_error = NULL,
                     linear_last_attempt_at = ?6,
-                    linear_deduped = ?7
+                    linear_deduped = ?7,
+                    review_state = 'pushed',
+                    approved_at = COALESCE(approved_at, ?6),
+                    reviewed_at = COALESCE(reviewed_at, ?6)
                 WHERE session_id = ?1 AND idempotency_key = ?2
                 ",
                 params![
@@ -1045,7 +1098,9 @@ impl AppDatabase {
                 UPDATE generated_tickets
                 SET linear_push_state = 'failed',
                     linear_last_error = ?3,
-                    linear_last_attempt_at = ?4
+                    linear_last_attempt_at = ?4,
+                    review_state = 'push_failed',
+                    reviewed_at = COALESCE(reviewed_at, ?4)
                 WHERE session_id = ?1 AND idempotency_key = ?2
                 ",
                 params![session_id, idempotency_key, error, attempted_at],
@@ -1055,11 +1110,131 @@ impl AppDatabase {
         })
     }
 
+    pub fn update_generated_ticket_draft(
+        &self,
+        session_id: &str,
+        idempotency_key: &str,
+        title: &str,
+        description: &str,
+        acceptance_criteria: &str,
+        ticket_type: &str,
+    ) -> Result<(), DatabaseError> {
+        let now = now_iso();
+        self.with_connection(|connection| {
+            let updated = connection.execute(
+                "
+                UPDATE generated_tickets
+                SET title = ?3,
+                    description = ?4,
+                    acceptance_criteria = ?5,
+                    type = ?6,
+                    review_state = 'draft',
+                    approved_at = NULL,
+                    rejected_at = NULL,
+                    rejection_reason = NULL,
+                    reviewed_at = ?7,
+                    linear_push_state = CASE
+                        WHEN linear_push_state = 'pushed' THEN linear_push_state
+                        ELSE 'pending'
+                    END,
+                    linear_last_error = CASE
+                        WHEN linear_push_state = 'pushed' THEN linear_last_error
+                        ELSE NULL
+                    END,
+                    linear_last_attempt_at = CASE
+                        WHEN linear_push_state = 'pushed' THEN linear_last_attempt_at
+                        ELSE NULL
+                    END
+                WHERE session_id = ?1
+                  AND idempotency_key = ?2
+                  AND linear_push_state != 'pushed'
+                ",
+                params![
+                    session_id,
+                    idempotency_key,
+                    title,
+                    description,
+                    acceptance_criteria,
+                    ticket_type,
+                    now,
+                ],
+            )?;
+
+            if updated > 0 {
+                touch_session(connection, session_id)?;
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn set_generated_ticket_review_state(
+        &self,
+        session_id: &str,
+        idempotency_key: &str,
+        review_state: &str,
+        rejection_reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let now = now_iso();
+        self.with_connection(|connection| {
+            let updated = match review_state {
+                "approved" => connection.execute(
+                    "
+                    UPDATE generated_tickets
+                    SET review_state = 'approved',
+                        approved_at = ?3,
+                        rejected_at = NULL,
+                        rejection_reason = NULL,
+                        reviewed_at = ?3
+                    WHERE session_id = ?1
+                      AND idempotency_key = ?2
+                      AND linear_push_state != 'pushed'
+                    ",
+                    params![session_id, idempotency_key, &now],
+                )?,
+                "rejected" => connection.execute(
+                    "
+                    UPDATE generated_tickets
+                    SET review_state = 'rejected',
+                        approved_at = NULL,
+                        rejected_at = ?3,
+                        rejection_reason = ?4,
+                        reviewed_at = ?3
+                    WHERE session_id = ?1
+                      AND idempotency_key = ?2
+                      AND linear_push_state != 'pushed'
+                    ",
+                    params![session_id, idempotency_key, &now, rejection_reason],
+                )?,
+                _ => connection.execute(
+                    "
+                    UPDATE generated_tickets
+                    SET review_state = 'draft',
+                        approved_at = NULL,
+                        rejected_at = NULL,
+                        rejection_reason = NULL,
+                        reviewed_at = NULL
+                    WHERE session_id = ?1
+                      AND idempotency_key = ?2
+                      AND linear_push_state != 'pushed'
+                    ",
+                    params![session_id, idempotency_key],
+                )?,
+            };
+
+            if updated > 0 {
+                touch_session(connection, session_id)?;
+            }
+
+            Ok(())
+        })
+    }
+
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<MessageRow>, DatabaseError> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "
-                SELECT id, session_id, role, content, context_snapshot, attachments_json, created_at
+                SELECT id, session_id, role, content, context_snapshot, attachments_json, metadata_json, created_at
                 FROM chat_messages
                 WHERE session_id = ?1
                 ORDER BY created_at ASC
@@ -1074,7 +1249,8 @@ impl AppDatabase {
                     content: row.get(3)?,
                     context_snapshot: row.get(4)?,
                     attachments_json: row.get(5)?,
-                    created_at: row.get(6)?,
+                    metadata_json: row.get(6)?,
+                    created_at: row.get(7)?,
                 })
             })?;
 
@@ -1088,7 +1264,7 @@ impl AppDatabase {
         role: &str,
         content: &str,
     ) -> Result<MessageRow, DatabaseError> {
-        self.append_message_with_metadata(session_id, role, content, None, None, None)
+        self.append_message_with_metadata(session_id, role, content, None, None, None, None)
     }
 
     pub fn append_message_with_metadata(
@@ -1098,6 +1274,7 @@ impl AppDatabase {
         content: &str,
         context_snapshot: Option<&str>,
         attachments_json: Option<&str>,
+        metadata_json: Option<&str>,
         message_id: Option<&str>,
     ) -> Result<MessageRow, DatabaseError> {
         let message_id = message_id
@@ -1115,8 +1292,9 @@ impl AppDatabase {
                     content,
                     context_snapshot,
                     attachments_json,
+                    metadata_json,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                 ",
                 params![
                     message_id,
@@ -1125,6 +1303,7 @@ impl AppDatabase {
                     content,
                     context_snapshot,
                     attachments_json,
+                    metadata_json,
                     now
                 ],
             )?;
@@ -1139,6 +1318,7 @@ impl AppDatabase {
                 content: content.to_string(),
                 context_snapshot: context_snapshot.map(str::to_string),
                 attachments_json: attachments_json.map(str::to_string),
+                metadata_json: metadata_json.map(str::to_string),
                 created_at: now,
             })
         })
@@ -1225,7 +1405,13 @@ impl AppDatabase {
                     is_default = excluded.is_default,
                     updated_at = excluded.updated_at
                 ",
-                params![prompt_id, name, content, if is_default { 1 } else { 0 }, now],
+                params![
+                    prompt_id,
+                    name,
+                    content,
+                    if is_default { 1 } else { 0 },
+                    now
+                ],
             )?;
 
             connection.query_row(
@@ -1255,10 +1441,7 @@ impl AppDatabase {
                 )
                 .optional()?;
             if active_prompt_id.as_deref() == Some(prompt_id) {
-                connection.execute(
-                    "DELETE FROM settings WHERE key = 'active_prompt_id'",
-                    [],
-                )?;
+                connection.execute("DELETE FROM settings WHERE key = 'active_prompt_id'", [])?;
             }
 
             Ok(())
@@ -1427,7 +1610,7 @@ impl AppDatabase {
 mod tests {
     use rusqlite::ErrorCode;
 
-    use super::AppDatabase;
+    use super::{AppDatabase, GeneratedTicketInputRow};
 
     #[test]
     fn seeds_default_settings() {
@@ -1544,5 +1727,141 @@ mod tests {
             }
             other => panic!("expected duplicate constraint violation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn generated_ticket_review_state_updates_reset_unpushed_drafts_only() {
+        let database = AppDatabase::open_in_memory().expect("database should initialize");
+        let session = database
+            .create_session("Review flow")
+            .expect("session should exist");
+
+        database
+            .replace_generated_tickets(
+                &session.id,
+                &[GeneratedTicketInputRow {
+                    idempotency_key: "ticket-1".to_string(),
+                    title: "Investigate flaky auth retry".to_string(),
+                    description: "Track the auth retry issue".to_string(),
+                    acceptance_criteria: "[\"Retries stay bounded\"]".to_string(),
+                    ticket_type: "Task".to_string(),
+                    source_line: Some("[S4]".to_string()),
+                }],
+            )
+            .expect("ticket should save");
+
+        database
+            .set_generated_ticket_review_state(&session.id, "ticket-1", "approved", None)
+            .expect("approval should save");
+        let approved = database
+            .get_generated_ticket(&session.id, "ticket-1")
+            .expect("ticket should load")
+            .expect("ticket should exist");
+        assert_eq!(approved.review_state, "approved");
+        assert!(approved.approved_at.is_some());
+        assert!(approved.reviewed_at.is_some());
+
+        database
+            .set_generated_ticket_review_state(
+                &session.id,
+                "ticket-1",
+                "rejected",
+                Some("Covered by another issue"),
+            )
+            .expect("rejection should save");
+        let rejected = database
+            .get_generated_ticket(&session.id, "ticket-1")
+            .expect("ticket should load")
+            .expect("ticket should exist");
+        assert_eq!(rejected.review_state, "rejected");
+        assert_eq!(
+            rejected.rejection_reason.as_deref(),
+            Some("Covered by another issue")
+        );
+        assert!(rejected.rejected_at.is_some());
+
+        database
+            .update_generated_ticket_draft(
+                &session.id,
+                "ticket-1",
+                "Investigate auth retry regression",
+                "Capture the latest regression details",
+                "[\"Regression is reproducible\"]",
+                "Bug",
+            )
+            .expect("draft update should save");
+        let draft = database
+            .get_generated_ticket(&session.id, "ticket-1")
+            .expect("ticket should load")
+            .expect("ticket should exist");
+        assert_eq!(draft.review_state, "draft");
+        assert_eq!(draft.title, "Investigate auth retry regression");
+        assert_eq!(draft.ticket_type, "Bug");
+        assert_eq!(draft.linear_push_state, "pending");
+
+        database
+            .mark_generated_ticket_pushed(
+                &session.id,
+                "ticket-1",
+                "issue-1",
+                "ENG-42",
+                "https://linear.app/eng/issue/ENG-42",
+                "2026-03-13T15:10:00Z",
+                false,
+            )
+            .expect("push mark should save");
+        database
+            .update_generated_ticket_draft(
+                &session.id,
+                "ticket-1",
+                "Should not overwrite pushed ticket",
+                "Still immutable",
+                "[\"Ignored\"]",
+                "Task",
+            )
+            .expect("pushed ticket update should no-op");
+        database
+            .set_generated_ticket_review_state(&session.id, "ticket-1", "draft", None)
+            .expect("pushed ticket review reset should no-op");
+
+        let pushed = database
+            .get_generated_ticket(&session.id, "ticket-1")
+            .expect("ticket should load")
+            .expect("ticket should exist");
+        assert_eq!(pushed.linear_push_state, "pushed");
+        assert_eq!(pushed.review_state, "pushed");
+        assert_eq!(pushed.title, "Investigate auth retry regression");
+        assert_eq!(pushed.linear_issue_key.as_deref(), Some("ENG-42"));
+    }
+
+    #[test]
+    fn message_metadata_round_trips_through_storage() {
+        let database = AppDatabase::open_in_memory().expect("database should initialize");
+        let session = database
+            .create_session("Assistant session")
+            .expect("session should exist");
+
+        let metadata_json = "{\"responseMode\":\"gemini\",\"providerName\":\"Gemini\",\"latencyMs\":1200,\"usedScreenContext\":true,\"citations\":[\"[S4]\",\"[Screen]\"]}";
+        let attachments_json = "[{\"kind\":\"screenshot\",\"mimeType\":\"image/jpeg\",\"capturedAt\":\"2026-03-13T15:00:00Z\",\"width\":1440,\"height\":900,\"sourceLabel\":\"Architecture doc\",\"persisted\":false}]";
+
+        database
+            .append_message_with_metadata(
+                &session.id,
+                "assistant",
+                "Grounded answer [S4] [Screen]",
+                Some("Shared screen context"),
+                Some(attachments_json),
+                Some(metadata_json),
+                None,
+            )
+            .expect("message should save");
+
+        let messages = database
+            .list_messages(&session.id)
+            .expect("messages should load");
+        let message = messages.last().expect("message should exist");
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.metadata_json.as_deref(), Some(metadata_json));
+        assert_eq!(message.attachments_json.as_deref(), Some(attachments_json));
     }
 }

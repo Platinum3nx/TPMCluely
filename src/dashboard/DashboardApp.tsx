@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { SearchSessionResult, SessionDetail as SessionDetailModel, SessionRecord } from "../lib/types";
+import type { SearchSessionResult, SessionDetail as SessionDetailModel, SessionRecord, TicketType } from "../lib/types";
 import { SearchBar } from "../components/SearchBar";
 import { SessionDetail } from "./SessionDetail";
 import { SessionsList } from "./SessionsList";
@@ -17,6 +17,17 @@ interface DashboardAppProps {
   onGenerateTickets: (sessionId: string) => Promise<void>;
   onPushGeneratedTicket: (sessionId: string, idempotencyKey: string) => Promise<void>;
   onPushGeneratedTickets: (sessionId: string) => Promise<void>;
+  onSetGeneratedTicketReviewState: (
+    sessionId: string,
+    idempotencyKey: string,
+    reviewState: "draft" | "approved" | "rejected",
+    rejectionReason?: string | null
+  ) => Promise<void>;
+  onUpdateGeneratedTicketDraft: (
+    sessionId: string,
+    idempotencyKey: string,
+    draft: { acceptanceCriteria: string[]; description: string; title: string; type: TicketType }
+  ) => Promise<void>;
   allowTicketPreview: boolean;
 }
 
@@ -32,6 +43,8 @@ export function DashboardApp({
   onGenerateTickets,
   onPushGeneratedTicket,
   onPushGeneratedTickets,
+  onSetGeneratedTicketReviewState,
+  onUpdateGeneratedTicketDraft,
   allowTicketPreview,
 }: DashboardAppProps) {
   const [query, setQuery] = useState("");
@@ -63,12 +76,9 @@ export function DashboardApp({
   return (
     <section className="panel dashboard-grid">
       <div className="panel-hero">
-        <p className="eyebrow">Dashboard Review</p>
-        <h2>Transcript-centric session history, exports, notes, and ticket workflows.</h2>
-        <p className="muted">
-          This dashboard now exposes the first real review loop: session list, transcript detail, and derived notes
-          generated from the session widget.
-        </p>
+        <p className="eyebrow">Review Queue</p>
+        <h2>Transcript-centric session history, grounded assistant output, and review-first Linear drafts.</h2>
+        <p className="muted">Search sessions, inspect the evidence, then approve only the ticket drafts that should leave the desktop app.</p>
       </div>
 
       <SearchBar value={query} onChange={setQuery} />
@@ -91,6 +101,8 @@ export function DashboardApp({
             onGenerateTickets={onGenerateTickets}
             onPushGeneratedTicket={onPushGeneratedTicket}
             onPushGeneratedTickets={onPushGeneratedTickets}
+            onSetGeneratedTicketReviewState={onSetGeneratedTicketReviewState}
+            onUpdateGeneratedTicketDraft={onUpdateGeneratedTicketDraft}
           />
         </div>
       </div>

@@ -11,6 +11,8 @@ import type {
   KnowledgeFileRecord,
   MarkGeneratedTicketPushedInput,
   MessageAttachment,
+  MessageMetadata,
+  PreflightReport,
   PermissionSnapshot,
   PromptRecord,
   PushGeneratedTicketInput,
@@ -26,8 +28,10 @@ import type {
   SaveSecretInput,
   SaveSettingInput,
   SecretKey,
+  SetGeneratedTicketReviewStateInput,
   SettingRecord,
   StartSystemAudioCaptureInput,
+  UpdateGeneratedTicketDraftInput,
   StartSessionInput,
   SystemAudioSourceListPayload,
   TranscriptSegment,
@@ -60,7 +64,9 @@ const defaultSettings: SettingRecord[] = [
   { key: "persist_screen_artifacts", value: "false" },
   { key: "ticket_generation_enabled", value: "true" },
   { key: "auto_generate_tickets", value: "true" },
-  { key: "auto_push_linear", value: "true" },
+  { key: "auto_push_linear", value: "false" },
+  { key: "ticket_push_mode", value: "review_before_push" },
+  { key: "preferred_microphone_device_id", value: "" },
   { key: "overlay_shortcut", value: "CmdOrCtrl+Shift+K" },
 ];
 
@@ -226,6 +232,7 @@ function readMessages(): ChatMessage[] {
           content: message.content ?? "",
           contextSnapshot: message.contextSnapshot ?? null,
           attachments: Array.isArray(message.attachments) ? message.attachments : [],
+          metadata: message.metadata ?? null,
           createdAt: message.createdAt ?? nowIso(),
         }))
       : [];
@@ -266,6 +273,11 @@ function readGeneratedTickets(): GeneratedTicket[] {
           linearLastError: ticket.linearLastError ?? null,
           linearLastAttemptAt: ticket.linearLastAttemptAt ?? null,
           linearDeduped: ticket.linearDeduped ?? false,
+          reviewState: ticket.reviewState ?? (ticket.linearPushState === "pushed" ? "pushed" : "draft"),
+          approvedAt: ticket.approvedAt ?? null,
+          rejectedAt: ticket.rejectedAt ?? null,
+          rejectionReason: ticket.rejectionReason ?? null,
+          reviewedAt: ticket.reviewedAt ?? null,
           createdAt: ticket.createdAt ?? nowIso(),
         }))
       : [];
@@ -460,6 +472,28 @@ function buildContextSnapshot(screenContext?: ScreenContextInput | null): string
   return `Screen shared from ${screenContext.sourceLabel} at ${screenContext.capturedAt} (${screenContext.width}x${screenContext.height}, ${screenContext.staleMs}ms stale).`;
 }
 
+function buildMockMetadata(
+  responseMode: MessageMetadata["responseMode"],
+  content: string,
+  options?: {
+    providerError?: string | null;
+    usedScreenContext?: boolean;
+  }
+): MessageMetadata {
+  return {
+    responseMode,
+    providerName: "Browser mock",
+    providerError: options?.providerError ?? null,
+    latencyMs: 0,
+    usedScreenContext: options?.usedScreenContext ?? false,
+    citations: content.includes("[Screen]") ? ["[Screen]"] : [],
+  };
+}
+
+function ticketHasReviewHistory(ticket: GeneratedTicket): boolean {
+  return ticket.linearPushState === "pushed" || ticket.reviewState !== "draft" || Boolean(ticket.reviewedAt);
+}
+
 function appendAssistantMessage(
   sessionId: string,
   role: ChatMessage["role"],
@@ -467,6 +501,7 @@ function appendAssistantMessage(
   options?: {
     attachments?: MessageAttachment[];
     contextSnapshot?: string | null;
+    metadata?: MessageMetadata | null;
   }
 ): ChatMessage[] {
   const messages = readMessages();
@@ -477,6 +512,7 @@ function appendAssistantMessage(
     content,
     contextSnapshot: options?.contextSnapshot ?? null,
     attachments: options?.attachments ?? [],
+    metadata: options?.metadata ?? null,
     createdAt: nowIso(),
   });
   writeMessages(messages);
@@ -584,6 +620,127 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
     runtime,
     prompts,
     knowledgeFiles,
+  };
+}
+
+export async function runMockPreflightChecks(): Promise<PreflightReport> {
+  const secrets = readSecrets();
+  const preferredMicrophoneDeviceId = getSettingValue("preferred_microphone_device_id", "");
+  const screenContextEnabled = getSettingValue("screen_context_enabled", "true") === "true";
+  const geminiReady = Boolean(secrets.gemini_api_key);
+  const deepgramReady = Boolean(secrets.deepgram_api_key);
+  const linearReady = Boolean(secrets.linear_api_key && secrets.linear_team_id);
+
+  return {
+    checkedAt: nowIso(),
+    checks: [
+      {
+        key: "desktop_runtime",
+        title: "Desktop runtime",
+        status: "warning",
+        message: "Browser mock mode is active for development and tests.",
+      },
+      {
+        key: "database_ready",
+        title: "Session database",
+        status: "ready",
+        message: "Browser mock storage is ready.",
+      },
+      {
+        key: "keychain_ready",
+        title: "Keychain",
+        status: "warning",
+        message: "Secrets are stored in localStorage in browser mock mode.",
+      },
+      {
+        key: "gemini_key",
+        title: "Gemini key",
+        status: geminiReady ? "ready" : "warning",
+        message: geminiReady ? "Gemini key is configured for mock mode." : "Gemini key is missing. Responses will remain heuristic.",
+      },
+      {
+        key: "gemini_connectivity",
+        title: "Gemini connectivity",
+        status: geminiReady ? "warning" : "warning",
+        message: "Gemini connectivity is not probed in browser mock mode.",
+      },
+      {
+        key: "deepgram_key",
+        title: "Deepgram key",
+        status: deepgramReady ? "ready" : "blocked",
+        message: deepgramReady ? "Deepgram key is configured for mock mode." : "Deepgram key is missing.",
+      },
+      {
+        key: "deepgram_connectivity",
+        title: "Deepgram connectivity",
+        status: deepgramReady ? "warning" : "blocked",
+        message: deepgramReady ? "Deepgram connectivity is not probed in browser mock mode." : "Deepgram connectivity is unavailable without a key.",
+      },
+      {
+        key: "linear_auth",
+        title: "Linear auth",
+        status: linearReady ? "ready" : "warning",
+        message: linearReady ? "Linear credentials are configured for mock mode." : "Linear credentials are missing.",
+      },
+      {
+        key: "linear_team_lookup",
+        title: "Linear team lookup",
+        status: linearReady ? "warning" : "warning",
+        message: "Linear team lookup is not probed in browser mock mode.",
+      },
+      {
+        key: "microphone_permission",
+        title: "Microphone permission",
+        status: "warning",
+        message: "Microphone permission is handled by the browser.",
+      },
+      {
+        key: "screen_recording_permission",
+        title: "Screen Recording permission",
+        status: "warning",
+        message: "Screen context is handled by browser screen-share APIs.",
+      },
+      {
+        key: "preferred_microphone",
+        title: "Preferred microphone",
+        status: preferredMicrophoneDeviceId ? "ready" : "warning",
+        message: preferredMicrophoneDeviceId
+          ? "A preferred microphone is saved and will be validated in the UI."
+          : "No preferred microphone is saved yet.",
+        detail: preferredMicrophoneDeviceId || null,
+      },
+      {
+        key: "system_audio_capability",
+        title: "System audio capture",
+        status: "blocked",
+        message: "Native system-audio capture is unavailable in browser mock mode.",
+      },
+      {
+        key: "screen_context",
+        title: "Screen context",
+        status: screenContextEnabled ? "ready" : "warning",
+        message: screenContextEnabled ? "Screen context is enabled for browser screen sharing." : "Screen context is disabled in settings.",
+      },
+    ],
+    modes: [
+      {
+        mode: "manual",
+        canStart: true,
+        summary: "Manual mode is always available in browser mock mode.",
+      },
+      {
+        mode: "microphone",
+        canStart: deepgramReady,
+        summary: deepgramReady
+          ? "Microphone mode is available for browser mock rehearsal."
+          : "Microphone mode is blocked until a Deepgram key is configured.",
+      },
+      {
+        mode: "system_audio",
+        canStart: false,
+        summary: "System-audio mode is unavailable in browser mock mode.",
+      },
+    ],
   };
 }
 
@@ -879,22 +1036,19 @@ export async function completeMockSession(sessionId: string): Promise<SessionDet
       lastTransitionAt: nowIso(),
     },
   });
-  appendAssistantMessage(sessionId, "assistant", derived.finalSummary);
+  appendAssistantMessage(sessionId, "assistant", derived.finalSummary, {
+    metadata: buildMockMetadata("transcript_fallback", derived.finalSummary),
+  });
   let nextDetail = getSessionDetail(sessionId);
   if (!nextDetail) {
     return null;
   }
 
-  if (getSettingValue("ticket_generation_enabled", "true") === "true" && getSettingValue("auto_generate_tickets", "true") === "true") {
-    nextDetail = await regenerateMockSessionTickets(sessionId);
-  }
-
   if (
-    nextDetail &&
-    nextDetail.generatedTickets.length > 0 &&
-    getSettingValue("auto_push_linear", "true") === "true"
+    getSettingValue("ticket_generation_enabled", "true") === "true" &&
+    getSettingValue("auto_generate_tickets", "true") === "true"
   ) {
-    nextDetail = await pushMockGeneratedTickets(sessionId);
+    nextDetail = await regenerateMockSessionTickets(sessionId);
   }
 
   return nextDetail;
@@ -937,6 +1091,22 @@ export async function regenerateMockSessionTickets(sessionId: string): Promise<S
     return null;
   }
 
+  if (detail.generatedTickets.some(ticketHasReviewHistory)) {
+    updateSessionRecord({
+      ...detail.session,
+      updatedAt: nowIso(),
+      ticketGenerationState: "failed",
+      ticketGenerationError: "Ticket regeneration is only allowed while all generated tickets remain unpushed drafts.",
+    });
+    appendAssistantMessage(
+      sessionId,
+      "system",
+      "Ticket regeneration is only allowed while all generated tickets remain unpushed drafts.",
+      { metadata: buildMockMetadata("transcript_fallback", "Ticket regeneration is only allowed while all generated tickets remain unpushed drafts.") }
+    );
+    return getSessionDetail(sessionId);
+  }
+
   if (shouldMockTicketGenerationFail(detail)) {
     updateSessionRecord({
       ...detail.session,
@@ -944,7 +1114,12 @@ export async function regenerateMockSessionTickets(sessionId: string): Promise<S
       ticketGenerationState: "failed",
       ticketGenerationError: "Mock ticket generation failed for this session.",
     });
-    appendAssistantMessage(sessionId, "system", "Ticket generation could not finish automatically: Mock ticket generation failed for this session.");
+    appendAssistantMessage(
+      sessionId,
+      "system",
+      "Ticket generation could not finish automatically: Mock ticket generation failed for this session.",
+      { metadata: buildMockMetadata("transcript_fallback", "Ticket generation could not finish automatically: Mock ticket generation failed for this session.") }
+    );
     return getSessionDetail(sessionId);
   }
 
@@ -960,6 +1135,11 @@ export async function regenerateMockSessionTickets(sessionId: string): Promise<S
       linearLastError: existing?.linearLastError ?? ticket.linearLastError,
       linearLastAttemptAt: existing?.linearLastAttemptAt ?? ticket.linearLastAttemptAt,
       linearDeduped: existing?.linearDeduped ?? ticket.linearDeduped,
+      reviewState: existing?.reviewState ?? ticket.reviewState,
+      approvedAt: existing?.approvedAt ?? ticket.approvedAt,
+      rejectedAt: existing?.rejectedAt ?? ticket.rejectedAt,
+      rejectionReason: existing?.rejectionReason ?? ticket.rejectionReason,
+      reviewedAt: existing?.reviewedAt ?? ticket.reviewedAt,
       createdAt: existing?.createdAt ?? ticket.createdAt,
     } satisfies GeneratedTicket;
   });
@@ -976,8 +1156,16 @@ export async function regenerateMockSessionTickets(sessionId: string): Promise<S
     sessionId,
     "system",
     nextTickets.length > 0
-      ? `Generated ${nextTickets.length} ticket(s) from the completed session.`
-      : "No engineering tickets were generated from this meeting transcript."
+      ? `Generated ${nextTickets.length} draft ticket(s) from the completed session. Review and approve them before pushing to Linear.`
+      : "No engineering tickets were generated from this meeting transcript.",
+    {
+      metadata: buildMockMetadata(
+        "transcript_fallback",
+        nextTickets.length > 0
+          ? `Generated ${nextTickets.length} draft ticket(s) from the completed session. Review and approve them before pushing to Linear.`
+          : "No engineering tickets were generated from this meeting transcript."
+      ),
+    }
   );
 
   return getSessionDetail(sessionId);
@@ -1000,6 +1188,10 @@ export async function pushMockGeneratedTicket(
     return detail;
   }
 
+  if (!["approved", "push_failed"].includes(ticket.reviewState)) {
+    return detail;
+  }
+
   const linearConfigured = Boolean(readSecrets().linear_api_key && readSecrets().linear_team_id);
   if (!linearConfigured) {
     updateGeneratedTicketRecord({
@@ -1007,6 +1199,8 @@ export async function pushMockGeneratedTicket(
       linearPushState: "failed",
       linearLastError: "Linear is not configured in the browser mock runtime.",
       linearLastAttemptAt: nowIso(),
+      reviewState: "push_failed",
+      reviewedAt: ticket.reviewedAt ?? nowIso(),
     });
     return getSessionDetail(input.sessionId);
   }
@@ -1017,6 +1211,8 @@ export async function pushMockGeneratedTicket(
       linearPushState: "failed",
       linearLastError: "Mock Linear push failed for this ticket.",
       linearLastAttemptAt: nowIso(),
+      reviewState: "push_failed",
+      reviewedAt: ticket.reviewedAt ?? nowIso(),
     });
     return getSessionDetail(input.sessionId);
   }
@@ -1030,6 +1226,9 @@ export async function pushMockGeneratedTicket(
     linearLastError: null,
     linearLastAttemptAt: nowIso(),
     linearDeduped: false,
+    reviewState: "pushed",
+    approvedAt: ticket.approvedAt ?? nowIso(),
+    reviewedAt: ticket.reviewedAt ?? nowIso(),
   });
 
   return getSessionDetail(input.sessionId);
@@ -1043,7 +1242,9 @@ export async function pushMockGeneratedTickets(sessionId: string): Promise<Sessi
 
   let createdCount = 0;
   let failedCount = 0;
-  for (const ticket of detail.generatedTickets.filter((entry) => entry.linearPushState !== "pushed")) {
+  for (const ticket of detail.generatedTickets.filter(
+    (entry) => entry.linearPushState !== "pushed" && ["approved", "push_failed"].includes(entry.reviewState)
+  )) {
     const previous = ticket.linearPushState;
     detail = await pushMockGeneratedTicket({
       sessionId,
@@ -1095,6 +1296,11 @@ export async function replaceMockGeneratedTickets(input: SaveGeneratedTicketsInp
       linearLastError: existing?.linearLastError ?? null,
       linearLastAttemptAt: existing?.linearLastAttemptAt ?? null,
       linearDeduped: existing?.linearDeduped ?? false,
+      reviewState: existing?.reviewState ?? "draft",
+      approvedAt: existing?.approvedAt ?? null,
+      rejectedAt: existing?.rejectedAt ?? null,
+      rejectionReason: existing?.rejectionReason ?? null,
+      reviewedAt: existing?.reviewedAt ?? null,
       createdAt: existing?.createdAt ?? now,
     };
   });
@@ -1104,6 +1310,83 @@ export async function replaceMockGeneratedTickets(input: SaveGeneratedTicketsInp
     ...nextTickets,
   ]);
 
+  return getSessionDetail(input.sessionId);
+}
+
+export async function updateMockGeneratedTicketDraft(
+  input: UpdateGeneratedTicketDraftInput
+): Promise<SessionDetail | null> {
+  const tickets = readGeneratedTickets();
+  const index = tickets.findIndex(
+    (ticket) => ticket.sessionId === input.sessionId && ticket.idempotencyKey === input.idempotencyKey
+  );
+
+  if (index < 0 || tickets[index].linearPushState === "pushed") {
+    return getSessionDetail(input.sessionId);
+  }
+
+  tickets[index] = {
+    ...tickets[index],
+    title: input.title,
+    description: input.description,
+    acceptanceCriteria: input.acceptanceCriteria,
+    type: input.type,
+    linearPushState: "pending",
+    linearLastError: null,
+    linearLastAttemptAt: null,
+    reviewState: "draft",
+    approvedAt: null,
+    rejectedAt: null,
+    rejectionReason: null,
+    reviewedAt: nowIso(),
+  };
+
+  writeGeneratedTickets(tickets);
+  return getSessionDetail(input.sessionId);
+}
+
+export async function setMockGeneratedTicketReviewState(
+  input: SetGeneratedTicketReviewStateInput
+): Promise<SessionDetail | null> {
+  const tickets = readGeneratedTickets();
+  const index = tickets.findIndex(
+    (ticket) => ticket.sessionId === input.sessionId && ticket.idempotencyKey === input.idempotencyKey
+  );
+
+  if (index < 0 || tickets[index].linearPushState === "pushed") {
+    return getSessionDetail(input.sessionId);
+  }
+
+  if (input.reviewState === "approved") {
+    tickets[index] = {
+      ...tickets[index],
+      reviewState: "approved",
+      approvedAt: nowIso(),
+      rejectedAt: null,
+      rejectionReason: null,
+      reviewedAt: nowIso(),
+    };
+  } else if (input.reviewState === "rejected") {
+    tickets[index] = {
+      ...tickets[index],
+      reviewState: "rejected",
+      approvedAt: null,
+      rejectedAt: nowIso(),
+      rejectionReason: input.rejectionReason ?? null,
+      reviewedAt: nowIso(),
+    };
+  } else {
+    tickets[index] = {
+      ...tickets[index],
+      reviewState: "draft",
+      approvedAt: null,
+      rejectedAt: null,
+      rejectionReason: null,
+      reviewedAt: tickets[index].reviewedAt ?? nowIso(),
+    };
+  }
+
+  writeGeneratedTickets(tickets);
   return getSessionDetail(input.sessionId);
 }
 
@@ -1171,6 +1454,9 @@ export async function markMockGeneratedTicketPushed(
     linearLastError: null,
     linearLastAttemptAt: input.pushedAt ?? nowIso(),
     linearDeduped: false,
+    reviewState: "pushed",
+    approvedAt: tickets[index].approvedAt ?? (input.pushedAt ?? nowIso()),
+    reviewedAt: tickets[index].reviewedAt ?? (input.pushedAt ?? nowIso()),
   };
 
   writeGeneratedTickets(tickets);
@@ -1193,7 +1479,7 @@ export async function runMockDynamicAction(
     follow_up: derived.followUpEmailMd,
   };
 
-  const usesScreen = input.action === "follow_up" && input.screenContext;
+  const usesScreen = input.action === "follow_up" && Boolean(input.screenContext);
   const content = usesScreen
     ? `${contentByAction[input.action]}\n\n[Screen] Shared screen context was available and can help refine unresolved implementation questions.`
     : contentByAction[input.action];
@@ -1201,6 +1487,7 @@ export async function runMockDynamicAction(
   appendAssistantMessage(input.sessionId, "assistant", content, {
     attachments: usesScreen ? buildScreenAttachment(input.screenContext) : [],
     contextSnapshot: usesScreen ? buildContextSnapshot(input.screenContext) : null,
+    metadata: buildMockMetadata("transcript_fallback", content, { usedScreenContext: usesScreen }),
   });
   updateSessionRecord({
     ...detail.session,
@@ -1235,6 +1522,9 @@ export async function askMockAssistant(input: AskSessionInput): Promise<SessionD
   appendAssistantMessage(input.sessionId, "assistant", response, {
     attachments: buildScreenAttachment(input.screenContext),
     contextSnapshot: buildContextSnapshot(input.screenContext),
+    metadata: buildMockMetadata("transcript_fallback", response, {
+      usedScreenContext: Boolean(input.screenContext),
+    }),
   });
   updateSessionRecord({
     ...detail.session,

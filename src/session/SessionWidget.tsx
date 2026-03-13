@@ -1,50 +1,71 @@
+import { AssistantFeed } from "../components/AssistantFeed";
+import { captureModeLabel } from "../lib/preflight";
+import type {
+  AudioInputDevice,
+  CaptureHealthPayload,
+  CaptureMode,
+  DynamicActionKey,
+  PreflightCheck,
+  ScreenShareState,
+  SessionDetail,
+  SystemAudioSource,
+} from "../lib/types";
 import { AskBar } from "./AskBar";
 import { DynamicActions } from "./DynamicActions";
 import { SessionControls } from "./SessionControls";
 import { SystemAudioSourcePicker } from "./SystemAudioSourcePicker";
 import { TranscriptPanel } from "./TranscriptPanel";
-import type {
-  CaptureMode,
-  ChatMessage,
-  DynamicActionKey,
-  ScreenShareState,
-  SessionDetail,
-  SystemAudioSource,
-} from "../lib/types";
 
 interface SessionWidgetProps {
   activeSession: SessionDetail | null;
+  assistantError: string | null;
+  assistantInFlightAction: DynamicActionKey | null;
+  askInFlight: boolean;
+  audioInputDevices: AudioInputDevice[];
+  canStartSelectedMode: boolean;
   captureError: string | null;
+  captureHealth: CaptureHealthPayload | null;
   captureMode: CaptureMode;
   captureSourceLabel: string | null;
   captureState: string;
   deepgramReady: boolean;
   geminiReady: boolean;
   isCapturing: boolean;
+  lastTranscriptFinalizedAt: string | null;
   linearReady: boolean;
+  microphoneSelectionWarning: string | null;
   overlayOpen: boolean;
   overlayShortcut: string;
   partialTranscript: string;
+  preflightBlockingChecks: PreflightCheck[];
+  preflightCheckedAt: string | null;
+  preflightLoading: boolean;
+  preflightSummary: string;
   screenContextEnabled: boolean;
   screenShareError: string | null;
   screenShareOwnedByCapture: boolean;
   screenShareState: ScreenShareState;
+  selectedMicrophoneDeviceId: string;
   systemAudioPickerError: string | null;
   systemAudioPickerLoading: boolean;
   systemAudioPickerOpen: boolean;
   systemAudioSources: SystemAudioSource[];
-  onStartSession: (title: string) => Promise<void>;
-  onPauseSession: (sessionId: string) => Promise<void>;
-  onResumeSession: (sessionId: string) => Promise<void>;
-  onCompleteSession: (sessionId: string) => Promise<void>;
+  transcriptFreshnessLabel: string;
   onAppendTranscript: (speakerLabel: string, text: string) => Promise<void>;
-  onDynamicAction: (action: DynamicActionKey) => Promise<void>;
   onAsk: (prompt: string) => Promise<void>;
-  onSetCaptureMode: (mode: CaptureMode) => void;
+  onCompleteSession: (sessionId: string) => Promise<void>;
+  onDynamicAction: (action: DynamicActionKey) => Promise<void>;
+  onPauseSession: (sessionId: string) => Promise<void>;
+  onRefreshPreflight: () => Promise<void>;
+  onResumeSession: (sessionId: string) => Promise<void>;
+  onRetryAssistantRequest: () => Promise<void>;
+  onSelectMicrophoneDevice: (deviceId: string) => Promise<void>;
   onSelectSystemAudioSource: (source: SystemAudioSource) => Promise<void>;
+  onSetCaptureMode: (mode: CaptureMode) => void;
   onStartLiveCapture: () => Promise<void>;
   onStartListening: () => Promise<void>;
   onStartScreenShare: () => Promise<boolean>;
+  onStartSession: (title: string) => Promise<void>;
   onStopLiveCapture: () => Promise<void>;
   onStopScreenShare: () => Promise<void>;
   onSystemAudioPickerClose: () => void;
@@ -52,9 +73,9 @@ interface SessionWidgetProps {
 }
 
 const overlayModes: Array<{ mode: CaptureMode; label: string; detail: string }> = [
-  { mode: "microphone", label: "Mic", detail: "Use the meeting audio in your room." },
-  { mode: "system_audio", label: "System", detail: "Capture shared system audio when macOS allows it." },
-  { mode: "manual", label: "Manual", detail: "Fallback if audio capture is unavailable." },
+  { mode: "microphone", label: "Mic", detail: "Recommended for real meetings and rehearsal." },
+  { mode: "system_audio", label: "System", detail: "Advanced mode when macOS capture and Screen Recording are ready." },
+  { mode: "manual", label: "Manual", detail: "Stay transcript-only if audio capture is unavailable." },
 ];
 
 function formatListeningLabel(captureState: string, isCapturing: boolean): string {
@@ -64,49 +85,26 @@ function formatListeningLabel(captureState: string, isCapturing: boolean): strin
   if (captureState === "stopping") {
     return "Stopping";
   }
+  if (captureState === "degraded") {
+    return "Recovering";
+  }
   if (captureState === "error") {
     return "Needs attention";
   }
   return isCapturing ? "Listening" : "Ready";
 }
 
-function renderAssistantFeed(messages: ChatMessage[], overlayOpen: boolean) {
-  return (
-    <article className="card message-panel">
-      <div className="section-header">
-        <p className="card-title">Assistant Feed</p>
-        <span className="section-meta">{messages.length} messages</span>
-      </div>
-      <div className="message-feed">
-        {messages.length === 0 ? (
-          <div className="empty-block">
-            <strong>No assistant output yet</strong>
-            <p>Run an action or ask a question to create the first response.</p>
-          </div>
-        ) : (
-          messages
-            .slice(overlayOpen ? -5 : 0)
-            .map((message) => (
-              <div key={message.id} className={`message-card message-${message.role}`}>
-                <div className="message-card-header">
-                  <span>{message.role}</span>
-                  {message.attachments.some((attachment) => attachment.kind === "screenshot") ? (
-                    <span className="message-attachment-badge">
-                      Screen used ·{" "}
-                      {new Date(message.attachments[0].capturedAt).toLocaleTimeString([], {
-                        hour: "numeric",
-                        minute: "2-digit",
-                      })}
-                    </span>
-                  ) : null}
-                </div>
-                <p>{message.content}</p>
-              </div>
-            ))
-        )}
-      </div>
-    </article>
-  );
+function screenStatusLabel(screenShareState: ScreenShareState): string {
+  if (screenShareState === "active") {
+    return "Screen shared";
+  }
+  if (screenShareState === "requesting") {
+    return "Requesting";
+  }
+  if (screenShareState === "error") {
+    return "Needs attention";
+  }
+  return "Screen off";
 }
 
 function renderOverlayCapability(label: string, ready: boolean, statusText?: string) {
@@ -118,58 +116,83 @@ function renderOverlayCapability(label: string, ready: boolean, statusText?: str
   );
 }
 
-function screenStatusLabel(screenShareState: ScreenShareState): string {
-  if (screenShareState === "active") {
-    return "Sharing";
+function renderBlockingChecks(checks: PreflightCheck[]) {
+  if (checks.length === 0) {
+    return null;
   }
-  if (screenShareState === "error") {
-    return "Needs attention";
-  }
-  return "Screen off";
+
+  return (
+    <div className="inline-alert">
+      <strong>Selected mode is blocked</strong>
+      <div className="check-list">
+        {checks.map((check) => (
+          <div key={check.key} className="check-list-item">
+            <span>{check.title}</span>
+            <strong>{check.message}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function SessionWidget({
   activeSession,
+  assistantError,
+  assistantInFlightAction,
+  askInFlight,
+  audioInputDevices,
+  canStartSelectedMode,
   captureError,
+  captureHealth,
   captureMode,
   captureSourceLabel,
   captureState,
   deepgramReady,
   geminiReady,
   isCapturing,
+  lastTranscriptFinalizedAt,
   linearReady,
+  microphoneSelectionWarning,
   overlayOpen,
   overlayShortcut,
   partialTranscript,
+  preflightBlockingChecks,
+  preflightCheckedAt,
+  preflightLoading,
+  preflightSummary,
   screenContextEnabled,
   screenShareError,
   screenShareOwnedByCapture,
   screenShareState,
+  selectedMicrophoneDeviceId,
   systemAudioPickerError,
   systemAudioPickerLoading,
   systemAudioPickerOpen,
   systemAudioSources,
-  onStartSession,
-  onPauseSession,
-  onResumeSession,
-  onCompleteSession,
+  transcriptFreshnessLabel,
   onAppendTranscript,
-  onDynamicAction,
   onAsk,
-  onSetCaptureMode,
+  onCompleteSession,
+  onDynamicAction,
+  onPauseSession,
+  onRefreshPreflight,
+  onResumeSession,
+  onRetryAssistantRequest,
+  onSelectMicrophoneDevice,
   onSelectSystemAudioSource,
+  onSetCaptureMode,
   onStartLiveCapture,
   onStartListening,
   onStartScreenShare,
+  onStartSession,
   onStopLiveCapture,
   onStopScreenShare,
   onSystemAudioPickerClose,
   onToggleOverlay,
 }: SessionWidgetProps) {
   const status = activeSession?.session.status ?? "idle";
-  const overlayPrimaryLabel = captureMode === "manual" ? "Start Session" : "Start Listening";
-  const overlayMessages = activeSession?.messages ?? [];
-  const overlayTranscripts = activeSession?.transcripts ?? [];
+  const overlayPrimaryLabel = captureMode === "manual" ? "Start Meeting" : "Start Listening";
   const listeningLabel = formatListeningLabel(captureState, isCapturing);
 
   if (overlayOpen) {
@@ -185,90 +208,35 @@ export function SessionWidget({
         />
         <section className="cluely-overlay-shell">
           <div className="cluely-overlay-frame">
-          <header className="cluely-overlay-header">
-            <div className="cluely-brand-lockup">
-              <span className={`cluely-brand-dot ${isCapturing ? "cluely-brand-dot-live" : ""}`} aria-hidden="true" />
-              <div>
-                <p className="eyebrow">TPMCluely</p>
-                <h2>{activeSession?.session.title ?? "Meeting Copilot"}</h2>
+            <header className="cluely-overlay-header">
+              <div className="cluely-brand-lockup">
+                <span className={`cluely-brand-dot ${isCapturing ? "cluely-brand-dot-live" : ""}`} aria-hidden="true" />
+                <div>
+                  <p className="eyebrow">TPMCluely</p>
+                  <h2>{activeSession?.session.title ?? "Meeting Copilot"}</h2>
+                </div>
               </div>
-            </div>
-            <div className="cluely-overlay-header-actions">
-              <span className={`overlay-pill ${isCapturing ? "overlay-pill-live" : ""}`}>{listeningLabel}</span>
-              {captureSourceLabel ? <span className="overlay-shortcut-badge">{captureSourceLabel}</span> : null}
-              <button type="button" className="overlay-ghost-button" onClick={() => void onToggleOverlay()}>
-                Hide
-              </button>
-            </div>
-          </header>
-
-          {!activeSession ? (
-            <section className="cluely-launch-surface">
-              <div className="cluely-launch-copy">
-                <p className="eyebrow">Shortcut First</p>
-                <h3>Open TPMCluely, then start listening when the meeting begins.</h3>
-                <p className="card-detail">
-                  TPMCluely will collect the transcript, answer live questions, suggest follow-ups, and generate Linear
-                  tickets when the meeting ends.
-                </p>
-              </div>
-
-              <div className="overlay-mode-picker">
-                {overlayModes.map((option) => (
-                  <button
-                    type="button"
-                    key={option.mode}
-                    className={`overlay-mode-button ${captureMode === option.mode ? "overlay-mode-button-active" : ""}`}
-                    onClick={() => onSetCaptureMode(option.mode)}
-                  >
-                    <strong>{option.label}</strong>
-                    <span>{option.detail}</span>
-                  </button>
-                ))}
-              </div>
-
-              <div className="overlay-capability-grid">
-                {renderOverlayCapability("Deepgram", deepgramReady)}
-                {renderOverlayCapability("Gemini", geminiReady)}
-                {renderOverlayCapability("Linear", linearReady)}
-                {renderOverlayCapability("Screen", screenShareState === "active", screenStatusLabel(screenShareState))}
-              </div>
-
-              <div className="overlay-launch-actions">
-                <button type="button" className="overlay-primary-button" onClick={() => void onStartListening()}>
-                  {overlayPrimaryLabel}
+              <div className="cluely-overlay-header-actions">
+                <span className={`overlay-pill ${isCapturing ? "overlay-pill-live" : ""}`}>{listeningLabel}</span>
+                {captureSourceLabel ? <span className="overlay-shortcut-badge">{captureSourceLabel}</span> : null}
+                <button type="button" className="overlay-ghost-button" onClick={() => void onToggleOverlay()}>
+                  Hide
                 </button>
-                <span className="overlay-shortcut-badge">Shortcut: {overlayShortcut}</span>
               </div>
+            </header>
 
-              {captureError ? (
-                <div className="inline-alert inline-alert-soft">
-                  <strong>Listening needs attention</strong>
-                  <p>{captureError}</p>
-                </div>
-              ) : null}
-            </section>
-          ) : (
-            <section className="cluely-live-surface">
-              <article className="card cluely-live-hero">
-                <div className="section-header">
-                  <div>
-                    <p className="card-title">{activeSession.session.title}</p>
-                    <p className="card-detail">
-                      {status === "paused" ? "Meeting paused" : "Meeting in progress"} · {captureMode.replace("_", " ")}
-                    </p>
-                  </div>
-                  <div className="cluely-live-meta">
-                    <span className={`overlay-pill ${isCapturing ? "overlay-pill-live" : ""}`}>{listeningLabel}</span>
-                    {captureSourceLabel ? <span className="overlay-shortcut-badge">{captureSourceLabel}</span> : null}
-                    <span className={`overlay-pill ${screenShareState === "active" ? "overlay-pill-live" : ""}`}>
-                      {screenStatusLabel(screenShareState)}
-                    </span>
-                    <span className="overlay-shortcut-badge">{overlayShortcut}</span>
-                  </div>
+            {!activeSession ? (
+              <section className="cluely-launch-surface">
+                <div className="cluely-launch-copy">
+                  <p className="eyebrow">Pre-Meeting</p>
+                  <h3>Check readiness, pick the right input, then start listening when the meeting begins.</h3>
+                  <p className="card-detail">
+                    TPMCluely will stay grounded in the live transcript, answer questions during the meeting, and end
+                    in review-first Linear ticket drafts.
+                  </p>
                 </div>
 
-                <div className="overlay-mode-picker overlay-mode-picker-compact">
+                <div className="overlay-mode-picker">
                   {overlayModes.map((option) => (
                     <button
                       type="button"
@@ -277,84 +245,226 @@ export function SessionWidget({
                       onClick={() => onSetCaptureMode(option.mode)}
                     >
                       <strong>{option.label}</strong>
+                      <span>{option.detail}</span>
                     </button>
                   ))}
                 </div>
 
-                <div className="toolbar-row cluely-live-toolbar">
-                  {status === "paused" ? (
-                    <button type="button" onClick={() => void onResumeSession(activeSession.session.id)}>
-                      Resume Meeting
-                    </button>
-                  ) : captureState === "listening" || captureState === "connecting" || captureState === "stopping" ? (
-                    <button type="button" onClick={() => void onStopLiveCapture()}>
-                      Stop Listening
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => void onStartLiveCapture()}>
-                      Start Listening
-                    </button>
-                  )}
-                  {status === "active" ? (
-                    <button type="button" className="secondary-button" onClick={() => void onPauseSession(activeSession.session.id)}>
-                      Pause
-                    </button>
-                  ) : null}
-                  <button type="button" className="secondary-button" onClick={() => void onCompleteSession(activeSession.session.id)}>
-                    End Meeting
-                  </button>
-                </div>
-                {screenContextEnabled && !screenShareOwnedByCapture ? (
-                  <div className="toolbar-row cluely-live-toolbar">
-                    {screenShareState === "active" ? (
-                      <button type="button" className="secondary-button" onClick={() => void onStopScreenShare()}>
-                        Stop Sharing Screen
-                      </button>
-                    ) : (
-                      <button type="button" className="secondary-button" onClick={() => void onStartScreenShare()}>
-                        Share Screen
-                      </button>
-                    )}
-                  </div>
+                {captureMode === "microphone" ? (
+                  <label className="field">
+                    <span>Microphone input</span>
+                    <select
+                      value={selectedMicrophoneDeviceId}
+                      onChange={(event) => void onSelectMicrophoneDevice(event.target.value)}
+                      disabled={audioInputDevices.length === 0}
+                    >
+                      {audioInputDevices.length === 0 ? <option value="">No microphone detected yet</option> : null}
+                      {audioInputDevices.map((device) => (
+                        <option key={device.deviceId} value={device.deviceId}>
+                          {device.label}
+                          {device.isDefault ? " (Default)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 ) : null}
 
+                <div className="overlay-capability-grid overlay-capability-grid-wide">
+                  {renderOverlayCapability("Deepgram", deepgramReady)}
+                  {renderOverlayCapability("Gemini", geminiReady)}
+                  {renderOverlayCapability("Linear", linearReady)}
+                  {renderOverlayCapability("Screen", screenShareState === "active", screenStatusLabel(screenShareState))}
+                </div>
+
+                <div className="preflight-summary preflight-summary-overlay">
+                  <div>
+                    <p className="muted-label">{captureModeLabel(captureMode)} readiness</p>
+                    <strong>{canStartSelectedMode ? "Ready" : "Blocked"}</strong>
+                    <p className="card-detail">{preflightSummary}</p>
+                  </div>
+                  <button type="button" className="secondary-button" disabled={preflightLoading} onClick={() => void onRefreshPreflight()}>
+                    {preflightLoading ? "Checking..." : "Run again"}
+                  </button>
+                </div>
+
+                {renderBlockingChecks(preflightBlockingChecks)}
+
+                <div className="overlay-launch-actions">
+                  <button
+                    type="button"
+                    className="overlay-primary-button"
+                    disabled={!canStartSelectedMode && captureMode !== "manual"}
+                    onClick={() => void onStartListening()}
+                  >
+                    {overlayPrimaryLabel}
+                  </button>
+                  <span className="overlay-shortcut-badge">Shortcut: {overlayShortcut}</span>
+                </div>
+
+                {microphoneSelectionWarning && captureMode === "microphone" ? (
+                  <div className="inline-alert inline-alert-soft">
+                    <strong>Microphone selection</strong>
+                    <p>{microphoneSelectionWarning}</p>
+                  </div>
+                ) : null}
                 {captureError ? (
                   <div className="inline-alert inline-alert-soft">
                     <strong>Listening needs attention</strong>
                     <p>{captureError}</p>
                   </div>
                 ) : null}
-                {screenShareError ? (
-                  <div className="inline-alert inline-alert-soft">
-                    <strong>Screen context needs attention</strong>
-                    <p>{screenShareError}</p>
+              </section>
+            ) : (
+              <section className="cluely-live-surface">
+                <article className="card cluely-live-hero">
+                  <div className="section-header">
+                    <div>
+                      <p className="card-title">{activeSession.session.title}</p>
+                      <p className="card-detail">
+                        {status === "paused" ? "Meeting paused" : "Meeting in progress"} · {captureModeLabel(captureMode)}
+                      </p>
+                    </div>
+                    <div className="cluely-live-meta">
+                      <span className={`overlay-pill ${isCapturing ? "overlay-pill-live" : ""}`}>{listeningLabel}</span>
+                      {captureSourceLabel ? <span className="overlay-shortcut-badge">{captureSourceLabel}</span> : null}
+                      <span className={`overlay-pill ${screenShareState === "active" ? "overlay-pill-live" : ""}`}>
+                        {screenStatusLabel(screenShareState)}
+                      </span>
+                      <span className="overlay-shortcut-badge">{overlayShortcut}</span>
+                    </div>
                   </div>
-                ) : null}
-              </article>
 
-              <AskBar
-                disabled={false}
-                screenContextEnabled={screenContextEnabled}
-                screenShareState={screenShareState}
-                onAsk={onAsk}
-              />
-              <DynamicActions disabled={false} onRunAction={onDynamicAction} />
+                  <div className="overlay-mode-picker overlay-mode-picker-compact">
+                    {overlayModes.map((option) => (
+                      <button
+                        type="button"
+                        key={option.mode}
+                        className={`overlay-mode-button ${captureMode === option.mode ? "overlay-mode-button-active" : ""}`}
+                        onClick={() => onSetCaptureMode(option.mode)}
+                      >
+                        <strong>{option.label}</strong>
+                      </button>
+                    ))}
+                  </div>
 
-              <div className="overlay-feed-grid">
-                <TranscriptPanel
-                  captureMode={captureMode}
-                  captureState={captureState}
-                  overlayOpen
-                  partialTranscript={partialTranscript}
-                  sessionId={activeSession.session.id}
-                  showManualComposer={false}
-                  transcripts={overlayTranscripts.slice(-8)}
-                  onAppendTranscript={onAppendTranscript}
+                  <div className="health-strip">
+                    <div className="health-pill">
+                      <span>Transcript freshness</span>
+                      <strong>{transcriptFreshnessLabel}</strong>
+                    </div>
+                    <div className="health-pill">
+                      <span>Last finalized line</span>
+                      <strong>{lastTranscriptFinalizedAt ? new Date(lastTranscriptFinalizedAt).toLocaleTimeString() : "Waiting"}</strong>
+                    </div>
+                    <div className="health-pill">
+                      <span>Preflight</span>
+                      <strong>{canStartSelectedMode ? "Ready" : "Blocked"}</strong>
+                    </div>
+                  </div>
+
+                  <div className="toolbar-row cluely-live-toolbar">
+                    {status === "paused" ? (
+                      <button type="button" onClick={() => void onResumeSession(activeSession.session.id)}>
+                        Resume Meeting
+                      </button>
+                    ) : captureState === "listening" || captureState === "connecting" || captureState === "stopping" || captureState === "degraded" ? (
+                      <button type="button" onClick={() => void onStopLiveCapture()}>
+                        Stop Listening
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={!canStartSelectedMode && captureMode !== "manual"}
+                        onClick={() => void onStartLiveCapture()}
+                      >
+                        Start Listening
+                      </button>
+                    )}
+                    {status === "active" ? (
+                      <button type="button" className="secondary-button" onClick={() => void onPauseSession(activeSession.session.id)}>
+                        Pause
+                      </button>
+                    ) : null}
+                    <button type="button" className="secondary-button" disabled={preflightLoading} onClick={() => void onRefreshPreflight()}>
+                      {preflightLoading ? "Checking..." : "Run preflight"}
+                    </button>
+                    <button type="button" className="secondary-button" onClick={() => void onCompleteSession(activeSession.session.id)}>
+                      End Meeting
+                    </button>
+                  </div>
+                  {screenContextEnabled && !screenShareOwnedByCapture ? (
+                    <div className="toolbar-row cluely-live-toolbar">
+                      {screenShareState === "active" ? (
+                        <button type="button" className="secondary-button" onClick={() => void onStopScreenShare()}>
+                          Stop Sharing Screen
+                        </button>
+                      ) : (
+                        <button type="button" className="secondary-button" onClick={() => void onStartScreenShare()}>
+                          Share Screen
+                        </button>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {captureHealth ? (
+                    <div className="inline-alert inline-alert-soft">
+                      <strong>Capture health</strong>
+                      <p>{captureHealth.message}</p>
+                    </div>
+                  ) : null}
+                  {microphoneSelectionWarning && captureMode === "microphone" ? (
+                    <div className="inline-alert inline-alert-soft">
+                      <strong>Microphone selection</strong>
+                      <p>{microphoneSelectionWarning}</p>
+                    </div>
+                  ) : null}
+                  {renderBlockingChecks(preflightBlockingChecks)}
+                  {captureError ? (
+                    <div className="inline-alert inline-alert-soft">
+                      <strong>Listening needs attention</strong>
+                      <p>{captureError}</p>
+                    </div>
+                  ) : null}
+                  {screenShareError ? (
+                    <div className="inline-alert inline-alert-soft">
+                      <strong>Screen context needs attention</strong>
+                      <p>{screenShareError}</p>
+                    </div>
+                  ) : null}
+                </article>
+
+                <AskBar
+                  disabled={!activeSession}
+                  isLoading={askInFlight || assistantInFlightAction !== null}
+                  lastError={assistantError}
+                  onAsk={onAsk}
+                  onRetry={assistantError ? onRetryAssistantRequest : undefined}
+                  screenContextEnabled={screenContextEnabled}
+                  screenShareState={screenShareState}
                 />
-                {renderAssistantFeed(overlayMessages, true)}
-              </div>
-            </section>
-          )}
+                <DynamicActions
+                  disabled={!activeSession}
+                  inFlightAction={assistantInFlightAction}
+                  lastError={assistantError}
+                  onRetry={assistantError ? onRetryAssistantRequest : undefined}
+                  onRunAction={onDynamicAction}
+                />
+
+                <div className="overlay-feed-grid">
+                  <TranscriptPanel
+                    captureMode={captureMode}
+                    captureState={captureState}
+                    overlayOpen
+                    partialTranscript={partialTranscript}
+                    sessionId={activeSession.session.id}
+                    showManualComposer={false}
+                    transcripts={activeSession.transcripts.slice(-8)}
+                    onAppendTranscript={onAppendTranscript}
+                  />
+                  <AssistantFeed messages={activeSession.messages} maxItems={5} />
+                </div>
+              </section>
+            )}
           </div>
         </section>
       </>
@@ -372,11 +482,11 @@ export function SessionWidget({
         sources={systemAudioSources}
       />
       <div className="panel-hero">
-        <p className="eyebrow">Live Session Widget</p>
-        <h2>Live transcript, overlay controls, grounded answers, and auto-generated tickets.</h2>
+        <p className="eyebrow">Live Meeting</p>
+        <h2>Run a real meeting with preflight checks, grounded answers, and review-first ticket drafts.</h2>
         <p className="muted">
-          Start a meeting, stream transcript signal into the assistant, answer live questions with Ask TPMCluely, then
-          end the session to generate deduped Linear tickets automatically.
+          TPMCluely keeps the session grounded in the transcript, uses screen context only when available, and never
+          pushes tickets to Linear before the user reviews them.
         </p>
       </div>
 
@@ -384,33 +494,55 @@ export function SessionWidget({
         <div className="card-stack">
           <SessionControls
             activeSession={activeSession}
+            audioInputDevices={audioInputDevices}
+            canStartSelectedMode={canStartSelectedMode}
             captureError={captureError}
+            captureHealth={captureHealth}
             captureMode={captureMode}
             captureSourceLabel={captureSourceLabel}
             captureState={captureState}
+            lastTranscriptFinalizedAt={lastTranscriptFinalizedAt}
+            microphoneSelectionWarning={microphoneSelectionWarning}
             overlayOpen={overlayOpen}
             overlayShortcut={overlayShortcut}
+            preflightBlockingChecks={preflightBlockingChecks}
+            preflightCheckedAt={preflightCheckedAt}
+            preflightLoading={preflightLoading}
+            preflightSummary={preflightSummary}
             screenContextEnabled={screenContextEnabled}
             screenShareError={screenShareError}
             screenShareOwnedByCapture={screenShareOwnedByCapture}
             screenShareState={screenShareState}
-            onStartSession={onStartSession}
-            onPauseSession={onPauseSession}
-            onResumeSession={onResumeSession}
+            selectedMicrophoneDeviceId={selectedMicrophoneDeviceId}
+            transcriptFreshnessLabel={transcriptFreshnessLabel}
             onCompleteSession={onCompleteSession}
+            onPauseSession={onPauseSession}
+            onRefreshPreflight={onRefreshPreflight}
+            onResumeSession={onResumeSession}
+            onSelectMicrophoneDevice={onSelectMicrophoneDevice}
             onSetCaptureMode={onSetCaptureMode}
             onStartLiveCapture={onStartLiveCapture}
             onStartScreenShare={onStartScreenShare}
+            onStartSession={onStartSession}
             onStopLiveCapture={onStopLiveCapture}
             onStopScreenShare={onStopScreenShare}
             onToggleOverlay={onToggleOverlay}
           />
-          <DynamicActions disabled={!activeSession} onRunAction={onDynamicAction} />
+          <DynamicActions
+            disabled={!activeSession}
+            inFlightAction={assistantInFlightAction}
+            lastError={assistantError}
+            onRetry={assistantError ? onRetryAssistantRequest : undefined}
+            onRunAction={onDynamicAction}
+          />
           <AskBar
             disabled={!activeSession}
+            isLoading={askInFlight || assistantInFlightAction !== null}
+            lastError={assistantError}
+            onAsk={onAsk}
+            onRetry={assistantError ? onRetryAssistantRequest : undefined}
             screenContextEnabled={screenContextEnabled}
             screenShareState={screenShareState}
-            onAsk={onAsk}
           />
         </div>
 
@@ -425,7 +557,7 @@ export function SessionWidget({
             onAppendTranscript={onAppendTranscript}
           />
 
-          {renderAssistantFeed(activeSession?.messages ?? [], false)}
+          <AssistantFeed messages={activeSession?.messages ?? []} />
         </div>
       </div>
     </section>

@@ -71,6 +71,11 @@ export function generateTicketsFromSession(detail: SessionDetail): GeneratedTick
         linearLastError: null,
         linearLastAttemptAt: null,
         linearDeduped: false,
+        reviewState: "draft",
+        approvedAt: null,
+        rejectedAt: null,
+        rejectionReason: null,
+        reviewedAt: null,
         createdAt: detail.session.updatedAt,
       } satisfies GeneratedTicket;
     })

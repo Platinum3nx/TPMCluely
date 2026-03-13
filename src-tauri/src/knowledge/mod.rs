@@ -76,7 +76,11 @@ pub fn ingest_text_file(
         .trim()
         .chars()
         .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '.' || character == '-' || character == '_' {
+            if character.is_ascii_alphanumeric()
+                || character == '.'
+                || character == '-'
+                || character == '_'
+            {
                 character
             } else {
                 '_'
@@ -106,7 +110,10 @@ pub fn delete_file(database: &AppDatabase, knowledge_file_id: &str) -> Result<()
     let rows = database
         .list_knowledge_files()
         .map_err(|error| error.to_string())?;
-    if let Some(row) = rows.into_iter().find(|candidate| candidate.id == knowledge_file_id) {
+    if let Some(row) = rows
+        .into_iter()
+        .find(|candidate| candidate.id == knowledge_file_id)
+    {
         let _ = fs::remove_file(&row.storage_path);
         if let Some(extracted_text_path) = row.extracted_text_path {
             let _ = fs::remove_file(extracted_text_path);

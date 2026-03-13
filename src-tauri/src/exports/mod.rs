@@ -4,7 +4,13 @@ pub fn build_session_markdown(detail: &SessionDetailPayload) -> String {
     let transcript = detail
         .transcripts
         .iter()
-        .map(|segment| format!("- {}: {}", segment.speaker_label.as_deref().unwrap_or("Speaker"), segment.text))
+        .map(|segment| {
+            format!(
+                "- {}: {}",
+                segment.speaker_label.as_deref().unwrap_or("Speaker"),
+                segment.text
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let tickets = detail
@@ -33,8 +39,14 @@ pub fn build_session_markdown(detail: &SessionDetailPayload) -> String {
         format!("# {}", detail.session.title),
         String::new(),
         format!("Status: {}", detail.session.status),
-        format!("Started: {}", detail.session.started_at.as_deref().unwrap_or("n/a")),
-        format!("Ended: {}", detail.session.ended_at.as_deref().unwrap_or("n/a")),
+        format!(
+            "Started: {}",
+            detail.session.started_at.as_deref().unwrap_or("n/a")
+        ),
+        format!(
+            "Ended: {}",
+            detail.session.ended_at.as_deref().unwrap_or("n/a")
+        ),
         String::new(),
         "## Summary".to_string(),
         detail

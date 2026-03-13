@@ -34,8 +34,8 @@ function buildDetail(overrides?: Partial<SessionDetail>): SessionDetail {
         id: "ticket-1",
         sessionId: "session-1",
         idempotencyKey: "ticket-1",
-        title: "Pending ticket",
-        description: "Pending ticket description",
+        title: "Approved ticket",
+        description: "Approved ticket description",
         acceptanceCriteria: ["criterion"],
         type: "Task",
         sourceLine: null,
@@ -47,6 +47,11 @@ function buildDetail(overrides?: Partial<SessionDetail>): SessionDetail {
         linearLastError: null,
         linearLastAttemptAt: null,
         linearDeduped: false,
+        reviewState: "approved",
+        approvedAt: "2026-03-12T10:31:00Z",
+        rejectedAt: null,
+        rejectionReason: null,
+        reviewedAt: "2026-03-12T10:31:00Z",
         createdAt: "2026-03-12T10:31:00Z",
       },
       {
@@ -66,6 +71,11 @@ function buildDetail(overrides?: Partial<SessionDetail>): SessionDetail {
         linearLastError: "Linear returned 503",
         linearLastAttemptAt: "2026-03-12T10:32:00Z",
         linearDeduped: false,
+        reviewState: "push_failed",
+        approvedAt: "2026-03-12T10:31:30Z",
+        rejectedAt: null,
+        rejectionReason: null,
+        reviewedAt: "2026-03-12T10:31:30Z",
         createdAt: "2026-03-12T10:31:30Z",
       },
       {
@@ -85,6 +95,11 @@ function buildDetail(overrides?: Partial<SessionDetail>): SessionDetail {
         linearLastError: null,
         linearLastAttemptAt: "2026-03-12T10:33:00Z",
         linearDeduped: true,
+        reviewState: "pushed",
+        approvedAt: "2026-03-12T10:33:00Z",
+        rejectedAt: null,
+        rejectionReason: null,
+        reviewedAt: "2026-03-12T10:33:00Z",
         createdAt: "2026-03-12T10:32:00Z",
       },
     ],
@@ -93,7 +108,7 @@ function buildDetail(overrides?: Partial<SessionDetail>): SessionDetail {
 }
 
 describe("TicketDashboard", () => {
-  it("shows failure state, bulk push, and per-ticket actions", () => {
+  it("shows failure state, review-first push controls, and per-ticket actions", () => {
     render(
       <TicketDashboard
         sessionDetail={buildDetail()}
@@ -101,20 +116,32 @@ describe("TicketDashboard", () => {
         onGenerateTickets={vi.fn(async () => undefined)}
         onPushGeneratedTicket={vi.fn(async () => undefined)}
         onPushGeneratedTickets={vi.fn(async () => undefined)}
+        onSetGeneratedTicketReviewState={vi.fn(async () => undefined)}
+        onUpdateGeneratedTicketDraft={vi.fn(async () => undefined)}
       />
     );
 
     expect(screen.getByText("Ticket generation failed")).toBeInTheDocument();
     expect(screen.getByText("Gemini response was invalid.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Push all to Linear" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Regenerate tickets" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Push approved to Linear" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Regenerate drafts" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Push to Linear" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry push" })).toBeInTheDocument();
-    expect(screen.getByText("Linked existing issue")).toBeInTheDocument();
+    expect(screen.getAllByText("Linked existing issue").length).toBeGreaterThan(0);
     expect(screen.getByText("Linear returned 503")).toBeInTheDocument();
+    expect(screen.getByText("Review-first workflow")).toBeInTheDocument();
   });
 
-  it("allows regeneration when the completed session has not pushed any tickets yet", () => {
+  it("allows regeneration when the completed session has no review history yet", () => {
+    const draftTickets = buildDetail().generatedTickets.slice(0, 2).map((ticket, index) => ({
+      ...ticket,
+      reviewState: "draft" as const,
+      reviewedAt: null,
+      approvedAt: null,
+      linearPushState: index === 1 ? "pending" as const : ticket.linearPushState,
+      linearLastError: null,
+    }));
+
     render(
       <TicketDashboard
         sessionDetail={buildDetail({
@@ -124,15 +151,17 @@ describe("TicketDashboard", () => {
             ticketGenerationError: null,
             ticketGeneratedAt: "2026-03-12T10:35:00Z",
           },
-          generatedTickets: buildDetail().generatedTickets.slice(0, 2),
+          generatedTickets: draftTickets,
         })}
         allowPreview={false}
         onGenerateTickets={vi.fn(async () => undefined)}
         onPushGeneratedTicket={vi.fn(async () => undefined)}
         onPushGeneratedTickets={vi.fn(async () => undefined)}
+        onSetGeneratedTicketReviewState={vi.fn(async () => undefined)}
+        onUpdateGeneratedTicketDraft={vi.fn(async () => undefined)}
       />
     );
 
-    expect(screen.getByRole("button", { name: "Regenerate tickets" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Regenerate drafts" })).toBeInTheDocument();
   });
 });

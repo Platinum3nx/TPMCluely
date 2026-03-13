@@ -6,11 +6,7 @@ pub fn format_transcript_document(transcripts: &[TranscriptRow]) -> String {
     transcripts
         .iter()
         .map(|segment| {
-            let speaker = segment
-                .speaker_label
-                .as_deref()
-                .unwrap_or("Speaker")
-                .trim();
+            let speaker = segment.speaker_label.as_deref().unwrap_or("Speaker").trim();
             format!("{speaker}: {}", segment.text.trim())
         })
         .collect::<Vec<_>>()

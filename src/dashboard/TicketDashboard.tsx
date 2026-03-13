@@ -2,26 +2,42 @@ import { useState } from "react";
 
 import { TicketCard } from "../components/TicketCard";
 import { generateTicketsFromSession } from "../lib/ticket-engine";
-import type { SessionDetail } from "../lib/types";
+import type { GeneratedTicket, SessionDetail, TicketType } from "../lib/types";
 
 interface TicketDashboardProps {
-  sessionDetail: SessionDetail | null;
   allowPreview: boolean;
   onGenerateTickets: (sessionId: string) => Promise<void>;
   onPushGeneratedTicket: (sessionId: string, idempotencyKey: string) => Promise<void>;
   onPushGeneratedTickets: (sessionId: string) => Promise<void>;
+  onSetGeneratedTicketReviewState: (
+    sessionId: string,
+    idempotencyKey: string,
+    reviewState: "draft" | "approved" | "rejected",
+    rejectionReason?: string | null
+  ) => Promise<void>;
+  onUpdateGeneratedTicketDraft: (
+    sessionId: string,
+    idempotencyKey: string,
+    draft: { acceptanceCriteria: string[]; description: string; title: string; type: TicketType }
+  ) => Promise<void>;
+  sessionDetail: SessionDetail | null;
+}
+
+function hasReviewHistory(ticket: GeneratedTicket): boolean {
+  return ticket.linearPushState === "pushed" || ticket.reviewState !== "draft" || Boolean(ticket.reviewedAt);
 }
 
 export function TicketDashboard({
-  sessionDetail,
   allowPreview,
   onGenerateTickets,
   onPushGeneratedTicket,
   onPushGeneratedTickets,
+  onSetGeneratedTicketReviewState,
+  onUpdateGeneratedTicketDraft,
+  sessionDetail,
 }: TicketDashboardProps) {
-  const [generationInFlight, setGenerationInFlight] = useState(false);
   const [bulkPushInFlight, setBulkPushInFlight] = useState(false);
-  const [pushingTicketKey, setPushingTicketKey] = useState<string | null>(null);
+  const [generationInFlight, setGenerationInFlight] = useState(false);
   const session = sessionDetail?.session ?? null;
 
   const persistedTickets = sessionDetail?.generatedTickets ?? [];
@@ -29,10 +45,15 @@ export function TicketDashboard({
     allowPreview && sessionDetail && persistedTickets.length === 0 ? generateTicketsFromSession(sessionDetail) : [];
   const tickets = persistedTickets.length > 0 ? persistedTickets : fallbackTickets;
   const isFallback = persistedTickets.length === 0 && fallbackTickets.length > 0;
-  const hasPushedTicket = persistedTickets.some((ticket) => ticket.linearPushState === "pushed");
-  const hasPushableTicket = persistedTickets.some((ticket) => ticket.linearPushState !== "pushed");
-  const canRegenerate =
-    session?.status === "completed" && !hasPushedTicket && !isFallback;
+  const approvedCount = persistedTickets.filter((ticket) => ["approved", "push_failed"].includes(ticket.reviewState)).length;
+  const rejectedCount = persistedTickets.filter((ticket) => ticket.reviewState === "rejected").length;
+  const pushedCount = persistedTickets.filter((ticket) => ticket.linearPushState === "pushed").length;
+  const hasReviewHistoryAlready = persistedTickets.some(hasReviewHistory);
+  const canRegenerate = session?.status === "completed" && !isFallback && !hasReviewHistoryAlready;
+  const canGenerate = session?.status === "completed" && !generationInFlight;
+  const hasPushableTicket = persistedTickets.some(
+    (ticket) => ticket.linearPushState !== "pushed" && ["approved", "push_failed"].includes(ticket.reviewState)
+  );
 
   async function handleGenerateTickets() {
     if (!sessionDetail) {
@@ -47,7 +68,7 @@ export function TicketDashboard({
     }
   }
 
-  async function handlePushAllTickets() {
+  async function handlePushApprovedTickets() {
     if (!sessionDetail) {
       return;
     }
@@ -63,16 +84,23 @@ export function TicketDashboard({
   return (
     <article className="card">
       <div className="section-header">
-        <p className="card-title">Ticket Generation</p>
-        <span className="section-meta">
-          {tickets.length} {tickets.length === 1 ? "ticket" : "tickets"}
-          {isFallback ? " · heuristic preview" : ""}
-        </span>
+        <div>
+          <p className="card-title">Ticket Review Queue</p>
+          <span className="section-meta">
+            {tickets.length} {tickets.length === 1 ? "ticket" : "tickets"}
+            {isFallback ? " · preview only" : ""}
+          </span>
+        </div>
+        <div className="message-chip-row">
+          <span className="message-chip">{approvedCount} approved</span>
+          <span className="message-chip">{rejectedCount} rejected</span>
+          <span className="message-chip">{pushedCount} pushed</span>
+        </div>
       </div>
       {!sessionDetail ? (
         <div className="empty-block">
-          <strong>Select a session to generate tickets</strong>
-          <p>The ticket engine uses transcript lines and derived notes to create implementation-ready cards.</p>
+          <strong>Select a session to review tickets</strong>
+          <p>Completed sessions show generated draft tickets here before anything is allowed to reach Linear.</p>
         </div>
       ) : (
         <>
@@ -80,25 +108,30 @@ export function TicketDashboard({
             <div className="ticket-dashboard-meta">
               <span>Generation state</span>
               <strong>{session?.ticketGenerationState.replaceAll("_", " ")}</strong>
+              <p className="card-detail">TPMCluely generates local drafts first. Linear push is always review-driven.</p>
             </div>
             <div className="toolbar-row">
-              {canRegenerate ? (
+              {persistedTickets.length === 0 && canGenerate ? (
                 <button type="button" disabled={generationInFlight} onClick={() => void handleGenerateTickets()}>
-                  {generationInFlight ? "Regenerating..." : "Regenerate tickets"}
+                  {generationInFlight ? "Generating..." : "Generate draft tickets"}
+                </button>
+              ) : null}
+              {persistedTickets.length > 0 && canRegenerate ? (
+                <button type="button" disabled={generationInFlight} onClick={() => void handleGenerateTickets()}>
+                  {generationInFlight ? "Regenerating..." : "Regenerate drafts"}
                 </button>
               ) : null}
               {!isFallback && hasPushableTicket ? (
-                <button
-                  type="button"
-                  disabled={bulkPushInFlight}
-                  onClick={() => {
-                    void handlePushAllTickets();
-                  }}
-                >
-                  {bulkPushInFlight ? "Pushing..." : "Push all to Linear"}
+                <button type="button" disabled={bulkPushInFlight} onClick={() => void handlePushApprovedTickets()}>
+                  {bulkPushInFlight ? "Pushing..." : "Push approved to Linear"}
                 </button>
               ) : null}
             </div>
+          </div>
+
+          <div className="inline-alert inline-alert-soft">
+            <strong>Review-first workflow</strong>
+            <p>Approve only the drafts you want in Linear. Rejected drafts stay local, and pushed issues are never overwritten.</p>
           </div>
 
           {session?.ticketGenerationError ? (
@@ -110,11 +143,11 @@ export function TicketDashboard({
 
           {tickets.length === 0 ? (
             <div className="empty-block">
-              <strong>No ticket candidates yet</strong>
+              <strong>No ticket drafts yet</strong>
               <p>
                 {allowPreview
-                  ? "End the meeting to run the transcript-to-Linear pipeline, or use the browser preview flow for local mock testing."
-                  : "End the meeting to run the transcript-to-Linear pipeline, or add more transcript signal first."}
+                  ? "Finish the rehearsal meeting to preview draft tickets, then approve them before pushing."
+                  : "Finish the meeting to generate draft tickets, or add more transcript signal first."}
               </p>
             </div>
           ) : (
@@ -122,19 +155,32 @@ export function TicketDashboard({
               {tickets.map((ticket) => (
                 <TicketCard
                   key={ticket.idempotencyKey}
+                  bulkPushDisabled={bulkPushInFlight}
                   ticket={ticket}
-                  pushDisabled={bulkPushInFlight}
-                  pushInFlight={pushingTicketKey === ticket.idempotencyKey}
                   onPush={
                     isFallback
                       ? undefined
                       : async (selectedTicket) => {
-                          try {
-                            setPushingTicketKey(selectedTicket.idempotencyKey);
-                            await onPushGeneratedTicket(selectedTicket.sessionId, selectedTicket.idempotencyKey);
-                          } finally {
-                            setPushingTicketKey(null);
-                          }
+                          await onPushGeneratedTicket(selectedTicket.sessionId, selectedTicket.idempotencyKey);
+                        }
+                  }
+                  onSaveDraft={
+                    isFallback
+                      ? undefined
+                      : async (selectedTicket, draft) => {
+                          await onUpdateGeneratedTicketDraft(selectedTicket.sessionId, selectedTicket.idempotencyKey, draft);
+                        }
+                  }
+                  onSetReviewState={
+                    isFallback
+                      ? undefined
+                      : async (selectedTicket, reviewState, rejectionReason) => {
+                          await onSetGeneratedTicketReviewState(
+                            selectedTicket.sessionId,
+                            selectedTicket.idempotencyKey,
+                            reviewState,
+                            rejectionReason
+                          );
                         }
                   }
                 />

@@ -7,6 +7,7 @@ export interface PermissionSnapshot {
 }
 
 export type SettingValue = string;
+export type TicketPushMode = "review_before_push" | "manual_only";
 
 export interface SettingRecord {
   key: string;
@@ -120,7 +121,6 @@ export interface SessionRecord {
 }
 
 export type TranscriptSource = "manual" | "capture";
-
 export type ScreenShareState = "inactive" | "requesting" | "active" | "error";
 
 export interface TranscriptSegment {
@@ -157,6 +157,17 @@ export interface MessageAttachment {
   persisted: boolean;
 }
 
+export type AssistantResponseMode = "gemini" | "transcript_fallback" | "insufficient_transcript";
+
+export interface MessageMetadata {
+  responseMode?: AssistantResponseMode | null;
+  providerName?: string | null;
+  providerError?: string | null;
+  latencyMs?: number | null;
+  usedScreenContext?: boolean;
+  citations?: string[];
+}
+
 export interface ChatMessage {
   id: string;
   sessionId: string;
@@ -164,6 +175,7 @@ export interface ChatMessage {
   content: string;
   contextSnapshot: string | null;
   attachments: MessageAttachment[];
+  metadata?: MessageMetadata | null;
   createdAt: string;
 }
 
@@ -213,9 +225,9 @@ export interface RunDynamicActionInput {
 export type TicketType = "Bug" | "Feature" | "Task";
 export type TicketGenerationState = "not_started" | "succeeded" | "failed";
 export type LinearPushState = "pending" | "pushed" | "failed";
+export type GeneratedTicketReviewState = "draft" | "approved" | "rejected" | "pushed" | "push_failed";
 
 export type CaptureMode = "system_audio" | "microphone" | "manual";
-
 export type SystemAudioSourceKind = "window" | "display";
 
 export interface SystemAudioSource {
@@ -288,6 +300,34 @@ export interface CaptureSegmentEventPayload {
   segment: TranscriptSegment;
 }
 
+export interface AudioInputDevice {
+  deviceId: string;
+  label: string;
+  isDefault: boolean;
+}
+
+export type PreflightCheckStatus = "ready" | "warning" | "blocked";
+
+export interface PreflightCheck {
+  key: string;
+  title: string;
+  status: PreflightCheckStatus;
+  message: string;
+  detail?: string | null;
+}
+
+export interface PreflightModeReport {
+  mode: CaptureMode;
+  canStart: boolean;
+  summary: string;
+}
+
+export interface PreflightReport {
+  checkedAt: string;
+  checks: PreflightCheck[];
+  modes: PreflightModeReport[];
+}
+
 export interface GeneratedTicket {
   id: string;
   sessionId: string;
@@ -305,6 +345,11 @@ export interface GeneratedTicket {
   linearLastError: string | null;
   linearLastAttemptAt: string | null;
   linearDeduped: boolean;
+  reviewState: GeneratedTicketReviewState;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+  rejectionReason: string | null;
+  reviewedAt: string | null;
   createdAt: string;
 }
 
@@ -320,6 +365,22 @@ export interface GeneratedTicketDraft {
 export interface SaveGeneratedTicketsInput {
   sessionId: string;
   tickets: GeneratedTicketDraft[];
+}
+
+export interface UpdateGeneratedTicketDraftInput {
+  sessionId: string;
+  idempotencyKey: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+  type: TicketType;
+}
+
+export interface SetGeneratedTicketReviewStateInput {
+  sessionId: string;
+  idempotencyKey: string;
+  reviewState: Exclude<GeneratedTicketReviewState, "pushed" | "push_failed">;
+  rejectionReason?: string | null;
 }
 
 export interface MarkGeneratedTicketPushedInput {

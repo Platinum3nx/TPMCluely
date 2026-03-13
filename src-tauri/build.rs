@@ -1,11 +1,15 @@
 fn main() {
     #[cfg(target_os = "macos")]
     {
+        const MIN_MACOS_VERSION: &str = "12.3";
+
         println!("cargo:rerun-if-changed=src/audio/macos_bridge.m");
+        println!("cargo:rustc-link-arg=-mmacosx-version-min={MIN_MACOS_VERSION}");
 
         cc::Build::new()
             .file("src/audio/macos_bridge.m")
             .flag("-fobjc-arc")
+            .flag(&format!("-mmacosx-version-min={MIN_MACOS_VERSION}"))
             .compile("tpmaudio");
 
         println!("cargo:rustc-link-lib=framework=AppKit");

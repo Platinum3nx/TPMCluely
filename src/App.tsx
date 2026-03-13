@@ -16,24 +16,30 @@ import {
   pushGeneratedTickets,
   resumeSession,
   runDynamicAction,
+  runPreflightChecks,
   saveKnowledgeFile,
   savePrompt,
   saveSecret,
   saveSetting,
   searchSessions,
+  setGeneratedTicketReviewState,
   setOverlayOpen as persistOverlayOpen,
   startSession,
+  updateGeneratedTicketDraft,
 } from "./lib/tauri";
 import { DashboardApp } from "./dashboard/DashboardApp";
 import { OnboardingApp } from "./onboarding/OnboardingApp";
 import { Settings } from "./dashboard/Settings";
 import { SessionWidget } from "./session/SessionWidget";
+import { getBlockingChecksForMode, getPreflightModeCanStart, getPreflightModeSummary } from "./lib/preflight";
 import { matchesShortcut, normalizeGlobalShortcut } from "./lib/shortcuts";
 import type {
   BootstrapPayload,
   CaptureMode,
+  CaptureSegmentEventPayload,
   DynamicActionKey,
   KnowledgeFileRecord,
+  PreflightReport,
   PromptRecord,
   SaveKnowledgeFileInput,
   SavePromptInput,
@@ -44,18 +50,18 @@ import type {
   ScreenContextInput,
   SettingRecord,
   SystemAudioSource,
-  CaptureSegmentEventPayload,
+  TicketType,
 } from "./lib/types";
 import { useLiveTranscription } from "./session/useLiveTranscription";
 
 type ViewKey = "overview" | "onboarding" | "session" | "dashboard" | "settings";
 
 const viewMeta: Array<{ key: ViewKey; label: string; caption: string }> = [
-  { key: "overview", label: "Mission", caption: "Foundation snapshot" },
+  { key: "overview", label: "Overview", caption: "Desktop readiness" },
   { key: "onboarding", label: "Onboarding", caption: "Permissions + providers" },
-  { key: "session", label: "Session", caption: "Live widget shell" },
+  { key: "session", label: "Session", caption: "Live meeting flow" },
   { key: "dashboard", label: "Dashboard", caption: "Review + exports" },
-  { key: "settings", label: "Settings", caption: "Local-first controls" },
+  { key: "settings", label: "Settings", caption: "Capture defaults" },
 ];
 
 const initialSecrets: Record<SecretKey, string> = {
@@ -71,6 +77,10 @@ interface WindowFrame {
   x: number;
   y: number;
 }
+
+type AssistantRequest =
+  | { action: DynamicActionKey; kind: "action" }
+  | { kind: "ask"; prompt: string };
 
 function getSettingValue(settings: SettingRecord[], key: string, fallback: string): string {
   return settings.find((setting) => setting.key === key)?.value ?? fallback;
@@ -121,6 +131,12 @@ export default function App() {
   const [selectedCaptureMode, setSelectedCaptureMode] = useState<CaptureMode>("manual");
   const [secretDrafts, setSecretDrafts] = useState(initialSecrets);
   const [savingSecretKey, setSavingSecretKey] = useState<SecretKey | null>(null);
+  const [assistantError, setAssistantError] = useState<string | null>(null);
+  const [assistantInFlightAction, setAssistantInFlightAction] = useState<DynamicActionKey | null>(null);
+  const [askInFlight, setAskInFlight] = useState(false);
+  const [lastAssistantRequest, setLastAssistantRequest] = useState<AssistantRequest | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [preflightReport, setPreflightReport] = useState<PreflightReport | null>(null);
   const [systemAudioPickerError, setSystemAudioPickerError] = useState<string | null>(null);
   const [systemAudioPickerLoading, setSystemAudioPickerLoading] = useState(false);
   const [systemAudioPickerOpen, setSystemAudioPickerOpen] = useState(false);
@@ -173,20 +189,27 @@ export default function App() {
   }
 
   const {
+    audioInputDevices,
     captureError,
+    captureHealth,
     captureSourceLabel,
     captureState,
+    lastTranscriptFinalizedAt,
     isCapturing,
     listAvailableSystemAudioSources,
+    microphoneSelectionWarning,
     partialTranscript,
     screenShareError,
     screenShareOwnedByCapture,
     screenShareState,
+    selectedMicrophoneDeviceId,
+    setSelectedMicrophoneDeviceId,
     startCapture,
     startScreenShare,
     stopCapture,
     stopScreenShare,
     captureScreenContext,
+    transcriptFreshnessLabel,
   } = useLiveTranscription({
     onMicrophoneFinalTranscript: async (segment) => {
       if (!activeSessionRef.current) {
@@ -203,6 +226,7 @@ export default function App() {
       applySessionDetail(detail);
     },
     onNativeCaptureSegment: applyNativeCaptureSegment,
+    preferredMicrophoneDeviceId: bootstrap ? getSettingValue(bootstrap.settings, "preferred_microphone_device_id", "") : "",
   });
 
   useEffect(() => {
@@ -217,12 +241,34 @@ export default function App() {
     overlayOpenRef.current = overlayOpen;
   }, [overlayOpen]);
 
+  async function refreshPreflight(surfaceError = false) {
+    try {
+      setPreflightLoading(true);
+      const report = await runPreflightChecks();
+      setPreflightReport(report);
+      return report;
+    } catch (unknownError) {
+      if (surfaceError) {
+        const message = unknownError instanceof Error ? unknownError.message : "Failed to run the desktop preflight.";
+        setError(message);
+      }
+      return null;
+    } finally {
+      setPreflightLoading(false);
+    }
+  }
+
   async function hydrateWorkspace(preferredSessionId?: string | null) {
     try {
       setLoading(true);
       setError(null);
-      const [payload, sessionList] = await Promise.all([bootstrapApp(), listSessions()]);
+      const [payload, sessionList, preflight] = await Promise.all([
+        bootstrapApp(),
+        listSessions(),
+        runPreflightChecks().catch(() => null),
+      ]);
       setBootstrap(payload);
+      setPreflightReport(preflight);
       setSessions(sessionList);
       setPrompts(payload.prompts);
       setKnowledgeFiles(payload.knowledgeFiles);
@@ -278,8 +324,12 @@ export default function App() {
 
   async function handleUpdateSetting(key: string, value: string) {
     try {
-      await saveSetting({ key, value });
-      await hydrateWorkspace(selectedSessionId);
+      const settings = await saveSetting({ key, value });
+      setBootstrap((current) => (current ? { ...current, settings } : current));
+      if (key === "screen_context_enabled" && value !== "true" && screenShareState === "active") {
+        await stopScreenShare();
+      }
+      await refreshPreflight();
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to update setting.";
       setError(message);
@@ -296,6 +346,14 @@ export default function App() {
   const screenContextEnabled = bootstrap
     ? getSettingValue(bootstrap.settings, "screen_context_enabled", "true") === "true"
     : true;
+  const selectedModeCanStart =
+    preflightReport != null
+      ? getPreflightModeCanStart(preflightReport, selectedCaptureMode)
+      : selectedCaptureMode === "manual"
+        ? Boolean(bootstrap?.diagnostics.databaseReady)
+        : false;
+  const selectedModePreflightSummary = getPreflightModeSummary(preflightReport, selectedCaptureMode);
+  const selectedModeBlockingChecks = getBlockingChecksForMode(preflightReport, selectedCaptureMode);
 
   useEffect(() => {
     if (!bootstrap) {
@@ -532,6 +590,38 @@ export default function App() {
     }
   }
 
+  async function handleSelectMicrophoneDevice(deviceId: string) {
+    setSelectedMicrophoneDeviceId(deviceId);
+    try {
+      const settings = await saveSetting({ key: "preferred_microphone_device_id", value: deviceId });
+      setBootstrap((current) => (current ? { ...current, settings } : current));
+      await refreshPreflight();
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Failed to save the preferred microphone.";
+      setError(message);
+    }
+  }
+
+  async function ensureSelectedModeReady(mode: CaptureMode) {
+    const report = await refreshPreflight(true);
+    if (!report) {
+      return false;
+    }
+
+    const canStart = getPreflightModeCanStart(report, mode);
+    if (canStart) {
+      return true;
+    }
+
+    const blockingChecks = getBlockingChecksForMode(report, mode);
+    const message =
+      blockingChecks.length > 0
+        ? blockingChecks.map((check) => `${check.title}: ${check.message}`).join(" ")
+        : getPreflightModeSummary(report, mode);
+    setError(message);
+    return false;
+  }
+
   async function startLiveCaptureForSession(sessionId?: string) {
     const targetSessionId = sessionId ?? activeSessionRef.current?.session.id;
     if (!targetSessionId) {
@@ -541,6 +631,11 @@ export default function App() {
 
     if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
       setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
+      return;
+    }
+
+    const ready = await ensureSelectedModeReady(selectedCaptureMode);
+    if (!ready) {
       return;
     }
 
@@ -565,6 +660,7 @@ export default function App() {
     setError(null);
     await startCapture({
       apiKey,
+      deviceId: selectedMicrophoneDeviceId || undefined,
       language: audioLanguage,
       mode: "microphone",
       speakerLabel: "Meeting",
@@ -581,6 +677,7 @@ export default function App() {
 
   async function handleStartSession(title: string) {
     try {
+      setAssistantError(null);
       const detail = await createSessionRecord(title);
       if (sessionWidgetEnabled) {
         await syncOverlayWindow(true);
@@ -600,6 +697,13 @@ export default function App() {
   async function handleStartListening() {
     try {
       setError(null);
+      setAssistantError(null);
+      if (selectedCaptureMode === "manual") {
+        const ready = await ensureSelectedModeReady("manual");
+        if (!ready) {
+          return;
+        }
+      }
       let detail = activeSessionRef.current;
       if (!activeSessionRef.current) {
         detail = await createSessionRecord(createOverlaySessionTitle());
@@ -666,31 +770,66 @@ export default function App() {
   }
 
   async function handleDynamicAction(action: DynamicActionKey) {
-    if (!activeSessionRef.current) {
+    if (!activeSessionRef.current || askInFlight || assistantInFlightAction) {
       return;
     }
 
-    const screenContext =
-      action === "follow_up" && screenContextEnabled ? await captureScreenContextSafely() : null;
-    const detail = await runDynamicAction({
-      sessionId: activeSessionRef.current.session.id,
-      action,
-      screenContext,
-    });
-    applySessionDetail(detail);
+    try {
+      setAssistantError(null);
+      setAssistantInFlightAction(action);
+      const screenContext =
+        action === "follow_up" && screenContextEnabled ? await captureScreenContextSafely() : null;
+      const detail = await runDynamicAction({
+        sessionId: activeSessionRef.current.session.id,
+        action,
+        screenContext,
+      });
+      setLastAssistantRequest({ kind: "action", action });
+      applySessionDetail(detail);
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Assistant action failed.";
+      setAssistantError(message);
+      setError(message);
+    } finally {
+      setAssistantInFlightAction(null);
+    }
   }
 
   async function handleAsk(prompt: string) {
-    if (!activeSessionRef.current) {
+    if (!activeSessionRef.current || askInFlight || assistantInFlightAction) {
       return;
     }
 
-    const detail = await askAssistant({
-      sessionId: activeSessionRef.current.session.id,
-      prompt,
-      screenContext: screenContextEnabled ? await captureScreenContextSafely() : null,
-    });
-    applySessionDetail(detail);
+    try {
+      setAssistantError(null);
+      setAskInFlight(true);
+      const detail = await askAssistant({
+        sessionId: activeSessionRef.current.session.id,
+        prompt,
+        screenContext: screenContextEnabled ? await captureScreenContextSafely() : null,
+      });
+      setLastAssistantRequest({ kind: "ask", prompt });
+      applySessionDetail(detail);
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Ask TPMCluely failed.";
+      setAssistantError(message);
+      setError(message);
+    } finally {
+      setAskInFlight(false);
+    }
+  }
+
+  async function handleRetryAssistantRequest() {
+    if (!lastAssistantRequest) {
+      return;
+    }
+
+    if (lastAssistantRequest.kind === "ask") {
+      await handleAsk(lastAssistantRequest.prompt);
+      return;
+    }
+
+    await handleDynamicAction(lastAssistantRequest.action);
   }
 
   async function handleSelectSession(sessionId: string, transcriptSequenceNo?: number | null) {
@@ -711,6 +850,37 @@ export default function App() {
 
   async function handlePushGeneratedTickets(sessionId: string) {
     const detail = await pushGeneratedTickets(sessionId);
+    applySessionDetail(detail);
+  }
+
+  async function handleUpdateGeneratedTicketDraft(
+    sessionId: string,
+    idempotencyKey: string,
+    draft: { acceptanceCriteria: string[]; description: string; title: string; type: TicketType }
+  ) {
+    const detail = await updateGeneratedTicketDraft({
+      sessionId,
+      idempotencyKey,
+      title: draft.title,
+      description: draft.description,
+      acceptanceCriteria: draft.acceptanceCriteria,
+      type: draft.type,
+    });
+    applySessionDetail(detail);
+  }
+
+  async function handleSetGeneratedTicketReviewState(
+    sessionId: string,
+    idempotencyKey: string,
+    reviewState: "draft" | "approved" | "rejected",
+    rejectionReason?: string | null
+  ) {
+    const detail = await setGeneratedTicketReviewState({
+      sessionId,
+      idempotencyKey,
+      reviewState,
+      rejectionReason,
+    });
     applySessionDetail(detail);
   }
 
@@ -811,8 +981,8 @@ export default function App() {
       <main className="app-shell">
         <div className="loading-state">
           <span className="eyebrow">TPMCluely</span>
-          <h1>Bootstrapping the foundation layer.</h1>
-          <p>Loading permissions, settings, diagnostics, and provider state.</p>
+          <h1>Preparing the desktop meeting copilot.</h1>
+          <p>Loading the local runtime, provider state, and session history.</p>
         </div>
       </main>
     );
@@ -843,32 +1013,49 @@ export default function App() {
         ) : null}
         <SessionWidget
           activeSession={activeSessionDetail}
+          assistantError={assistantError}
+          assistantInFlightAction={assistantInFlightAction}
+          askInFlight={askInFlight}
+          audioInputDevices={audioInputDevices}
+          canStartSelectedMode={selectedModeCanStart}
           captureError={captureError ?? error}
+          captureHealth={captureHealth}
           captureMode={selectedCaptureMode}
           captureSourceLabel={captureSourceLabel}
           captureState={captureState}
           deepgramReady={bootstrap.secrets.deepgramConfigured}
           geminiReady={bootstrap.secrets.geminiConfigured}
           isCapturing={isCapturing}
+          lastTranscriptFinalizedAt={lastTranscriptFinalizedAt}
           linearReady={bootstrap.secrets.linearConfigured}
+          microphoneSelectionWarning={microphoneSelectionWarning}
           overlayOpen={overlayOpen}
           overlayShortcut={overlayShortcut}
           partialTranscript={partialTranscript}
+          preflightBlockingChecks={selectedModeBlockingChecks}
+          preflightCheckedAt={preflightReport?.checkedAt ?? null}
+          preflightLoading={preflightLoading}
+          preflightSummary={selectedModePreflightSummary}
           screenContextEnabled={screenContextEnabled}
           screenShareError={screenShareError}
           screenShareOwnedByCapture={screenShareOwnedByCapture}
           screenShareState={screenShareState}
+          selectedMicrophoneDeviceId={selectedMicrophoneDeviceId}
           systemAudioPickerError={systemAudioPickerError}
           systemAudioPickerLoading={systemAudioPickerLoading}
           systemAudioPickerOpen={systemAudioPickerOpen}
           systemAudioSources={systemAudioSources}
+          transcriptFreshnessLabel={transcriptFreshnessLabel}
           onStartSession={handleStartSession}
           onPauseSession={handlePauseSession}
+          onRefreshPreflight={() => refreshPreflight(true).then(() => undefined)}
+          onRetryAssistantRequest={handleRetryAssistantRequest}
           onResumeSession={handleResumeSession}
           onCompleteSession={handleCompleteSession}
           onAppendTranscript={handleAppendTranscript}
           onDynamicAction={handleDynamicAction}
           onAsk={handleAsk}
+          onSelectMicrophoneDevice={handleSelectMicrophoneDevice}
           onSetCaptureMode={setSelectedCaptureMode}
           onSelectSystemAudioSource={handleSelectSystemAudioSource}
           onStartLiveCapture={handleStartLiveCapture}
@@ -887,12 +1074,12 @@ export default function App() {
     <main className="app-shell">
       <section className="hero-strip">
         <div>
-          <p className="eyebrow">TPMCluely Foundation</p>
-          <h1>Session-first meeting intelligence, grounded in local state and explicit system contracts.</h1>
+          <p className="eyebrow">TPMCluely Desktop</p>
+          <h1>Meeting intelligence for real engineering sessions, grounded in the transcript and safe to review.</h1>
         </div>
         <div className="hero-meta">
           <span>Version {bootstrap.appVersion}</span>
-          <span>{bootstrap.diagnostics.mode === "desktop" ? "Desktop runtime" : "Browser-safe mock runtime"}</span>
+          <span>{bootstrap.diagnostics.mode === "desktop" ? "Desktop runtime" : "Development runtime"}</span>
           <span>{bootstrap.diagnostics.captureBackend}</span>
         </div>
       </section>
@@ -917,14 +1104,14 @@ export default function App() {
             ))}
           </nav>
           <article className="side-status">
-            <p className="card-title">Foundation Check</p>
+            <p className="card-title">Desktop Readiness</p>
             <div className="readiness-row">
               <span>Database</span>
               <strong>{bootstrap.diagnostics.databaseReady ? "Ready" : "Pending"}</strong>
             </div>
             <div className="readiness-row">
               <span>Keychain</span>
-              <strong>{bootstrap.diagnostics.keychainAvailable ? "Ready" : "Mock / Pending"}</strong>
+              <strong>{bootstrap.diagnostics.keychainAvailable ? "Ready" : "Unavailable"}</strong>
             </div>
             <div className="readiness-row">
               <span>State Machine</span>
@@ -959,18 +1146,17 @@ export default function App() {
             <section className="panel">
               <div className="overview-grid">
                 <article className="card feature-card">
-                  <p className="card-title">Execution Focus</p>
-                  <h2>Live meeting workflow</h2>
+                  <p className="card-title">Meeting Flow</p>
+                  <h2>Capture, answer, review</h2>
                   <p className="card-detail">
-                    Start a meeting, capture transcript signal, answer questions with Ask TPMCluely, and end into
-                    automatically generated Linear tickets.
+                    Start a meeting, answer live questions from the transcript, then end with review-first draft tickets.
                   </p>
                 </article>
                 <article className="card feature-card accent-card">
-                  <p className="card-title">Critical Path</p>
-                  <h2>Transcript to answer to ticket workflow</h2>
+                  <p className="card-title">Trust Model</p>
+                  <h2>Transcript first, Linear second</h2>
                   <p className="card-detail">
-                    The shell focuses on the core product loop instead of extra pre- and post-meeting surfaces.
+                    Gemini answers are labeled, transcript fallback is explicit, and nothing is pushed before approval.
                   </p>
                 </article>
                 <article className="card feature-card">
@@ -1001,32 +1187,49 @@ export default function App() {
           {view === "session" ? (
             <SessionWidget
               activeSession={activeSessionDetail}
+              assistantError={assistantError}
+              assistantInFlightAction={assistantInFlightAction}
+              askInFlight={askInFlight}
+              audioInputDevices={audioInputDevices}
+              canStartSelectedMode={selectedModeCanStart}
               captureError={captureError ?? error}
+              captureHealth={captureHealth}
               captureMode={selectedCaptureMode}
               captureSourceLabel={captureSourceLabel}
               captureState={captureState}
               deepgramReady={bootstrap.secrets.deepgramConfigured}
               geminiReady={bootstrap.secrets.geminiConfigured}
               isCapturing={isCapturing}
+              lastTranscriptFinalizedAt={lastTranscriptFinalizedAt}
               linearReady={bootstrap.secrets.linearConfigured}
+              microphoneSelectionWarning={microphoneSelectionWarning}
               overlayOpen={overlayOpen}
               overlayShortcut={overlayShortcut}
               partialTranscript={partialTranscript}
+              preflightBlockingChecks={selectedModeBlockingChecks}
+              preflightCheckedAt={preflightReport?.checkedAt ?? null}
+              preflightLoading={preflightLoading}
+              preflightSummary={selectedModePreflightSummary}
               screenContextEnabled={screenContextEnabled}
               screenShareError={screenShareError}
               screenShareOwnedByCapture={screenShareOwnedByCapture}
               screenShareState={screenShareState}
+              selectedMicrophoneDeviceId={selectedMicrophoneDeviceId}
               systemAudioPickerError={systemAudioPickerError}
               systemAudioPickerLoading={systemAudioPickerLoading}
               systemAudioPickerOpen={systemAudioPickerOpen}
               systemAudioSources={systemAudioSources}
+              transcriptFreshnessLabel={transcriptFreshnessLabel}
               onStartSession={handleStartSession}
               onPauseSession={handlePauseSession}
+              onRefreshPreflight={() => refreshPreflight(true).then(() => undefined)}
+              onRetryAssistantRequest={handleRetryAssistantRequest}
               onResumeSession={handleResumeSession}
               onCompleteSession={handleCompleteSession}
               onAppendTranscript={handleAppendTranscript}
               onDynamicAction={handleDynamicAction}
               onAsk={handleAsk}
+              onSelectMicrophoneDevice={handleSelectMicrophoneDevice}
               onSetCaptureMode={setSelectedCaptureMode}
               onSelectSystemAudioSource={handleSelectSystemAudioSource}
               onStartLiveCapture={handleStartLiveCapture}
@@ -1052,6 +1255,8 @@ export default function App() {
               onGenerateTickets={handleGenerateTickets}
               onPushGeneratedTicket={handlePushGeneratedTicket}
               onPushGeneratedTickets={handlePushGeneratedTickets}
+              onSetGeneratedTicketReviewState={handleSetGeneratedTicketReviewState}
+              onUpdateGeneratedTicketDraft={handleUpdateGeneratedTicketDraft}
               allowTicketPreview={bootstrap.diagnostics.mode === "browser-mock"}
             />
           ) : null}

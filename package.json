@@ -9,11 +9,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "clean:desktop": "rm -rf dist node_modules/.vite-temp src-tauri/target",
     "lint": "eslint src eslint.config.js vite.config.ts playwright.config.ts",
-    "test:web": "vitest run",
-    "test:e2e": "playwright test",
+    "test:web": "VITE_ENABLE_BROWSER_MOCK=true node ./scripts/run-vitest-sequential.mjs",
+    "test:e2e": "VITE_ENABLE_BROWSER_MOCK=true playwright test",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "verify:desktop": "npm run clean:desktop && npm run build && npm run test:web && cargo test --manifest-path src-tauri/Cargo.toml && npm run tauri:build -- --debug --no-bundle"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

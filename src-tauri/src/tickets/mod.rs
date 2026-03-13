@@ -11,8 +11,7 @@ const TARGET_MODEL_TRANSCRIPT_CHARS: usize = 22_000;
 const HEAD_SECTION_CHARS: usize = 7_500;
 const TAIL_SECTION_CHARS: usize = 7_500;
 const ACTION_SECTION_BUDGET_CHARS: usize = 5_500;
-const ACTION_LINE_REGEX: &str =
-    r"\b(todo|action item|bug|fix|implement|ship|owner|assigned|deadline|decided|decision|follow[- ]?up|ticket|blocker|regression|incident|eta|next step)\b";
+const ACTION_LINE_REGEX: &str = r"\b(todo|action item|bug|fix|implement|ship|owner|assigned|deadline|decided|decision|follow[- ]?up|ticket|blocker|regression|incident|eta|next step)\b";
 
 const TICKET_PROMPT: &str = r#"You are a principal technical program manager.
 Analyze the meeting transcript and produce engineering tickets.
@@ -136,7 +135,9 @@ fn truncate_middle(input: &str, max_chars: usize) -> String {
     )
 }
 
-fn prepare_transcript_for_model(raw_transcript: &str) -> Result<(String, Vec<String>), TicketError> {
+fn prepare_transcript_for_model(
+    raw_transcript: &str,
+) -> Result<(String, Vec<String>), TicketError> {
     let normalized = normalize_transcript(raw_transcript);
     let original_chars = normalized.len();
 

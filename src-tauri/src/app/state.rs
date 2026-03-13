@@ -31,7 +31,12 @@ impl AppState {
             .list_sessions()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .find(|session| matches!(session.status.as_str(), "active" | "paused" | "preparing" | "finishing"));
+            .find(|session| {
+                matches!(
+                    session.status.as_str(),
+                    "active" | "paused" | "preparing" | "finishing"
+                )
+            });
         session_manager.restore(
             active_session.as_ref().map(|session| session.id.clone()),
             active_session.map(|session| session.status),
