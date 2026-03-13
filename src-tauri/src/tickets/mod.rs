@@ -31,7 +31,9 @@ Quality rules:
 - It is acceptable to return an empty array if no concrete engineering ticket should be created
 - Keep titles specific and action-oriented
 - Avoid duplicates
-- Ensure every acceptance criterion can be objectively verified"#;
+- Ensure every acceptance criterion can be objectively verified
+- Treat speaker-attributed commitments as grounded ownership evidence only when the transcript explicitly supports that attribution
+- Do not invent owners, assignees, or certainty when the transcript is unattributed or ambiguous"#;
 
 const REPAIR_PROMPT: &str = r#"Repair the provided content into a strict JSON array of ticket objects.
 Rules:

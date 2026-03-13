@@ -28,6 +28,7 @@ function buildDetail(overrides?: Partial<SessionDetail>): SessionDetail {
       ...overrides?.session,
     },
     transcripts: [],
+    speakers: [],
     messages: [],
     generatedTickets: [
       {

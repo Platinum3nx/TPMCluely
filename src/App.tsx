@@ -14,6 +14,7 @@ import {
   pauseSession,
   pushGeneratedTicket,
   pushGeneratedTickets,
+  renameSessionSpeaker,
   resumeSession,
   runDynamicAction,
   runPreflightChecks,
@@ -199,6 +200,7 @@ export default function App() {
     );
     setActiveSessionDetail((current) => mergeCaptureSegment(current, payload));
     setSelectedSessionDetail((current) => mergeCaptureSegment(current, payload));
+    void refreshSessionDetail(payload.session.id);
   }
 
   async function refreshSessionDetail(sessionId: string) {
@@ -245,7 +247,9 @@ export default function App() {
 
       const detail = await appendTranscriptSegment({
         sessionId: activeSessionRef.current.session.id,
+        speakerId: segment.speakerId ?? null,
         speakerLabel: segment.speakerLabel,
+        speakerConfidence: segment.speakerConfidence ?? null,
         text: segment.text,
         isFinal: true,
         source: segment.source,
@@ -345,11 +349,15 @@ export default function App() {
     sessionId: string,
     speakerLabel: string,
     text: string,
-    source: "manual" | "capture" = "manual"
+    source: "manual" | "capture" = "manual",
+    speakerId: string | null = null,
+    speakerConfidence: number | null = null
   ) {
     const detail = await appendTranscriptSegment({
       sessionId,
+      speakerId,
       speakerLabel,
+      speakerConfidence,
       text,
       isFinal: true,
       source,
@@ -715,7 +723,6 @@ export default function App() {
       deviceId: selectedMicrophoneDeviceId || undefined,
       language: audioLanguage,
       mode: "microphone",
-      speakerLabel: "Meeting",
       sessionId,
     });
     await refreshSessionDetail(sessionId);
@@ -899,6 +906,11 @@ export default function App() {
     }
 
     await appendAndApplyTranscript(activeSessionRef.current.session.id, speakerLabel, text, "manual");
+  }
+
+  async function handleRenameSpeaker(sessionId: string, speakerId: string, displayLabel: string) {
+    const detail = await renameSessionSpeaker({ sessionId, speakerId, displayLabel });
+    applySessionDetail(detail);
   }
 
   async function handleDynamicAction(action: DynamicActionKey) {
@@ -1187,6 +1199,7 @@ export default function App() {
           onResumeSession={handleResumeSession}
           onCompleteSession={handleCompleteSession}
           onAppendTranscript={handleAppendTranscript}
+          onRenameSpeaker={handleRenameSpeaker}
           onDynamicAction={handleDynamicAction}
           onAsk={handleAsk}
           onSelectMicrophoneDevice={handleSelectMicrophoneDevice}
@@ -1363,6 +1376,7 @@ export default function App() {
               onResumeSession={handleResumeSession}
               onCompleteSession={handleCompleteSession}
               onAppendTranscript={handleAppendTranscript}
+              onRenameSpeaker={handleRenameSpeaker}
               onDynamicAction={handleDynamicAction}
               onAsk={handleAsk}
               onSelectMicrophoneDevice={handleSelectMicrophoneDevice}
@@ -1388,6 +1402,7 @@ export default function App() {
               onSearchSessions={handleSearchSessions}
               onSelectSession={handleSelectSession}
               onExportSession={handleExportSession}
+              onRenameSpeaker={handleRenameSpeaker}
               onGenerateTickets={handleGenerateTickets}
               onPushGeneratedTicket={handlePushGeneratedTicket}
               onPushGeneratedTickets={handlePushGeneratedTickets}

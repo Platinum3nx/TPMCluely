@@ -220,7 +220,7 @@ export interface StartSessionInput {
 export interface AppendTranscriptInput {
   sessionId: string;
   speakerId?: string | null;
-  speakerLabel?: string;
+  speakerLabel?: string | null;
   speakerConfidence?: number | null;
   text: string;
   isFinal?: boolean;

@@ -170,10 +170,6 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn normalize_casefold(value: &str) -> String {
-    value.trim().to_lowercase()
-}
-
 fn normalize_manual_speaker_id(label: &str) -> String {
     let mut token = String::new();
     let mut last_was_separator = false;
@@ -204,21 +200,6 @@ fn default_provider_display_label(speaker_id: &str) -> String {
     }
 
     "Speaker".to_string()
-}
-
-fn unattributed_label() -> &'static str {
-    "Unattributed"
-}
-
-fn transcript_line(label: Option<&str>, text: &str) -> String {
-    format!(
-        "{}: {}",
-        label
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(unattributed_label()),
-        text.trim()
-    )
 }
 
 fn touch_session(connection: &Connection, session_id: &str) -> Result<(), rusqlite::Error> {

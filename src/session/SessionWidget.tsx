@@ -55,6 +55,7 @@ interface SessionWidgetProps {
   systemAudioSources: SystemAudioSource[];
   transcriptFreshnessLabel: string;
   onAppendTranscript: (speakerLabel: string, text: string) => Promise<void>;
+  onRenameSpeaker: (sessionId: string, speakerId: string, displayLabel: string) => Promise<void>;
   onAsk: (prompt: string) => Promise<void>;
   onCompleteSession: (sessionId: string) => Promise<void>;
   onDynamicAction: (action: DynamicActionKey) => Promise<void>;
@@ -197,6 +198,7 @@ export function SessionWidget({
   systemAudioSources,
   transcriptFreshnessLabel,
   onAppendTranscript,
+  onRenameSpeaker,
   onAsk,
   onCompleteSession,
   onDynamicAction,
@@ -509,9 +511,11 @@ export function SessionWidget({
                     overlayOpen
                     partialTranscript={partialTranscript}
                     sessionId={activeSession.session.id}
+                    speakers={activeSession.speakers}
                     showManualComposer={false}
                     transcripts={activeSession.transcripts.slice(-8)}
                     onAppendTranscript={onAppendTranscript}
+                    onRenameSpeaker={onRenameSpeaker}
                   />
                   <AssistantFeed messages={activeSession.messages} maxItems={5} />
                 </div>
@@ -607,8 +611,10 @@ export function SessionWidget({
             overlayOpen={overlayOpen}
             partialTranscript={partialTranscript}
             sessionId={activeSession?.session.id ?? null}
+            speakers={activeSession?.speakers ?? []}
             transcripts={activeSession?.transcripts ?? []}
             onAppendTranscript={onAppendTranscript}
+            onRenameSpeaker={onRenameSpeaker}
           />
 
           <AssistantFeed messages={activeSession?.messages ?? []} />

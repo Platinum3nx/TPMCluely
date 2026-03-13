@@ -2,7 +2,7 @@ import type { SessionDetail } from "./types";
 
 export function buildSessionMarkdown(detail: SessionDetail): string {
   const transcript = detail.transcripts
-    .map((segment) => `- ${segment.speakerLabel ?? "Speaker"}: ${segment.text}`)
+    .map((segment) => `- ${(segment.speakerLabel ?? "Unattributed").trim() || "Unattributed"}: ${segment.text}`)
     .join("\n");
 
   return [

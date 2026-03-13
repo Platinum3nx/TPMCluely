@@ -18,6 +18,7 @@ import type {
   PermissionSnapshot,
   PromptRecord,
   PushGeneratedTicketInput,
+  RenameSessionSpeakerInput,
   RunDynamicActionInput,
   RuntimeSnapshot,
   SaveKnowledgeFileInput,
@@ -30,6 +31,7 @@ import type {
   SaveSecretInput,
   SaveSettingInput,
   SecretKey,
+  SessionSpeaker,
   SetGeneratedTicketReviewStateInput,
   SettingRecord,
   StartSystemAudioCaptureInput,
@@ -45,6 +47,7 @@ const SETTINGS_KEY = "cluely.desktop.settings";
 const SECRETS_KEY = "cluely.desktop.secrets";
 const SESSIONS_KEY = "cluely.desktop.sessions";
 const TRANSCRIPTS_KEY = "cluely.desktop.transcripts";
+const SESSION_SPEAKERS_KEY = "cluely.desktop.session-speakers";
 const MESSAGES_KEY = "cluely.desktop.messages";
 const GENERATED_TICKETS_KEY = "cluely.desktop.generated-tickets";
 const PROMPTS_KEY = "cluely.desktop.prompts";
@@ -110,6 +113,32 @@ function nowIso(): string {
 
 function createId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+}
+
+function normalizeManualSpeakerSlug(label: string): string {
+  const normalized = label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "speaker";
+}
+
+function defaultProviderDisplayLabel(speakerId: string): string {
+  const match = /^dg:(\d+)$/.exec(speakerId);
+  if (!match) {
+    return "Speaker";
+  }
+
+  return `Speaker ${Number(match[1]) + 1}`;
+}
+
+function displaySpeakerLabel(label: string | null | undefined): string {
+  return label?.trim() || "Unattributed";
+}
+
+function transcriptLine(label: string | null | undefined, text: string): string {
+  return `${displaySpeakerLabel(label)}: ${text.trim()}`;
 }
 
 function readSettings(): SettingRecord[] {
@@ -200,7 +229,9 @@ function readTranscripts(): TranscriptSegment[] {
           id: segment.id ?? createId("seg"),
           sessionId: segment.sessionId ?? "",
           sequenceNo: segment.sequenceNo ?? 1,
-          speakerLabel: segment.speakerLabel ?? null,
+          speakerId: segment.speakerLabel === "Meeting" ? null : (segment.speakerId ?? null),
+          speakerLabel: segment.speakerLabel === "Meeting" ? null : (segment.speakerLabel ?? null),
+          speakerConfidence: segment.speakerConfidence ?? null,
           startMs: segment.startMs ?? null,
           endMs: segment.endMs ?? null,
           text: segment.text ?? "",
@@ -216,6 +247,38 @@ function readTranscripts(): TranscriptSegment[] {
 
 function writeTranscripts(segments: TranscriptSegment[]): void {
   window.localStorage.setItem(TRANSCRIPTS_KEY, JSON.stringify(segments));
+}
+
+function readSessionSpeakers(): SessionSpeaker[] {
+  const raw = window.localStorage.getItem(SESSION_SPEAKERS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<SessionSpeaker>[];
+    return Array.isArray(parsed)
+      ? parsed
+          .filter((speaker): speaker is Partial<SessionSpeaker> & { sessionId: string; speakerId: string } =>
+            Boolean(speaker.sessionId && speaker.speakerId)
+          )
+          .map((speaker) => ({
+            sessionId: speaker.sessionId,
+            speakerId: speaker.speakerId,
+            providerLabel: speaker.providerLabel ?? null,
+            displayLabel: speaker.displayLabel?.trim() || defaultProviderDisplayLabel(speaker.speakerId),
+            source: speaker.source === "manual" ? "manual" : "provider",
+            createdAt: speaker.createdAt ?? nowIso(),
+            updatedAt: speaker.updatedAt ?? speaker.createdAt ?? nowIso(),
+          }))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSessionSpeakers(speakers: SessionSpeaker[]): void {
+  window.localStorage.setItem(SESSION_SPEAKERS_KEY, JSON.stringify(speakers));
 }
 
 function readMessages(): ChatMessage[] {
@@ -365,6 +428,173 @@ function writeRuntimeState(runtime: RuntimeState): void {
   window.localStorage.setItem(RUNTIME_KEY, JSON.stringify(runtime));
 }
 
+function findSessionSpeakerById(sessionId: string, speakerId: string): SessionSpeaker | undefined {
+  return readSessionSpeakers().find((speaker) => speaker.sessionId === sessionId && speaker.speakerId === speakerId);
+}
+
+function findSessionSpeakerByLabel(sessionId: string, label: string): SessionSpeaker | undefined {
+  const normalized = label.trim().toLowerCase();
+  return readSessionSpeakers().find(
+    (speaker) => speaker.sessionId === sessionId && speaker.displayLabel.trim().toLowerCase() === normalized
+  );
+}
+
+function upsertSessionSpeaker(nextSpeaker: SessionSpeaker): SessionSpeaker[] {
+  const speakers = readSessionSpeakers().filter(
+    (speaker) => !(speaker.sessionId === nextSpeaker.sessionId && speaker.speakerId === nextSpeaker.speakerId)
+  );
+  speakers.push(nextSpeaker);
+  writeSessionSpeakers(
+    speakers.sort((left, right) =>
+      left.sessionId === right.sessionId
+        ? left.createdAt.localeCompare(right.createdAt)
+        : left.sessionId.localeCompare(right.sessionId)
+    )
+  );
+  return readSessionSpeakers();
+}
+
+function resolveMockTranscriptSpeaker(
+  sessionId: string,
+  source: TranscriptSegment["source"],
+  speakerId?: string | null,
+  speakerLabel?: string | null
+): { speakerId: string | null; speakerLabel: string | null } {
+  const normalizedSpeakerId = speakerId?.trim() || null;
+  const normalizedSpeakerLabel = speakerLabel?.trim() || null;
+
+  if (normalizedSpeakerId) {
+    const existing = findSessionSpeakerById(sessionId, normalizedSpeakerId);
+    if (existing) {
+      return { speakerId: existing.speakerId, speakerLabel: existing.displayLabel };
+    }
+
+    const createdAt = nowIso();
+    const nextSpeaker: SessionSpeaker = {
+      sessionId,
+      speakerId: normalizedSpeakerId,
+      providerLabel: normalizedSpeakerLabel,
+      displayLabel: source === "manual" && normalizedSpeakerLabel
+        ? normalizedSpeakerLabel
+        : defaultProviderDisplayLabel(normalizedSpeakerId),
+      source: source === "manual" ? "manual" : "provider",
+      createdAt,
+      updatedAt: createdAt,
+    };
+    upsertSessionSpeaker(nextSpeaker);
+    return { speakerId: nextSpeaker.speakerId, speakerLabel: nextSpeaker.displayLabel };
+  }
+
+  if (source === "manual" && normalizedSpeakerLabel) {
+    const existing = findSessionSpeakerByLabel(sessionId, normalizedSpeakerLabel);
+    if (existing) {
+      return { speakerId: existing.speakerId, speakerLabel: existing.displayLabel };
+    }
+
+    const createdAt = nowIso();
+    const nextSpeaker: SessionSpeaker = {
+      sessionId,
+      speakerId: `manual:${normalizeManualSpeakerSlug(normalizedSpeakerLabel)}:${createId("speaker")}`,
+      providerLabel: null,
+      displayLabel: normalizedSpeakerLabel,
+      source: "manual",
+      createdAt,
+      updatedAt: createdAt,
+    };
+    upsertSessionSpeaker(nextSpeaker);
+    return { speakerId: nextSpeaker.speakerId, speakerLabel: nextSpeaker.displayLabel };
+  }
+
+  return { speakerId: null, speakerLabel: null };
+}
+
+function backfillLegacySpeakers(sessionId: string, transcripts: TranscriptSegment[]): { speakers: SessionSpeaker[]; transcripts: TranscriptSegment[] } {
+  const existingSpeakers = readSessionSpeakers();
+  const nextSpeakers = [...existingSpeakers];
+  let speakersChanged = false;
+  let transcriptsChanged = false;
+
+  const nextTranscripts = transcripts.map((segment) => {
+    if (segment.sessionId !== sessionId) {
+      return segment;
+    }
+
+    if (segment.speakerLabel === "Meeting") {
+      transcriptsChanged = true;
+      return {
+        ...segment,
+        speakerId: null,
+        speakerLabel: null,
+        speakerConfidence: null,
+      };
+    }
+
+    if (segment.speakerId) {
+      const existing = nextSpeakers.find(
+        (speaker) => speaker.sessionId === sessionId && speaker.speakerId === segment.speakerId
+      );
+      if (!existing) {
+        const createdAt = segment.createdAt ?? nowIso();
+        nextSpeakers.push({
+          sessionId,
+          speakerId: segment.speakerId,
+          providerLabel: segment.speakerLabel,
+          displayLabel: segment.speakerLabel?.trim() || defaultProviderDisplayLabel(segment.speakerId),
+          source: segment.source === "manual" ? "manual" : "provider",
+          createdAt,
+          updatedAt: createdAt,
+        });
+        speakersChanged = true;
+      }
+      return segment;
+    }
+
+    if (!segment.speakerLabel?.trim()) {
+      return segment;
+    }
+
+    const legacySpeakerId = `legacy:${normalizeManualSpeakerSlug(segment.speakerLabel)}`;
+    let speaker = nextSpeakers.find((entry) => entry.sessionId === sessionId && entry.speakerId === legacySpeakerId);
+    if (!speaker) {
+      const createdAt = segment.createdAt ?? nowIso();
+      speaker = {
+        sessionId,
+        speakerId: legacySpeakerId,
+        providerLabel: segment.speakerLabel,
+        displayLabel: segment.speakerLabel.trim(),
+        source: segment.source === "manual" ? "manual" : "provider",
+        createdAt,
+        updatedAt: createdAt,
+      };
+      nextSpeakers.push(speaker);
+      speakersChanged = true;
+    }
+
+    transcriptsChanged = true;
+    return {
+      ...segment,
+      speakerId: speaker.speakerId,
+      speakerLabel: speaker.displayLabel,
+    };
+  });
+
+  if (speakersChanged) {
+    writeSessionSpeakers(nextSpeakers);
+  }
+  if (transcriptsChanged) {
+    writeTranscripts(nextTranscripts);
+  }
+
+  return {
+    speakers: (speakersChanged ? nextSpeakers : existingSpeakers)
+      .filter((speaker) => speaker.sessionId === sessionId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    transcripts: nextTranscripts
+      .filter((segment) => segment.sessionId === sessionId)
+      .sort((left, right) => left.sequenceNo - right.sequenceNo),
+  };
+}
+
 function syncRuntimeSession(sessionId: string, status: SessionRecord["status"]): void {
   writeRuntimeState({
     ...readRuntimeState(),
@@ -382,11 +612,13 @@ function getSessionDetail(sessionId: string): SessionDetail | null {
     return null;
   }
 
+  const allTranscripts = readTranscripts();
+  const { speakers, transcripts } = backfillLegacySpeakers(sessionId, allTranscripts);
+
   return {
     session,
-    transcripts: readTranscripts()
-      .filter((segment) => segment.sessionId === sessionId)
-      .sort((left, right) => left.sequenceNo - right.sequenceNo),
+    transcripts,
+    speakers,
     messages: readMessages()
       .filter((message) => message.sessionId === sessionId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
@@ -411,7 +643,7 @@ function updateSessionRecord(next: SessionRecord): SessionRecord[] {
 }
 
 function extractLines(detail: SessionDetail): string[] {
-  return detail.transcripts.map((segment) => segment.text.trim()).filter(Boolean);
+  return detail.transcripts.map((segment) => transcriptLine(segment.speakerLabel, segment.text)).filter(Boolean);
 }
 
 function toBulletMd(lines: string[]): string {
@@ -423,10 +655,11 @@ function toBulletMd(lines: string[]): string {
 }
 
 function deriveSummary(detail: SessionDetail): DerivedSessionArtifacts {
-  const lines = extractLines(detail);
-  const summaryLines = lines.slice(0, 4);
-  const decisionLines = lines.filter((line) => /(decid|agree|plan|ship|rollout|confirm)/i.test(line));
-  const actionLines = lines.filter((line) => /(will|owner|todo|follow-up|task|fix|handle)/i.test(line));
+  const transcriptLines = extractLines(detail);
+  const plainLines = detail.transcripts.map((segment) => segment.text.trim()).filter(Boolean);
+  const summaryLines = plainLines.slice(0, 4);
+  const decisionLines = transcriptLines.filter((line) => /(decid|agree|plan|ship|rollout|confirm)/i.test(line));
+  const actionLines = transcriptLines.filter((line) => /(will|owner|todo|follow-up|task|fix|handle)/i.test(line));
 
   const rollingSummary =
     summaryLines.length > 0
@@ -436,7 +669,7 @@ function deriveSummary(detail: SessionDetail): DerivedSessionArtifacts {
 
   const decisionsMd = toBulletMd(decisionLines.slice(0, 4));
   const actionItemsMd = toBulletMd(actionLines.slice(0, 5));
-  const notesMd = toBulletMd(lines.slice(0, 6));
+  const notesMd = toBulletMd(transcriptLines.slice(0, 6));
   const followUpEmailMd = [
     "Team,",
     "",
@@ -820,7 +1053,7 @@ export async function searchMockSessions(query: string): Promise<SearchSessionRe
   return details
     .map((detail) => {
       const transcriptMatch = detail.transcripts.find((segment) =>
-        segment.text.toLowerCase().includes(normalizedQuery)
+        transcriptLine(segment.speakerLabel, segment.text).toLowerCase().includes(normalizedQuery)
       );
       const matchedField =
         detail.session.finalSummary?.toLowerCase().includes(normalizedQuery)
@@ -841,7 +1074,7 @@ export async function searchMockSessions(query: string): Promise<SearchSessionRe
       }
 
       const snippetSource =
-        transcriptMatch?.text ??
+        (transcriptMatch ? transcriptLine(transcriptMatch.speakerLabel, transcriptMatch.text) : null) ??
         detail.session.finalSummary ??
         detail.session.decisionsMd ??
         detail.session.actionItemsMd ??
@@ -1100,11 +1333,19 @@ export async function appendMockTranscriptSegment(input: AppendTranscriptInput):
   }
 
   const segments = readTranscripts();
+  const resolvedSpeaker = resolveMockTranscriptSpeaker(
+    input.sessionId,
+    input.source ?? "manual",
+    input.speakerId ?? null,
+    input.speakerLabel ?? null
+  );
   segments.push({
     id: createId("seg"),
     sessionId: input.sessionId,
     sequenceNo: detail.transcripts.length + 1,
-    speakerLabel: input.speakerLabel?.trim() || null,
+    speakerId: resolvedSpeaker.speakerId,
+    speakerLabel: resolvedSpeaker.speakerLabel,
+    speakerConfidence: input.speakerConfidence ?? null,
     startMs: null,
     endMs: null,
     text: input.text.trim(),
@@ -1119,6 +1360,53 @@ export async function appendMockTranscriptSegment(input: AppendTranscriptInput):
     ...detail.session,
     updatedAt: nowIso(),
     ...(derived ?? {}),
+  });
+
+  return getSessionDetail(input.sessionId);
+}
+
+export async function renameMockSessionSpeaker(input: RenameSessionSpeakerInput): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(input.sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  const normalizedLabel = input.displayLabel.trim();
+  if (!normalizedLabel) {
+    return detail;
+  }
+
+  const speakers = readSessionSpeakers().map((speaker) =>
+    speaker.sessionId === input.sessionId && speaker.speakerId === input.speakerId
+      ? {
+          ...speaker,
+          displayLabel: normalizedLabel,
+          updatedAt: nowIso(),
+        }
+      : speaker
+  );
+  writeSessionSpeakers(speakers);
+
+  const transcripts = readTranscripts().map((segment) =>
+    segment.sessionId === input.sessionId && segment.speakerId === input.speakerId
+      ? {
+          ...segment,
+          speakerLabel: normalizedLabel,
+        }
+      : segment
+  );
+  writeTranscripts(transcripts);
+
+  const nextDetail = getSessionDetail(input.sessionId);
+  if (!nextDetail) {
+    return null;
+  }
+
+  const derived = deriveSummary(nextDetail);
+  updateSessionRecord({
+    ...nextDetail.session,
+    updatedAt: nowIso(),
+    ...derived,
   });
 
   return getSessionDetail(input.sessionId);

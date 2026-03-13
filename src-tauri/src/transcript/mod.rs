@@ -6,7 +6,11 @@ pub fn format_transcript_document(transcripts: &[TranscriptRow]) -> String {
     transcripts
         .iter()
         .map(|segment| {
-            let speaker = segment.speaker_label.as_deref().unwrap_or("Speaker").trim();
+            let speaker = segment
+                .speaker_label
+                .as_deref()
+                .unwrap_or("Unattributed")
+                .trim();
             format!("{speaker}: {}", segment.text.trim())
         })
         .collect::<Vec<_>>()
@@ -84,7 +88,10 @@ pub fn select_relevant_transcript_snippets(
             format!(
                 "[S{}] {}: {}",
                 segment.sequence_no,
-                segment.speaker_label.as_deref().unwrap_or("Speaker"),
+                segment
+                    .speaker_label
+                    .as_deref()
+                    .unwrap_or("Unattributed"),
                 segment.text.trim()
             )
         })

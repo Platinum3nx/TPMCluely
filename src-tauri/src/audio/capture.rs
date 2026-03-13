@@ -1560,8 +1560,8 @@ extern "C" fn native_event_callback(
 #[cfg(test)]
 mod tests {
     use super::{
-        screen_recording_permission_status, CaptureRuntimeState, CaptureStatePayload,
-        SystemAudioSourceKind,
+        parse_deepgram_message, screen_recording_permission_status, CaptureRuntimeState,
+        CaptureStatePayload, DeepgramMessage, SystemAudioSourceKind,
     };
 
     #[test]
@@ -1585,5 +1585,74 @@ mod tests {
         let serialized = serde_json::to_string(&SystemAudioSourceKind::Window)
             .expect("source kind should serialize");
         assert_eq!(serialized, "\"window\"");
+    }
+
+    #[test]
+    fn parse_deepgram_results_splits_speaker_turns_from_words() {
+        let payload = r#"{
+          "type": "Results",
+          "is_final": true,
+          "speech_final": true,
+          "channel": {
+            "alternatives": [
+              {
+                "transcript": "I can take the backend fix. I will handle QA after that.",
+                "words": [
+                  { "punctuated_word": "I", "speaker": 0, "start": 0.0, "end": 0.1 },
+                  { "punctuated_word": "can", "speaker": 0, "start": 0.1, "end": 0.2 },
+                  { "punctuated_word": "take", "speaker": 0, "start": 0.2, "end": 0.3 },
+                  { "punctuated_word": "the", "speaker": 0, "start": 0.3, "end": 0.4 },
+                  { "punctuated_word": "backend", "speaker": 0, "start": 0.4, "end": 0.5 },
+                  { "punctuated_word": "fix.", "speaker": 0, "start": 0.5, "end": 0.6 },
+                  { "punctuated_word": "I", "speaker": 1, "start": 0.7, "end": 0.8 },
+                  { "punctuated_word": "will", "speaker": 1, "start": 0.8, "end": 0.9 },
+                  { "punctuated_word": "handle", "speaker": 1, "start": 0.9, "end": 1.0 },
+                  { "punctuated_word": "QA", "speaker": 1, "start": 1.0, "end": 1.1 },
+                  { "punctuated_word": "after", "speaker": 1, "start": 1.1, "end": 1.2 },
+                  { "punctuated_word": "that.", "speaker": 1, "start": 1.2, "end": 1.3 }
+                ]
+              }
+            ]
+          }
+        }"#;
+
+        let parsed = parse_deepgram_message(payload).expect("payload should parse");
+        let DeepgramMessage::Results { utterances, .. } = parsed else {
+            panic!("expected results payload");
+        };
+
+        assert_eq!(utterances.len(), 2);
+        assert_eq!(utterances[0].speaker_id.as_deref(), Some("dg:0"));
+        assert_eq!(utterances[0].speaker_label.as_deref(), Some("Speaker 1"));
+        assert_eq!(utterances[0].text, "I can take the backend fix.");
+        assert_eq!(utterances[1].speaker_id.as_deref(), Some("dg:1"));
+        assert_eq!(utterances[1].speaker_label.as_deref(), Some("Speaker 2"));
+        assert_eq!(utterances[1].text, "I will handle QA after that.");
+    }
+
+    #[test]
+    fn parse_deepgram_results_falls_back_to_unattributed_transcript() {
+        let payload = r#"{
+          "type": "Results",
+          "is_final": true,
+          "speech_final": true,
+          "channel": {
+            "alternatives": [
+              {
+                "transcript": "We should ship the rollback fix today."
+              }
+            ]
+          }
+        }"#;
+
+        let parsed = parse_deepgram_message(payload).expect("payload should parse");
+        let DeepgramMessage::Results { utterances, .. } = parsed else {
+            panic!("expected results payload");
+        };
+
+        assert_eq!(utterances.len(), 1);
+        assert_eq!(utterances[0].speaker_id, None);
+        assert_eq!(utterances[0].speaker_label, None);
+        assert_eq!(utterances[0].text, "We should ship the rollback fix today.");
     }
 }

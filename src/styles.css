@@ -340,6 +340,47 @@ button:disabled {
   color: var(--muted);
 }
 
+.speaker-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.speaker-roster-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(167, 208, 205, 0.08);
+  background: rgba(7, 15, 18, 0.92);
+}
+
+.speaker-roster-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.speaker-roster-actions input {
+  min-width: 180px;
+}
+
+.speaker-confidence-flag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(242, 138, 63, 0.28);
+  color: var(--accent);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .transcript-line p,
 .message-card p,
 .empty-block p {
