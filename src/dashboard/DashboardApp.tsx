@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import type { SessionDetail as SessionDetailModel, SessionRecord } from "../lib/types";
+import { useEffect, useState } from "react";
+import type { SearchSessionResult, SessionDetail as SessionDetailModel, SessionRecord } from "../lib/types";
 import { SearchBar } from "../components/SearchBar";
 import { SessionDetail } from "./SessionDetail";
 import { SessionsList } from "./SessionsList";
@@ -9,37 +9,50 @@ interface DashboardAppProps {
   sessions: SessionRecord[];
   selectedSessionId: string | null;
   sessionDetail: SessionDetailModel | null;
-  onSelectSession: (sessionId: string) => Promise<void>;
+  searchResults: SearchSessionResult[] | null;
+  highlightedSequenceNo: number | null;
+  onSearchSessions: (query: string) => Promise<void>;
+  onSelectSession: (sessionId: string, transcriptSequenceNo?: number | null) => Promise<void>;
   onExportSession: (sessionDetail: SessionDetailModel) => void;
+  allowTicketPreview: boolean;
 }
 
 export function DashboardApp({
   sessions,
   selectedSessionId,
   sessionDetail,
+  searchResults,
+  highlightedSequenceNo,
+  onSearchSessions,
   onSelectSession,
   onExportSession,
+  allowTicketPreview,
 }: DashboardAppProps) {
   const [query, setQuery] = useState("");
-  const filteredSessions = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return sessions;
-    }
 
-    return sessions.filter((session) => {
-      const haystack = [
-        session.title,
-        session.finalSummary ?? "",
-        session.notesMd ?? "",
-        session.decisionsMd ?? "",
-      ]
-        .join(" ")
-        .toLowerCase();
+  useEffect(() => {
+    void onSearchSessions(query);
+  }, [onSearchSessions, query]);
 
-      return haystack.includes(normalizedQuery);
-    });
-  }, [query, sessions]);
+  const sessionItems = query.trim()
+    ? (searchResults ?? []).map((result) => ({
+        sessionId: result.sessionId,
+        title: result.title,
+        status: result.status,
+        updatedAt: result.updatedAt,
+        snippet: result.snippet,
+        matchedField: result.matchedField,
+        transcriptSequenceNo: result.transcriptSequenceNo,
+      }))
+    : sessions.map((session) => ({
+        sessionId: session.id,
+        title: session.title,
+        status: session.status,
+        updatedAt: session.updatedAt,
+        snippet: session.finalSummary ?? session.notesMd ?? null,
+        matchedField: null,
+        transcriptSequenceNo: null,
+      }));
 
   return (
     <section className="panel dashboard-grid">
@@ -56,13 +69,17 @@ export function DashboardApp({
 
       <div className="dashboard-grid-body">
         <SessionsList
-          sessions={filteredSessions}
+          sessions={sessionItems}
           selectedSessionId={selectedSessionId}
-          onSelectSession={(sessionId) => void onSelectSession(sessionId)}
+          onSelectSession={(sessionId, transcriptSequenceNo) => void onSelectSession(sessionId, transcriptSequenceNo)}
         />
         <div className="card-stack">
-          <SessionDetail sessionDetail={sessionDetail} onExportSession={onExportSession} />
-          <TicketDashboard sessionDetail={sessionDetail} />
+          <SessionDetail
+            sessionDetail={sessionDetail}
+            highlightedSequenceNo={highlightedSequenceNo}
+            onExportSession={onExportSession}
+          />
+          <TicketDashboard sessionDetail={sessionDetail} allowPreview={allowTicketPreview} />
         </div>
       </div>
     </section>

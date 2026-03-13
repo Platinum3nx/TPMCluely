@@ -1,9 +1,17 @@
-import type { SessionRecord } from "../lib/types";
+import type { SessionStatus } from "../lib/types";
 
 interface SessionsListProps {
-  sessions: SessionRecord[];
+  sessions: Array<{
+    sessionId: string;
+    title: string;
+    status: SessionStatus;
+    updatedAt: string;
+    snippet: string | null;
+    matchedField: string | null;
+    transcriptSequenceNo: number | null;
+  }>;
   selectedSessionId: string | null;
-  onSelectSession: (sessionId: string) => void;
+  onSelectSession: (sessionId: string, transcriptSequenceNo?: number | null) => void;
 }
 
 export function SessionsList({ sessions, selectedSessionId, onSelectSession }: SessionsListProps) {
@@ -16,20 +24,22 @@ export function SessionsList({ sessions, selectedSessionId, onSelectSession }: S
       <div className="session-list">
         {sessions.length === 0 ? (
           <div className="empty-block">
-            <strong>No completed or active sessions yet</strong>
-            <p>Start a session from the widget to create your first dashboard record.</p>
+            <strong>No matching sessions yet</strong>
+            <p>Start a session from the widget or adjust the dashboard search query.</p>
           </div>
         ) : (
           sessions.map((session) => (
             <button
               type="button"
-              key={session.id}
-              className={`session-list-item ${selectedSessionId === session.id ? "session-list-item-active" : ""}`}
-              onClick={() => onSelectSession(session.id)}
+              key={session.sessionId}
+              className={`session-list-item ${selectedSessionId === session.sessionId ? "session-list-item-active" : ""}`}
+              onClick={() => onSelectSession(session.sessionId, session.transcriptSequenceNo)}
             >
               <strong>{session.title}</strong>
               <span>{session.status}</span>
               <p>{new Date(session.updatedAt).toLocaleString()}</p>
+              {session.snippet ? <p>{session.snippet}</p> : null}
+              {session.matchedField ? <span>Matched: {session.matchedField.replaceAll("_", " ")}</span> : null}
             </button>
           ))
         )}

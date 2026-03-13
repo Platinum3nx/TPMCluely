@@ -26,6 +26,9 @@ pub struct SessionRow {
     pub status: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    pub capture_mode: String,
+    pub capture_target_kind: Option<String>,
+    pub capture_target_label: Option<String>,
     pub updated_at: String,
     pub rolling_summary: Option<String>,
     pub final_summary: Option<String>,
@@ -41,6 +44,8 @@ pub struct TranscriptRow {
     pub session_id: String,
     pub sequence_no: i64,
     pub speaker_label: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
     pub text: String,
     pub is_final: bool,
     pub source: String,
@@ -85,6 +90,46 @@ pub struct GeneratedTicketInputRow {
     pub source_line: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PromptRow {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    pub is_default: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeFileRow {
+    pub id: String,
+    pub name: String,
+    pub storage_path: String,
+    pub mime_type: String,
+    pub sha256: String,
+    pub extracted_text_path: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchResultRow {
+    pub session_id: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: String,
+    pub snippet: String,
+    pub matched_field: String,
+    pub transcript_sequence_no: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionPromptContext {
+    pub output_language: String,
+    pub audio_language: String,
+    pub active_prompt_id: Option<String>,
+    pub prompt_snapshot: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SessionDerivedUpdate {
     pub rolling_summary: Option<String>,
@@ -106,13 +151,27 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         status: row.get(2)?,
         started_at: row.get(3)?,
         ended_at: row.get(4)?,
+        capture_mode: row.get(5)?,
+        capture_target_kind: row.get(6)?,
+        capture_target_label: row.get(7)?,
+        updated_at: row.get(8)?,
+        rolling_summary: row.get(9)?,
+        final_summary: row.get(10)?,
+        decisions_md: row.get(11)?,
+        action_items_md: row.get(12)?,
+        follow_up_email_md: row.get(13)?,
+        notes_md: row.get(14)?,
+    })
+}
+
+fn map_prompt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptRow> {
+    Ok(PromptRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        content: row.get(2)?,
+        is_default: row.get::<_, i64>(3)? == 1,
+        created_at: row.get(4)?,
         updated_at: row.get(5)?,
-        rolling_summary: row.get(6)?,
-        final_summary: row.get(7)?,
-        decisions_md: row.get(8)?,
-        action_items_md: row.get(9)?,
-        follow_up_email_md: row.get(10)?,
-        notes_md: row.get(11)?,
     })
 }
 
@@ -191,6 +250,45 @@ fn refresh_session_search(connection: &Connection, session_id: &str) -> Result<(
     Ok(())
 }
 
+fn load_setting_value(
+    connection: &Connection,
+    key: &str,
+    fallback: &str,
+) -> Result<String, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or_else(|| fallback.to_string()))
+}
+
+fn build_search_query(query: &str) -> Option<String> {
+    let tokens = query
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 2)
+        .map(|token| format!("\"{}\"*", token.to_lowercase()))
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" OR "))
+    }
+}
+
+fn compact_snippet(input: &str, max_chars: usize) -> String {
+    let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.len() <= max_chars {
+        normalized
+    } else {
+        format!("{}...", &normalized[..max_chars.saturating_sub(3)])
+    }
+}
+
 impl AppDatabase {
     pub fn open(path: PathBuf) -> Result<Self, DatabaseError> {
         let connection = Connection::open(&path)?;
@@ -211,6 +309,17 @@ impl AppDatabase {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         run_migrations(&connection)?;
         Ok(())
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn healthcheck(&self) -> Result<(), DatabaseError> {
+        self.with_connection(|connection| {
+            connection.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+            Ok(())
+        })
     }
 
     fn connect(&self) -> Result<Connection, DatabaseError> {
@@ -260,6 +369,9 @@ impl AppDatabase {
                     status,
                     started_at,
                     ended_at,
+                    capture_mode,
+                    capture_target_kind,
+                    capture_target_label,
                     updated_at,
                     rolling_summary,
                     final_summary,
@@ -283,17 +395,20 @@ impl AppDatabase {
             connection
                 .query_row(
                     "
-                    SELECT
-                        id,
-                        title,
-                        status,
-                        started_at,
-                        ended_at,
-                        updated_at,
-                        rolling_summary,
-                        final_summary,
-                        decisions_md,
-                        action_items_md,
+                SELECT
+                    id,
+                    title,
+                    status,
+                    started_at,
+                    ended_at,
+                    capture_mode,
+                    capture_target_kind,
+                    capture_target_label,
+                    updated_at,
+                    rolling_summary,
+                    final_summary,
+                    decisions_md,
+                    action_items_md,
                         follow_up_email_md,
                         notes_md
                     FROM sessions
@@ -311,6 +426,26 @@ impl AppDatabase {
         let now = now_iso();
 
         self.with_connection(|connection| {
+            let output_language = load_setting_value(connection, "output_language", "en")?;
+            let audio_language = load_setting_value(connection, "audio_language", "auto")?;
+            let active_prompt_id = connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'active_prompt_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let prompt_snapshot = match active_prompt_id.as_deref() {
+                Some(prompt_id) if !prompt_id.trim().is_empty() => connection
+                    .query_row(
+                        "SELECT content FROM system_prompts WHERE id = ?1",
+                        params![prompt_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?,
+                _ => None,
+            };
+
             connection.execute(
                 "
                 INSERT INTO sessions (
@@ -318,10 +453,23 @@ impl AppDatabase {
                     title,
                     status,
                     started_at,
+                    capture_mode,
+                    output_language,
+                    audio_language,
+                    active_prompt_id,
+                    session_prompt_snapshot,
                     updated_at
-                ) VALUES (?1, ?2, 'active', ?3, ?3)
+                ) VALUES (?1, ?2, 'active', ?3, 'manual', ?4, ?5, ?6, ?7, ?3)
                 ",
-                params![session_id, title, now],
+                params![
+                    session_id,
+                    title,
+                    now,
+                    output_language,
+                    audio_language,
+                    active_prompt_id,
+                    prompt_snapshot
+                ],
             )?;
             refresh_session_search(connection, &session_id)?;
 
@@ -334,6 +482,9 @@ impl AppDatabase {
                         status,
                         started_at,
                         ended_at,
+                        capture_mode,
+                        capture_target_kind,
+                        capture_target_label,
                         updated_at,
                         rolling_summary,
                         final_summary,
@@ -347,6 +498,32 @@ impl AppDatabase {
                     params![session_id],
                     map_session_row,
                 )
+        })
+    }
+
+    pub fn get_session_prompt_context(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionPromptContext>, DatabaseError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "
+                    SELECT output_language, audio_language, active_prompt_id, session_prompt_snapshot
+                    FROM sessions
+                    WHERE id = ?1
+                    ",
+                    params![session_id],
+                    |row| {
+                        Ok(SessionPromptContext {
+                            output_language: row.get(0)?,
+                            audio_language: row.get(1)?,
+                            active_prompt_id: row.get(2)?,
+                            prompt_snapshot: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
         })
     }
 
@@ -370,6 +547,37 @@ impl AppDatabase {
             )?;
             refresh_session_search(connection, session_id)?;
 
+            Ok(())
+        })
+    }
+
+    pub fn update_session_capture_metadata(
+        &self,
+        session_id: &str,
+        capture_mode: &str,
+        capture_target_kind: Option<&str>,
+        capture_target_label: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let now = now_iso();
+        self.with_connection(|connection| {
+            connection.execute(
+                "
+                UPDATE sessions
+                SET capture_mode = ?2,
+                    capture_target_kind = ?3,
+                    capture_target_label = ?4,
+                    updated_at = ?5
+                WHERE id = ?1
+                ",
+                params![
+                    session_id,
+                    capture_mode,
+                    capture_target_kind,
+                    capture_target_label,
+                    now
+                ],
+            )?;
+            refresh_session_search(connection, session_id)?;
             Ok(())
         })
     }
@@ -414,7 +622,7 @@ impl AppDatabase {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "
-                SELECT id, session_id, sequence_no, speaker_label, text, is_final, source, created_at
+                SELECT id, session_id, sequence_no, speaker_label, start_ms, end_ms, text, is_final, source, created_at
                 FROM transcript_segments
                 WHERE session_id = ?1
                 ORDER BY sequence_no ASC
@@ -427,10 +635,12 @@ impl AppDatabase {
                     session_id: row.get(1)?,
                     sequence_no: row.get(2)?,
                     speaker_label: row.get(3)?,
-                    text: row.get(4)?,
-                    is_final: row.get::<_, i64>(5)? == 1,
-                    source: row.get(6)?,
-                    created_at: row.get(7)?,
+                    start_ms: row.get(4)?,
+                    end_ms: row.get(5)?,
+                    text: row.get(6)?,
+                    is_final: row.get::<_, i64>(7)? == 1,
+                    source: row.get(8)?,
+                    created_at: row.get(9)?,
                 })
             })?;
 
@@ -446,6 +656,30 @@ impl AppDatabase {
         is_final: bool,
         source: &str,
     ) -> Result<TranscriptRow, DatabaseError> {
+        self.append_transcript_segment_with_metadata(
+            session_id,
+            speaker_label,
+            text,
+            is_final,
+            source,
+            None,
+            None,
+            None,
+        )
+        .map(|segment| segment.expect("manual transcript inserts should never dedupe"))
+    }
+
+    pub fn append_transcript_segment_with_metadata(
+        &self,
+        session_id: &str,
+        speaker_label: Option<&str>,
+        text: &str,
+        is_final: bool,
+        source: &str,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+        dedupe_key: Option<&str>,
+    ) -> Result<Option<TranscriptRow>, DatabaseError> {
         let segment_id = Uuid::new_v4().to_string();
         let now = now_iso();
 
@@ -456,30 +690,46 @@ impl AppDatabase {
                 |row| row.get::<_, i64>(0),
             )?;
 
-            connection.execute(
+            let insert_result = connection.execute(
                 "
                 INSERT INTO transcript_segments (
                     id,
                     session_id,
                     sequence_no,
                     speaker_label,
+                    start_ms,
+                    end_ms,
                     text,
                     is_final,
                     source,
+                    dedupe_key,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 ",
                 params![
                     segment_id,
                     session_id,
                     next_sequence,
                     speaker_label,
+                    start_ms,
+                    end_ms,
                     text,
                     if is_final { 1 } else { 0 },
                     source,
+                    dedupe_key,
                     now
                 ],
-            )?;
+            );
+
+            match insert_result {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
 
             connection.execute(
                 "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
@@ -487,16 +737,18 @@ impl AppDatabase {
             )?;
             refresh_session_search(connection, session_id)?;
 
-            Ok(TranscriptRow {
+            Ok(Some(TranscriptRow {
                 id: segment_id,
                 session_id: session_id.to_string(),
                 sequence_no: next_sequence,
                 speaker_label: speaker_label.map(str::to_string),
+                start_ms,
+                end_ms,
                 text: text.to_string(),
                 is_final,
                 source: source.to_string(),
                 created_at: now,
-            })
+            }))
         })
     }
 
@@ -773,6 +1025,245 @@ impl AppDatabase {
             Ok(artifact_id)
         })
     }
+
+    pub fn list_prompts(&self) -> Result<Vec<PromptRow>, DatabaseError> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "
+                SELECT id, name, content, is_default, created_at, updated_at
+                FROM system_prompts
+                ORDER BY is_default DESC, updated_at DESC, name ASC
+                ",
+            )?;
+            let rows = statement.query_map([], map_prompt_row)?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    pub fn save_prompt(
+        &self,
+        prompt_id: Option<&str>,
+        name: &str,
+        content: &str,
+        is_default: bool,
+    ) -> Result<PromptRow, DatabaseError> {
+        let prompt_id = prompt_id
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let now = now_iso();
+
+        self.with_connection(|connection| {
+            if is_default {
+                connection.execute("UPDATE system_prompts SET is_default = 0", [])?;
+            }
+
+            connection.execute(
+                "
+                INSERT INTO system_prompts (id, name, content, is_default, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    content = excluded.content,
+                    is_default = excluded.is_default,
+                    updated_at = excluded.updated_at
+                ",
+                params![prompt_id, name, content, if is_default { 1 } else { 0 }, now],
+            )?;
+
+            connection.query_row(
+                "
+                SELECT id, name, content, is_default, created_at, updated_at
+                FROM system_prompts
+                WHERE id = ?1
+                ",
+                params![prompt_id],
+                map_prompt_row,
+            )
+        })
+    }
+
+    pub fn delete_prompt(&self, prompt_id: &str) -> Result<(), DatabaseError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM system_prompts WHERE id = ?1",
+                params![prompt_id],
+            )?;
+
+            let active_prompt_id = connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'active_prompt_id'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if active_prompt_id.as_deref() == Some(prompt_id) {
+                connection.execute(
+                    "DELETE FROM settings WHERE key = 'active_prompt_id'",
+                    [],
+                )?;
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn list_knowledge_files(&self) -> Result<Vec<KnowledgeFileRow>, DatabaseError> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "
+                SELECT id, name, storage_path, mime_type, sha256, extracted_text_path, created_at
+                FROM knowledge_files
+                ORDER BY created_at DESC, name ASC
+                ",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(KnowledgeFileRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    storage_path: row.get(2)?,
+                    mime_type: row.get(3)?,
+                    sha256: row.get(4)?,
+                    extracted_text_path: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    pub fn insert_knowledge_file(
+        &self,
+        name: &str,
+        storage_path: &str,
+        mime_type: &str,
+        sha256: &str,
+        extracted_text_path: Option<&str>,
+    ) -> Result<KnowledgeFileRow, DatabaseError> {
+        let file_id = Uuid::new_v4().to_string();
+
+        self.with_connection(|connection| {
+            connection.execute(
+                "
+                INSERT INTO knowledge_files (
+                    id,
+                    name,
+                    storage_path,
+                    mime_type,
+                    sha256,
+                    extracted_text_path
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ",
+                params![
+                    file_id,
+                    name,
+                    storage_path,
+                    mime_type,
+                    sha256,
+                    extracted_text_path
+                ],
+            )?;
+
+            connection.query_row(
+                "
+                SELECT id, name, storage_path, mime_type, sha256, extracted_text_path, created_at
+                FROM knowledge_files
+                WHERE id = ?1
+                ",
+                params![file_id],
+                |row| {
+                    Ok(KnowledgeFileRow {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        storage_path: row.get(2)?,
+                        mime_type: row.get(3)?,
+                        sha256: row.get(4)?,
+                        extracted_text_path: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                },
+            )
+        })
+    }
+
+    pub fn delete_knowledge_file(&self, knowledge_file_id: &str) -> Result<(), DatabaseError> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM knowledge_files WHERE id = ?1",
+                params![knowledge_file_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResultRow>, DatabaseError> {
+        let Some(match_query) = build_search_query(query) else {
+            return Ok(Vec::new());
+        };
+        let like_pattern = format!("%{}%", query.trim().to_lowercase());
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "
+                SELECT
+                    s.id,
+                    s.title,
+                    s.status,
+                    s.updated_at,
+                    CASE
+                        WHEN lower(COALESCE(s.final_summary, '')) LIKE ?2 THEN COALESCE(s.final_summary, '')
+                        WHEN lower(COALESCE(s.decisions_md, '')) LIKE ?2 THEN COALESCE(s.decisions_md, '')
+                        WHEN lower(COALESCE(s.action_items_md, '')) LIKE ?2 THEN COALESCE(s.action_items_md, '')
+                        WHEN lower(COALESCE(s.notes_md, '')) LIKE ?2 THEN COALESCE(s.notes_md, '')
+                        ELSE COALESCE((
+                            SELECT text
+                            FROM transcript_segments
+                            WHERE session_id = s.id AND lower(text) LIKE ?2
+                            ORDER BY sequence_no ASC
+                            LIMIT 1
+                        ), COALESCE(s.rolling_summary, ''))
+                    END,
+                    CASE
+                        WHEN lower(COALESCE(s.final_summary, '')) LIKE ?2 THEN 'final_summary'
+                        WHEN lower(COALESCE(s.decisions_md, '')) LIKE ?2 THEN 'decisions'
+                        WHEN lower(COALESCE(s.action_items_md, '')) LIKE ?2 THEN 'action_items'
+                        WHEN lower(COALESCE(s.notes_md, '')) LIKE ?2 THEN 'notes'
+                        ELSE 'transcript'
+                    END,
+                    (
+                        SELECT sequence_no
+                        FROM transcript_segments
+                        WHERE session_id = s.id AND lower(text) LIKE ?2
+                        ORDER BY sequence_no ASC
+                        LIMIT 1
+                    ) AS transcript_sequence_no
+                FROM session_search ss
+                JOIN sessions s ON s.id = ss.session_id
+                WHERE session_search MATCH ?1
+                ORDER BY bm25(session_search), s.updated_at DESC
+                LIMIT ?3
+                ",
+            )?;
+
+            let rows = statement.query_map(params![match_query, like_pattern, limit as i64], |row| {
+                Ok(SearchResultRow {
+                    session_id: row.get(0)?,
+                    title: row.get(1)?,
+                    status: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    snippet: compact_snippet(&row.get::<_, String>(4)?, 220),
+                    matched_field: row.get(5)?,
+                    transcript_sequence_no: row.get(6)?,
+                })
+            })?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -789,5 +1280,41 @@ mod tests {
         assert!(settings
             .iter()
             .any(|(key, value)| key == "ticket_generation_enabled" && value == "true"));
+    }
+
+    #[test]
+    fn dedupe_key_prevents_duplicate_capture_segments() {
+        let database = AppDatabase::open_in_memory().expect("database should initialize");
+        let session = database
+            .create_session("Audio session")
+            .expect("session should exist");
+
+        let first = database
+            .append_transcript_segment_with_metadata(
+                &session.id,
+                Some("Meeting"),
+                "hello world",
+                true,
+                "capture",
+                Some(10),
+                Some(20),
+                Some("same-key"),
+            )
+            .expect("first insert should work");
+        let second = database
+            .append_transcript_segment_with_metadata(
+                &session.id,
+                Some("Meeting"),
+                "hello world",
+                true,
+                "capture",
+                Some(10),
+                Some(20),
+                Some("same-key"),
+            )
+            .expect("duplicate insert should not error");
+
+        assert!(first.is_some());
+        assert!(second.is_none());
     }
 }

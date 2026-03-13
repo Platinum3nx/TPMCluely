@@ -53,9 +53,13 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           started_at            TEXT,
           ended_at              TEXT,
           source                TEXT NOT NULL DEFAULT 'manual',
+          capture_mode          TEXT NOT NULL DEFAULT 'manual',
+          capture_target_kind   TEXT,
+          capture_target_label  TEXT,
           output_language       TEXT NOT NULL DEFAULT 'en',
           audio_language        TEXT NOT NULL DEFAULT 'auto',
           active_prompt_id      TEXT,
+          session_prompt_snapshot TEXT,
           rolling_summary       TEXT,
           final_summary         TEXT,
           decisions_md          TEXT,
@@ -75,6 +79,7 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           start_ms              INTEGER,
           end_ms                INTEGER,
           source                TEXT NOT NULL DEFAULT 'manual',
+          dedupe_key            TEXT,
           text                  TEXT NOT NULL,
           is_final              INTEGER NOT NULL DEFAULT 0,
           created_at            TEXT NOT NULL DEFAULT (datetime('now'))
@@ -82,6 +87,10 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_session_sequence
           ON transcript_segments(session_id, sequence_no);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_session_dedupe
+          ON transcript_segments(session_id, dedupe_key)
+          WHERE dedupe_key IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS chat_messages (
           id                    TEXT PRIMARY KEY,
@@ -186,9 +195,21 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         "source",
         "TEXT NOT NULL DEFAULT 'manual'",
     )?;
+    add_column_if_missing(connection, "sessions", "capture_mode", "TEXT NOT NULL DEFAULT 'manual'")?;
+    add_column_if_missing(connection, "sessions", "capture_target_kind", "TEXT")?;
+    add_column_if_missing(connection, "sessions", "capture_target_label", "TEXT")?;
+    add_column_if_missing(connection, "sessions", "session_prompt_snapshot", "TEXT")?;
+    add_column_if_missing(connection, "transcript_segments", "dedupe_key", "TEXT")?;
     add_column_if_missing(connection, "chat_messages", "context_snapshot", "TEXT")?;
     add_column_if_missing(connection, "chat_messages", "attachments_json", "TEXT")?;
     add_column_if_missing(connection, "generated_tickets", "source_line", "TEXT")?;
+    connection.execute_batch(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_session_dedupe
+          ON transcript_segments(session_id, dedupe_key)
+          WHERE dedupe_key IS NOT NULL;
+        ",
+    )?;
 
     Ok(())
 }

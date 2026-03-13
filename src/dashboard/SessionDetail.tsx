@@ -4,10 +4,11 @@ import { TranscriptView } from "./TranscriptView";
 
 interface SessionDetailProps {
   sessionDetail: SessionDetailModel | null;
+  highlightedSequenceNo?: number | null;
   onExportSession: (sessionDetail: SessionDetailModel) => void;
 }
 
-export function SessionDetail({ sessionDetail, onExportSession }: SessionDetailProps) {
+export function SessionDetail({ sessionDetail, highlightedSequenceNo = null, onExportSession }: SessionDetailProps) {
   if (!sessionDetail) {
     return (
       <article className="card">
@@ -36,7 +37,7 @@ export function SessionDetail({ sessionDetail, onExportSession }: SessionDetailP
         </div>
       </article>
       <NotesView session={sessionDetail.session} />
-      <TranscriptView transcripts={sessionDetail.transcripts} />
+      <TranscriptView transcripts={sessionDetail.transcripts} highlightedSequenceNo={highlightedSequenceNo} />
     </div>
   );
 }

@@ -1,8 +1,23 @@
-import type { BootstrapPayload, SettingRecord } from "../lib/types";
+import { FileLibrary } from "./FileLibrary";
+import { PromptLibrary } from "./PromptLibrary";
+import type {
+  BootstrapPayload,
+  KnowledgeFileRecord,
+  PromptRecord,
+  SaveKnowledgeFileInput,
+  SavePromptInput,
+  SettingRecord,
+} from "../lib/types";
 
 interface SettingsProps {
   bootstrap: BootstrapPayload;
+  prompts: PromptRecord[];
+  knowledgeFiles: KnowledgeFileRecord[];
   onUpdateSetting: (key: string, value: string) => Promise<void>;
+  onSavePrompt: (input: SavePromptInput) => Promise<void>;
+  onDeletePrompt: (promptId: string) => Promise<void>;
+  onSaveKnowledgeFile: (input: SaveKnowledgeFileInput) => Promise<void>;
+  onDeleteKnowledgeFile: (knowledgeFileId: string) => Promise<void>;
 }
 
 const toggleSettings = [
@@ -52,7 +67,16 @@ function getSetting(settings: SettingRecord[], key: string, fallback: string): s
   return settings.find((setting) => setting.key === key)?.value ?? fallback;
 }
 
-export function Settings({ bootstrap, onUpdateSetting }: SettingsProps) {
+export function Settings({
+  bootstrap,
+  prompts,
+  knowledgeFiles,
+  onUpdateSetting,
+  onSavePrompt,
+  onDeletePrompt,
+  onSaveKnowledgeFile,
+  onDeleteKnowledgeFile,
+}: SettingsProps) {
   const theme = getSetting(bootstrap.settings, "theme", "system");
   const outputLanguage = getSetting(bootstrap.settings, "output_language", "en");
   const audioLanguage = getSetting(bootstrap.settings, "audio_language", "auto");
@@ -137,6 +161,18 @@ export function Settings({ bootstrap, onUpdateSetting }: SettingsProps) {
             <strong>{bootstrap.providers.ticketProvider}</strong>
           </div>
         </article>
+
+        <PromptLibrary
+          prompts={prompts}
+          onSavePrompt={onSavePrompt}
+          onDeletePrompt={onDeletePrompt}
+        />
+
+        <FileLibrary
+          files={knowledgeFiles}
+          onSaveFile={onSaveKnowledgeFile}
+          onDeleteFile={onDeleteKnowledgeFile}
+        />
       </div>
     </section>
   );

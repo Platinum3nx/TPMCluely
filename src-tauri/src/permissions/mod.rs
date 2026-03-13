@@ -10,6 +10,14 @@ pub struct PermissionSnapshot {
     pub accessibility: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionDiagnostics {
+    pub screen_recording_detection_ready: bool,
+    pub microphone_detection_ready: bool,
+    pub accessibility_detection_ready: bool,
+}
+
 #[derive(Clone, Default)]
 pub struct PermissionService;
 
@@ -20,5 +28,9 @@ impl PermissionService {
 
     pub fn snapshot(&self) -> PermissionSnapshot {
         macos::permission_snapshot()
+    }
+
+    pub fn diagnostics(&self) -> PermissionDiagnostics {
+        macos::permission_diagnostics()
     }
 }

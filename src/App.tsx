@@ -4,29 +4,40 @@ import {
   askAssistant,
   bootstrapApp,
   completeSession,
+  deleteKnowledgeFile,
+  deletePrompt,
+  exportSessionMarkdown,
   getSecretValue,
   getSessionDetail,
   listSessions,
   pauseSession,
   resumeSession,
   runDynamicAction,
+  saveKnowledgeFile,
+  savePrompt,
   saveSecret,
   saveSetting,
+  searchSessions,
+  setOverlayOpen as persistOverlayOpen,
   startSession,
 } from "./lib/tauri";
 import { DashboardApp } from "./dashboard/DashboardApp";
 import { OnboardingApp } from "./onboarding/OnboardingApp";
 import { Settings } from "./dashboard/Settings";
 import { SessionWidget } from "./session/SessionWidget";
-import { buildSessionMarkdown } from "./lib/export";
 import { matchesShortcut, normalizeGlobalShortcut } from "./lib/shortcuts";
 import type {
   BootstrapPayload,
   CaptureMode,
   DynamicActionKey,
+  KnowledgeFileRecord,
+  PromptRecord,
+  SaveKnowledgeFileInput,
+  SavePromptInput,
   SecretKey,
   SessionDetail,
   SessionRecord,
+  SearchSessionResult,
   ScreenContextInput,
   SettingRecord,
 } from "./lib/types";
@@ -85,6 +96,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [globalShortcutReady, setGlobalShortcutReady] = useState(false);
   const [overlayOpen, setOverlayOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchSessionResult[] | null>(null);
+  const [highlightedSequenceNo, setHighlightedSequenceNo] = useState<number | null>(null);
+  const [prompts, setPrompts] = useState<PromptRecord[]>([]);
+  const [knowledgeFiles, setKnowledgeFiles] = useState<KnowledgeFileRecord[]>([]);
   const [selectedCaptureMode, setSelectedCaptureMode] = useState<CaptureMode>("manual");
   const [secretDrafts, setSecretDrafts] = useState(initialSecrets);
   const [savingSecretKey, setSavingSecretKey] = useState<SecretKey | null>(null);
@@ -157,8 +172,14 @@ export default function App() {
       const [payload, sessionList] = await Promise.all([bootstrapApp(), listSessions()]);
       setBootstrap(payload);
       setSessions(sessionList);
+      setPrompts(payload.prompts);
+      setKnowledgeFiles(payload.knowledgeFiles);
+      setOverlayOpen(payload.runtime.window.overlayOpen);
 
-      const activeSession = sessionList.find((session) => isSessionLive(session.status));
+      const runtimeActiveSessionId = payload.runtime.session.activeSessionId;
+      const activeSession =
+        (runtimeActiveSessionId ? sessionList.find((session) => session.id === runtimeActiveSessionId) : null) ??
+        sessionList.find((session) => isSessionLive(session.status));
       const nextSelectedSessionId = preferredSessionId ?? activeSession?.id ?? sessionList[0]?.id ?? null;
 
       setSelectedSessionId(nextSelectedSessionId);
@@ -272,6 +293,7 @@ export default function App() {
   const syncOverlayWindow = useEffectEvent(async (nextOpen: boolean) => {
     setOverlayOpen(nextOpen);
     setView("session");
+    await persistOverlayOpen(nextOpen).catch(() => undefined);
 
     if (!("__TAURI_INTERNALS__" in window)) {
       return;
@@ -536,8 +558,9 @@ export default function App() {
     applySessionDetail(detail);
   }
 
-  async function handleSelectSession(sessionId: string) {
+  async function handleSelectSession(sessionId: string, transcriptSequenceNo?: number | null) {
     setSelectedSessionId(sessionId);
+    setHighlightedSequenceNo(transcriptSequenceNo ?? null);
     setSelectedSessionDetail(await getSessionDetail(sessionId));
   }
 
@@ -565,13 +588,69 @@ export default function App() {
     }
   }
 
-  function handleExportSession(sessionDetail: SessionDetail) {
-    const markdown = buildSessionMarkdown(sessionDetail);
-    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const handleSearchSessions = useEffectEvent(async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults(null);
+      return;
+    }
+
+    setSearchResults(await searchSessions(query));
+  });
+
+  async function handleSavePrompt(input: SavePromptInput) {
+    try {
+      setPrompts(await savePrompt(input));
+      const payload = await bootstrapApp();
+      setBootstrap(payload);
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Failed to save prompt.";
+      setError(message);
+    }
+  }
+
+  async function handleDeletePrompt(promptId: string) {
+    try {
+      setPrompts(await deletePrompt(promptId));
+      const payload = await bootstrapApp();
+      setBootstrap(payload);
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Failed to delete prompt.";
+      setError(message);
+    }
+  }
+
+  async function handleSaveKnowledgeFile(input: SaveKnowledgeFileInput) {
+    try {
+      setKnowledgeFiles(await saveKnowledgeFile(input));
+      const payload = await bootstrapApp();
+      setBootstrap(payload);
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Failed to save knowledge file.";
+      setError(message);
+    }
+  }
+
+  async function handleDeleteKnowledgeFile(knowledgeFileId: string) {
+    try {
+      setKnowledgeFiles(await deleteKnowledgeFile(knowledgeFileId));
+    } catch (unknownError) {
+      const message = unknownError instanceof Error ? unknownError.message : "Failed to delete knowledge file.";
+      setError(message);
+    }
+  }
+
+  async function handleExportSession(sessionDetail: SessionDetail) {
+    const exported = await exportSessionMarkdown(sessionDetail.session.id);
+    if (!exported) {
+      setError("The session export could not be created.");
+      return;
+    }
+
+    const blob = new Blob([exported.markdown], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${sessionDetail.session.title.toLowerCase().replace(/\s+/g, "-") || "session"}.md`;
+    link.download = exported.fileName;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -656,6 +735,7 @@ export default function App() {
         <div className="hero-meta">
           <span>Version {bootstrap.appVersion}</span>
           <span>{bootstrap.diagnostics.mode === "desktop" ? "Desktop runtime" : "Browser-safe mock runtime"}</span>
+          <span>{bootstrap.diagnostics.captureBackend}</span>
         </div>
       </section>
 
@@ -691,6 +771,12 @@ export default function App() {
             <div className="readiness-row">
               <span>State Machine</span>
               <strong>{bootstrap.diagnostics.stateMachineReady ? "Ready" : "Pending"}</strong>
+            </div>
+            <div className="readiness-row">
+              <span>Search / Export</span>
+              <strong>
+                {bootstrap.diagnostics.searchReady && bootstrap.diagnostics.exportReady ? "Ready" : "Pending"}
+              </strong>
             </div>
           </article>
         </aside>
@@ -785,12 +871,27 @@ export default function App() {
               sessions={sessions}
               selectedSessionId={selectedSessionId}
               sessionDetail={selectedSessionDetail}
+              searchResults={searchResults}
+              highlightedSequenceNo={highlightedSequenceNo}
+              onSearchSessions={handleSearchSessions}
               onSelectSession={handleSelectSession}
               onExportSession={handleExportSession}
+              allowTicketPreview={bootstrap.diagnostics.mode === "browser-mock"}
             />
           ) : null}
 
-          {view === "settings" ? <Settings bootstrap={bootstrap} onUpdateSetting={handleUpdateSetting} /> : null}
+          {view === "settings" ? (
+            <Settings
+              bootstrap={bootstrap}
+              prompts={prompts}
+              knowledgeFiles={knowledgeFiles}
+              onUpdateSetting={handleUpdateSetting}
+              onSavePrompt={handleSavePrompt}
+              onDeletePrompt={handleDeletePrompt}
+              onSaveKnowledgeFile={handleSaveKnowledgeFile}
+              onDeleteKnowledgeFile={handleDeleteKnowledgeFile}
+            />
+          ) : null}
         </section>
       </section>
     </main>

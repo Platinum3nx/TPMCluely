@@ -98,6 +98,14 @@ export function OnboardingApp({
               <span className="muted-label">State Machine</span>
               <strong>{bootstrap.diagnostics.stateMachineReady ? "Ready" : "Pending"}</strong>
             </div>
+            <div>
+              <span className="muted-label">Permission Detection</span>
+              <strong>{bootstrap.diagnostics.permissionDetectionReady ? "Partial / Ready" : "Pending"}</strong>
+            </div>
+            <div>
+              <span className="muted-label">Capture Backend</span>
+              <strong>{bootstrap.diagnostics.captureBackend}</strong>
+            </div>
           </div>
         </article>
       </div>

@@ -34,6 +34,30 @@ export interface DiagnosticsSnapshot {
   keychainAvailable: boolean;
   databaseReady: boolean;
   stateMachineReady: boolean;
+  windowControllerReady: boolean;
+  searchReady: boolean;
+  promptLibraryReady: boolean;
+  knowledgeLibraryReady: boolean;
+  exportReady: boolean;
+  permissionDetectionReady: boolean;
+  captureBackend: string;
+  databasePath: string;
+}
+
+export interface SessionRuntimeSnapshot {
+  activeSessionId: string | null;
+  activeStatus: SessionStatus | null;
+  lastTransitionAt: string | null;
+}
+
+export interface WindowRuntimeSnapshot {
+  overlayOpen: boolean;
+  lastChangedAt: string | null;
+}
+
+export interface RuntimeSnapshot {
+  session: SessionRuntimeSnapshot;
+  window: WindowRuntimeSnapshot;
 }
 
 export interface BootstrapPayload {
@@ -44,6 +68,10 @@ export interface BootstrapPayload {
   secrets: SecretSnapshot;
   providers: ProviderSnapshot;
   diagnostics: DiagnosticsSnapshot;
+  captureCapabilities: CaptureCapabilities;
+  runtime: RuntimeSnapshot;
+  prompts: PromptRecord[];
+  knowledgeFiles: KnowledgeFileRecord[];
 }
 
 export type SecretKey = "gemini_api_key" | "deepgram_api_key" | "linear_api_key" | "linear_team_id";
@@ -76,6 +104,9 @@ export interface SessionRecord {
   status: SessionStatus;
   startedAt: string | null;
   endedAt: string | null;
+  captureMode: CaptureMode;
+  captureTargetKind: SystemAudioSourceKind | null;
+  captureTargetLabel: string | null;
   updatedAt: string;
   rollingSummary: string | null;
   finalSummary: string | null;
@@ -94,6 +125,8 @@ export interface TranscriptSegment {
   sessionId: string;
   sequenceNo: number;
   speakerLabel: string | null;
+  startMs: number | null;
+  endMs: number | null;
   text: string;
   isFinal: boolean;
   source: TranscriptSource;
@@ -138,6 +171,16 @@ export interface SessionDetail {
   generatedTickets: GeneratedTicket[];
 }
 
+export interface SearchSessionResult {
+  sessionId: string;
+  title: string;
+  status: SessionStatus;
+  updatedAt: string;
+  snippet: string;
+  matchedField: string;
+  transcriptSequenceNo: number | null;
+}
+
 export interface StartSessionInput {
   title: string;
 }
@@ -167,6 +210,78 @@ export interface RunDynamicActionInput {
 export type TicketType = "Bug" | "Feature" | "Task";
 
 export type CaptureMode = "system_audio" | "microphone" | "manual";
+
+export type SystemAudioSourceKind = "window" | "display";
+
+export interface SystemAudioSource {
+  id: string;
+  kind: SystemAudioSourceKind;
+  title: string;
+  appName: string | null;
+  bundleId: string | null;
+  sourceLabel: string;
+}
+
+export interface SystemAudioSourceListPayload {
+  sources: SystemAudioSource[];
+  permissionStatus: PermissionStatus;
+  message: string | null;
+}
+
+export type CaptureRuntimeState =
+  | "idle"
+  | "permission_blocked"
+  | "starting"
+  | "connecting"
+  | "listening"
+  | "degraded"
+  | "stopping"
+  | "error"
+  | "unsupported";
+
+export interface CaptureStatePayload {
+  sessionId: string | null;
+  runtimeState: CaptureRuntimeState;
+  captureMode: CaptureMode | "manual";
+  sourceLabel: string | null;
+  message: string | null;
+  permissionStatus: PermissionStatus | null;
+  targetKind: SystemAudioSourceKind | null;
+  reconnectAttempt: number;
+}
+
+export interface CaptureHealthPayload {
+  sessionId: string | null;
+  severity: "info" | "warning" | "error";
+  droppedFrames: number;
+  queueDepth: number;
+  reconnectAttempt: number;
+  message: string;
+}
+
+export interface CaptureCapabilities {
+  nativeSystemAudio: boolean;
+  screenRecordingRequired: boolean;
+  microphoneFallback: boolean;
+}
+
+export interface StartSystemAudioCaptureInput {
+  sessionId: string;
+  sourceId: string;
+  sourceKind: SystemAudioSourceKind;
+  sourceLabel: string;
+}
+
+export interface CapturePartialEventPayload {
+  sessionId: string;
+  text: string;
+}
+
+export interface CaptureSegmentEventPayload {
+  sessionId: string;
+  session: SessionRecord;
+  segment: TranscriptSegment;
+}
 
 export interface GeneratedTicket {
   id: string;
@@ -205,4 +320,44 @@ export interface MarkGeneratedTicketPushedInput {
   linearIssueKey: string;
   linearIssueUrl: string;
   pushedAt?: string;
+}
+
+export interface ExportedSessionPayload {
+  sessionId: string;
+  fileName: string;
+  markdown: string;
+  artifactId: string | null;
+}
+
+export interface PromptRecord {
+  id: string;
+  name: string;
+  content: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+  isActive: boolean;
+}
+
+export interface SavePromptInput {
+  id?: string;
+  name: string;
+  content: string;
+  isDefault?: boolean;
+  makeActive?: boolean;
+}
+
+export interface KnowledgeFileRecord {
+  id: string;
+  name: string;
+  mimeType: string;
+  sha256: string;
+  excerpt: string;
+  createdAt: string;
+}
+
+export interface SaveKnowledgeFileInput {
+  name: string;
+  mimeType: string;
+  content: string;
 }

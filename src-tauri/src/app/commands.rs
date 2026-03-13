@@ -1,25 +1,38 @@
+use std::collections::HashMap;
 use std::fs;
-use std::collections::{HashMap, HashSet};
 
 use base64::Engine as _;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::app::state::AppState;
-use crate::db::{
-    GeneratedTicketInputRow, GeneratedTicketRow, MessageRow, SessionDerivedUpdate, SessionRow,
-    TranscriptRow,
+use crate::audio::{
+    CaptureCapabilities, CaptureStatePayload, StartSystemAudioCaptureInput,
+    SystemAudioSourceListPayload,
 };
+use crate::db::{
+    GeneratedTicketInputRow, GeneratedTicketRow, MessageRow, SearchResultRow,
+    SessionDerivedUpdate, SessionRow, TranscriptRow,
+};
+use crate::exports::build_session_markdown;
+use crate::knowledge::{delete_file, ingest_text_file, list_files, KnowledgeFileRecord, SaveKnowledgeFileInput};
 use crate::permissions::PermissionSnapshot;
 use crate::providers::ProviderSnapshot;
 use crate::providers::linear::{create_issue, LinearIssueRequest};
 use crate::providers::llm::{generate_text, generate_text_multimodal, LlmPart};
+use crate::prompts::{list_prompts, save_prompt, PromptRecord, SavePromptInput};
+use crate::screenshot::ScreenshotStore;
 use crate::secrets::SecretPresence;
-use crate::session::state_machine::SessionStateMachine;
+use crate::session::manager::SessionRuntimeSnapshot;
+use crate::session::state_machine::SessionStatus;
 use crate::tickets::generate_tickets;
+use crate::transcript::{
+    format_transcript_document, select_relevant_transcript_snippets, truncate_context_middle,
+};
+use crate::window::WindowRuntimeSnapshot;
 
 const MEETING_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use the transcript as the primary source of truth. If a shared screen image is provided, use it only when it materially helps answer the current question. Never invent facts. If transcript and screen context disagree, say so explicitly. Cite transcript snippets using labels like [S14]. If you used the shared screen, cite it as [Screen]. Keep spoken answers concise enough for the user to read aloud in a meeting.";
 const ACTION_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use the transcript as the primary source of truth. If a shared screen image is provided, use it only when it materially helps answer the current question. Be specific, concise, and grounded. If evidence is weak or missing, say that clearly instead of guessing. Cite transcript snippets using labels like [S14]. If you used the shared screen, cite it as [Screen].";
@@ -35,6 +48,10 @@ pub struct BootstrapPayload {
     pub secrets: SecretSnapshot,
     pub providers: ProviderSnapshot,
     pub diagnostics: DiagnosticsSnapshot,
+    pub capture_capabilities: CaptureCapabilities,
+    pub runtime: RuntimeSnapshot,
+    pub prompts: Vec<PromptRecord>,
+    pub knowledge_files: Vec<KnowledgeFileRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +77,21 @@ pub struct DiagnosticsSnapshot {
     pub keychain_available: bool,
     pub database_ready: bool,
     pub state_machine_ready: bool,
+    pub window_controller_ready: bool,
+    pub search_ready: bool,
+    pub prompt_library_ready: bool,
+    pub knowledge_library_ready: bool,
+    pub export_ready: bool,
+    pub permission_detection_ready: bool,
+    pub capture_backend: &'static str,
+    pub database_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSnapshot {
+    pub session: SessionRuntimeSnapshot,
+    pub window: WindowRuntimeSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +102,9 @@ pub struct SessionRecordPayload {
     pub status: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    pub capture_mode: String,
+    pub capture_target_kind: Option<String>,
+    pub capture_target_label: Option<String>,
     pub updated_at: String,
     pub rolling_summary: Option<String>,
     pub final_summary: Option<String>,
@@ -86,6 +121,8 @@ pub struct TranscriptSegmentPayload {
     pub session_id: String,
     pub sequence_no: i64,
     pub speaker_label: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
     pub text: String,
     pub is_final: bool,
     pub source: String,
@@ -143,6 +180,27 @@ pub struct SessionDetailPayload {
     pub transcripts: Vec<TranscriptSegmentPayload>,
     pub messages: Vec<ChatMessagePayload>,
     pub generated_tickets: Vec<GeneratedTicketPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultPayload {
+    pub session_id: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: String,
+    pub snippet: String,
+    pub matched_field: String,
+    pub transcript_sequence_no: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSessionPayload {
+    pub session_id: String,
+    pub file_name: String,
+    pub markdown: String,
+    pub artifact_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,13 +297,16 @@ fn secret_snapshot(presence: &SecretPresence) -> SecretSnapshot {
     }
 }
 
-fn map_session(row: SessionRow) -> SessionRecordPayload {
+pub(crate) fn map_session(row: SessionRow) -> SessionRecordPayload {
     SessionRecordPayload {
         id: row.id,
         title: row.title,
         status: row.status,
         started_at: row.started_at,
         ended_at: row.ended_at,
+        capture_mode: row.capture_mode,
+        capture_target_kind: row.capture_target_kind,
+        capture_target_label: row.capture_target_label,
         updated_at: row.updated_at,
         rolling_summary: row.rolling_summary,
         final_summary: row.final_summary,
@@ -256,12 +317,14 @@ fn map_session(row: SessionRow) -> SessionRecordPayload {
     }
 }
 
-fn map_transcript(row: TranscriptRow) -> TranscriptSegmentPayload {
+pub(crate) fn map_transcript(row: TranscriptRow) -> TranscriptSegmentPayload {
     TranscriptSegmentPayload {
         id: row.id,
         session_id: row.session_id,
         sequence_no: row.sequence_no,
         speaker_label: row.speaker_label,
+        start_ms: row.start_ms,
+        end_ms: row.end_ms,
         text: row.text,
         is_final: row.is_final,
         source: row.source,
@@ -315,7 +378,7 @@ fn to_bullet_md(lines: &[String]) -> String {
         .join("\n")
 }
 
-fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDerivedUpdate {
+pub(crate) fn derive_session_update(transcripts: &[TranscriptRow]) -> SessionDerivedUpdate {
     let lines = transcripts
         .iter()
         .map(|segment| segment.text.trim().to_string())
@@ -444,35 +507,6 @@ fn setting_enabled(settings: &HashMap<String, String>, key: &str, default: bool)
         .unwrap_or(default)
 }
 
-fn format_transcript_document(transcripts: &[TranscriptRow]) -> String {
-    transcripts
-        .iter()
-        .map(|segment| {
-            let speaker = segment
-                .speaker_label
-                .as_deref()
-                .unwrap_or("Speaker")
-                .trim();
-            format!("{speaker}: {}", segment.text.trim())
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn truncate_context_middle(input: &str, max_chars: usize) -> String {
-    if input.len() <= max_chars {
-        return input.to_string();
-    }
-
-    let head_chars = (max_chars as f64 * 0.6) as usize;
-    let tail_chars = max_chars.saturating_sub(head_chars + 36);
-    format!(
-        "{}\n\n[... transcript truncated ...]\n\n{}",
-        &input[..head_chars.min(input.len())],
-        &input[input.len().saturating_sub(tail_chars)..]
-    )
-}
-
 fn format_recent_messages(messages: &[MessageRow]) -> String {
     let recent = messages
         .iter()
@@ -515,83 +549,25 @@ fn format_screen_context_note(screen_context: Option<&ScreenContextInput>) -> St
     }
 }
 
-fn select_relevant_transcript_snippets(transcripts: &[TranscriptRow], prompt: &str) -> Vec<String> {
-    let stop_words = [
-        "the", "and", "that", "with", "from", "about", "what", "when", "where", "does", "have",
-        "will", "this", "they", "them", "into", "for", "you", "your", "were", "could",
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
-
-    let prompt_terms = prompt
-        .split(|character: char| !character.is_alphanumeric())
-        .filter_map(|term| {
-            let normalized = term.trim().to_lowercase();
-            if normalized.len() < 3 || stop_words.contains(normalized.as_str()) {
-                None
-            } else {
-                Some(normalized)
-            }
-        })
-        .collect::<HashSet<_>>();
-
-    let mut scored = transcripts
-        .iter()
-        .map(|segment| {
-            let normalized = segment.text.to_lowercase();
-            let overlap = prompt_terms
-                .iter()
-                .filter(|term| normalized.contains(term.as_str()))
-                .count() as i64;
-            let recency_bonus = segment.sequence_no;
-            let score = overlap * 100 + recency_bonus;
-            (score, segment)
-        })
-        .collect::<Vec<_>>();
-
-    scored.sort_by(|left, right| right.0.cmp(&left.0));
-
-    let mut selected = scored
-        .into_iter()
-        .filter(|(score, _)| *score > 0)
-        .take(6)
-        .map(|(_, segment)| segment)
-        .collect::<Vec<_>>();
-
-    for segment in transcripts.iter().rev().take(4).rev() {
-        if !selected.iter().any(|candidate| candidate.id == segment.id) {
-            selected.push(segment);
-        }
-    }
-
-    selected
-        .into_iter()
-        .map(|segment| {
-            format!(
-                "[S{}] {}: {}",
-                segment.sequence_no,
-                segment.speaker_label.as_deref().unwrap_or("Speaker"),
-                segment.text.trim()
-            )
-        })
-        .collect()
-}
-
 fn build_question_prompt(
     prompt: &str,
     transcripts: &[TranscriptRow],
     messages: &[MessageRow],
     derived: &SessionDerivedUpdate,
     screen_context: Option<&ScreenContextInput>,
+    prompt_snapshot: Option<&str>,
+    output_language: &str,
 ) -> String {
     let snippets = select_relevant_transcript_snippets(transcripts, prompt).join("\n");
     let recent_messages = format_recent_messages(messages);
     format!(
-        "Rolling summary:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\nShared screen context:\n{}\n\nUser question:\n{}\n\nAnswer primarily from the transcript. Use the shared screen only if it materially improves the answer. If the transcript does not contain the answer, say that clearly. If transcript and screen disagree, call that out. Cite the transcript snippets you relied on using their [S#] labels. If you used the screen, cite [Screen]. Keep the answer concise enough to read aloud in a meeting.",
+        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\nShared screen context:\n{}\n\nUser question:\n{}\n\nAnswer primarily from the transcript. Use the shared screen only if it materially improves the answer. If the transcript does not contain the answer, say that clearly. If transcript and screen disagree, call that out. Cite the transcript snippets you relied on using their [S#] labels. If you used the screen, cite [Screen]. Keep the answer concise enough to read aloud in a meeting.",
         derived
             .rolling_summary
             .as_deref()
             .unwrap_or("No rolling summary available yet."),
+        prompt_snapshot.unwrap_or("No custom prompt is active for this session."),
+        output_language,
         recent_messages,
         snippets,
         format_screen_context_note(screen_context),
@@ -604,6 +580,8 @@ fn build_action_prompt(
     transcripts: &[TranscriptRow],
     derived: &SessionDerivedUpdate,
     screen_context: Option<&ScreenContextInput>,
+    prompt_snapshot: Option<&str>,
+    output_language: &str,
 ) -> String {
     let transcript_text = truncate_context_middle(
         &format_transcript_document(transcripts),
@@ -626,11 +604,13 @@ fn build_action_prompt(
     };
 
     format!(
-        "Rolling summary:\n{}\n\nMeeting transcript:\n{}\n\nShared screen context:\n{}\n\nTask:\n{}",
+        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nMeeting transcript:\n{}\n\nShared screen context:\n{}\n\nTask:\n{}",
         derived
             .rolling_summary
             .as_deref()
             .unwrap_or("No rolling summary available yet."),
+        prompt_snapshot.unwrap_or("No custom prompt is active for this session."),
+        output_language,
         transcript_text,
         format_screen_context_note(screen_context),
         directive
@@ -695,20 +675,18 @@ fn maybe_store_screen_artifact(
         .decode(screen_context.data_base64.as_bytes())
         .map_err(|error| error.to_string())?;
 
-    let artifacts_dir = state
-        .app_dir()
-        .join("artifacts")
-        .join("screenshots")
-        .join(session_id);
-    fs::create_dir_all(&artifacts_dir).map_err(|error| error.to_string())?;
-
     let extension = if screen_context.mime_type.eq_ignore_ascii_case("image/png") {
         "png"
     } else {
         "jpg"
     };
-    let storage_path = artifacts_dir.join(format!("{message_id}.{extension}"));
-    fs::write(&storage_path, &bytes).map_err(|error| error.to_string())?;
+    let storage_path = ScreenshotStore::new().persist_bytes(
+        &state.app_dir(),
+        session_id,
+        message_id,
+        extension,
+        &bytes,
+    )?;
 
     let sha256 = {
         let mut digest = Sha256::new();
@@ -898,6 +876,44 @@ fn load_gemini_api_key(state: &AppState) -> Result<Option<String>, String> {
         .map(|value| value.filter(|key| !key.trim().is_empty()))
 }
 
+fn load_active_prompt_id(settings: &[SettingRecord]) -> Option<&str> {
+    settings
+        .iter()
+        .find(|setting| setting.key == "active_prompt_id" && !setting.value.trim().is_empty())
+        .map(|setting| setting.value.as_str())
+}
+
+fn load_session_prompt_context(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(String, Option<String>), String> {
+    state
+        .database()
+        .get_session_prompt_context(session_id)
+        .map_err(|error| error.to_string())
+        .map(|context| match context {
+            Some(context) => (
+                context.output_language,
+                context
+                    .prompt_snapshot
+                    .filter(|snapshot| !snapshot.trim().is_empty()),
+            ),
+            None => ("en".to_string(), None),
+        })
+}
+
+fn map_search_result(row: SearchResultRow) -> SearchResultPayload {
+    SearchResultPayload {
+        session_id: row.session_id,
+        title: row.title,
+        status: row.status,
+        updated_at: row.updated_at,
+        snippet: row.snippet,
+        matched_field: row.matched_field,
+        transcript_sequence_no: row.transcript_sequence_no,
+    }
+}
+
 fn load_session_detail(state: &AppState, session_id: &str) -> Result<Option<SessionDetailPayload>, String> {
     let database = state.database();
     let session = database
@@ -939,6 +955,7 @@ fn load_session_detail(state: &AppState, session_id: &str) -> Result<Option<Sess
 #[tauri::command]
 pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, String> {
     let permissions = state.permissions().snapshot();
+    let permission_diagnostics = state.permissions().diagnostics();
     let settings = state
         .database()
         .list_settings()
@@ -946,6 +963,10 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
         .into_iter()
         .map(|(key, value)| SettingRecord { key, value })
         .collect::<Vec<_>>();
+    let database_ready = state.database().healthcheck().is_ok();
+    let keychain_available = state.secret_store().read_secret("__tpmcluely_healthcheck__").is_ok();
+    let prompts = list_prompts(state.database().as_ref(), load_active_prompt_id(&settings))?;
+    let knowledge_files = list_files(state.database().as_ref())?;
 
     let secrets = state
         .secret_store()
@@ -962,10 +983,27 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
         diagnostics: DiagnosticsSnapshot {
             mode: "desktop",
             build_target: "tauri",
-            keychain_available: cfg!(target_os = "macos"),
-            database_ready: true,
-            state_machine_ready: SessionStateMachine::new().current().is_some(),
+            keychain_available,
+            database_ready,
+            state_machine_ready: state.session_manager().is_ready(),
+            window_controller_ready: state.window_controller().is_ready(),
+            search_ready: database_ready,
+            prompt_library_ready: database_ready,
+            knowledge_library_ready: database_ready,
+            export_ready: database_ready,
+            permission_detection_ready: permission_diagnostics.accessibility_detection_ready
+                || permission_diagnostics.microphone_detection_ready
+                || permission_diagnostics.screen_recording_detection_ready,
+            capture_backend: state.audio_runtime().diagnostics().capture_backend,
+            database_path: state.database().path().to_string_lossy().to_string(),
         },
+        capture_capabilities: state.audio_runtime().capture().capabilities(),
+        runtime: RuntimeSnapshot {
+            session: state.session_manager().snapshot(),
+            window: state.window_controller().snapshot(),
+        },
+        prompts,
+        knowledge_files,
     })
 }
 
@@ -1024,6 +1062,22 @@ pub fn get_session_detail(
 }
 
 #[tauri::command]
+pub fn list_system_audio_sources(
+    state: State<'_, AppState>,
+) -> Result<SystemAudioSourceListPayload, String> {
+    state
+        .audio_runtime()
+        .capture()
+        .list_system_audio_sources()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_capture_status(state: State<'_, AppState>, _session_id: String) -> Result<CaptureStatePayload, String> {
+    Ok(state.audio_runtime().capture().current_state())
+}
+
+#[tauri::command]
 pub fn start_session(
     state: State<'_, AppState>,
     input: StartSessionInput,
@@ -1035,9 +1089,39 @@ pub fn start_session(
     database
         .append_message(&session.id, "system", "Session started. Transcript capture is ready.")
         .map_err(|error| error.to_string())?;
+    state
+        .session_manager()
+        .mark_active(&session.id, SessionStatus::Active);
 
     load_session_detail(&state, &session.id)?
         .ok_or_else(|| "session detail missing after creation".to_string())
+}
+
+#[tauri::command]
+pub async fn start_system_audio_capture(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: StartSystemAudioCaptureInput,
+) -> Result<CaptureStatePayload, String> {
+    let audio_language = state
+        .database()
+        .get_session_prompt_context(&input.session_id)
+        .map_err(|error| error.to_string())?
+        .map(|context| context.audio_language)
+        .unwrap_or_else(|| "auto".to_string());
+
+    state
+        .audio_runtime()
+        .capture()
+        .start_system_audio_capture(
+            app,
+            state.database(),
+            state.secret_store(),
+            input,
+            audio_language,
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1049,6 +1133,9 @@ pub fn pause_session(
         .database()
         .update_session_status(&session_id, "paused", None)
         .map_err(|error| error.to_string())?;
+    state
+        .session_manager()
+        .mark_status(&session_id, SessionStatus::Paused);
     load_session_detail(&state, &session_id)
 }
 
@@ -1061,7 +1148,24 @@ pub fn resume_session(
         .database()
         .update_session_status(&session_id, "active", None)
         .map_err(|error| error.to_string())?;
+    state
+        .session_manager()
+        .mark_status(&session_id, SessionStatus::Active);
     load_session_detail(&state, &session_id)
+}
+
+#[tauri::command]
+pub async fn stop_system_audio_capture(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<CaptureStatePayload, String> {
+    state
+        .audio_runtime()
+        .capture()
+        .stop_system_audio_capture(&app, Some(&session_id))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1093,6 +1197,9 @@ pub async fn complete_session(
                 .unwrap_or("No summary available yet."),
         )
         .map_err(|error| error.to_string())?;
+    state
+        .session_manager()
+        .clear(&session_id);
 
     if let Err(error) = maybe_generate_and_push_tickets(&state, &session_id, &transcripts).await {
         database
@@ -1151,10 +1258,18 @@ pub async fn run_dynamic_action(
     } else {
         None
     };
+    let (output_language, prompt_snapshot) = load_session_prompt_context(&state, &input.session_id)?;
     let response = if transcripts.is_empty() {
         "I do not have enough transcript yet to answer that. Let the meeting run a little longer or add a manual transcript line first.".to_string()
     } else if let Some(gemini_api_key) = load_gemini_api_key(&state)? {
-        let prompt = build_action_prompt(&input.action, &transcripts, &derived, screen_context);
+        let prompt = build_action_prompt(
+            &input.action,
+            &transcripts,
+            &derived,
+            screen_context,
+            prompt_snapshot.as_deref(),
+            &output_language,
+        );
         let generation_result = match screen_context {
             Some(context) => {
                 generate_text_multimodal(
@@ -1235,6 +1350,7 @@ pub async fn ask_assistant(
         .list_messages(&input.session_id)
         .map_err(|error| error.to_string())?;
     let fallback_response = assistant_response_for_prompt(&input.prompt, &derived);
+    let (output_language, prompt_snapshot) = load_session_prompt_context(&state, &input.session_id)?;
     let response = if transcripts.is_empty() {
         "I do not have enough transcript yet to answer that. Let the meeting run a little longer or add a manual transcript line first.".to_string()
     } else if let Some(gemini_api_key) = load_gemini_api_key(&state)? {
@@ -1244,6 +1360,8 @@ pub async fn ask_assistant(
             &messages,
             &derived,
             input.screen_context.as_ref(),
+            prompt_snapshot.as_deref(),
+            &output_language,
         );
         let generation_result = match input.screen_context.as_ref() {
             Some(context) => {
@@ -1341,6 +1459,159 @@ pub fn mark_generated_ticket_pushed(
     load_session_detail(&state, &input.session_id)
 }
 
+#[tauri::command]
+pub fn get_runtime_state(state: State<'_, AppState>) -> RuntimeSnapshot {
+    RuntimeSnapshot {
+        session: state.session_manager().snapshot(),
+        window: state.window_controller().snapshot(),
+    }
+}
+
+#[tauri::command]
+pub fn set_overlay_open(state: State<'_, AppState>, open: bool) -> RuntimeSnapshot {
+    state.window_controller().set_overlay_open(open);
+    get_runtime_state(state)
+}
+
+#[tauri::command]
+pub fn search_sessions(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<SearchResultPayload>, String> {
+    state
+        .database()
+        .search_sessions(&query, 25)
+        .map_err(|error| error.to_string())
+        .map(|rows| rows.into_iter().map(map_search_result).collect())
+}
+
+#[tauri::command]
+pub fn export_session_markdown(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<ExportSessionPayload>, String> {
+    let Some(detail) = load_session_detail(&state, &session_id)? else {
+        return Ok(None);
+    };
+
+    let markdown = build_session_markdown(&detail);
+    let file_name = format!(
+        "{}.md",
+        detail
+            .session
+            .title
+            .trim()
+            .to_lowercase()
+            .replace(|character: char| !character.is_ascii_alphanumeric(), "-")
+            .split('-')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    );
+    let exports_dir = state.app_dir().join("exports");
+    fs::create_dir_all(&exports_dir).map_err(|error| error.to_string())?;
+    let storage_path = exports_dir.join(&file_name);
+    fs::write(&storage_path, &markdown).map_err(|error| error.to_string())?;
+    let artifact_id = state
+        .database()
+        .insert_session_artifact(
+            &session_id,
+            "export",
+            Some(&storage_path.to_string_lossy()),
+            Some("text/markdown"),
+            None,
+            Some(
+                &serde_json::to_string(&serde_json::json!({
+                    "fileName": file_name,
+                }))
+                .map_err(|error| error.to_string())?,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(Some(ExportSessionPayload {
+        session_id,
+        file_name,
+        markdown,
+        artifact_id: Some(artifact_id),
+    }))
+}
+
+#[tauri::command]
+pub fn list_system_prompts(state: State<'_, AppState>) -> Result<Vec<PromptRecord>, String> {
+    let settings = state
+        .database()
+        .list_settings()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(key, value)| SettingRecord { key, value })
+        .collect::<Vec<_>>();
+    list_prompts(state.database().as_ref(), load_active_prompt_id(&settings))
+}
+
+#[tauri::command]
+pub fn save_system_prompt(
+    state: State<'_, AppState>,
+    input: SavePromptInput,
+) -> Result<Vec<PromptRecord>, String> {
+    let settings = state
+        .database()
+        .list_settings()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(key, value)| SettingRecord { key, value })
+        .collect::<Vec<_>>();
+    let saved = save_prompt(
+        state.database().as_ref(),
+        &input,
+        load_active_prompt_id(&settings),
+    )?;
+
+    if input.make_active.unwrap_or(false) || load_active_prompt_id(&settings).is_none() {
+        state
+            .database()
+            .save_setting("active_prompt_id", &saved.id)
+            .map_err(|error| error.to_string())?;
+    }
+
+    list_system_prompts(state)
+}
+
+#[tauri::command]
+pub fn delete_system_prompt(
+    state: State<'_, AppState>,
+    prompt_id: String,
+) -> Result<Vec<PromptRecord>, String> {
+    state
+        .database()
+        .delete_prompt(&prompt_id)
+        .map_err(|error| error.to_string())?;
+    list_system_prompts(state)
+}
+
+#[tauri::command]
+pub fn list_knowledge_files(state: State<'_, AppState>) -> Result<Vec<KnowledgeFileRecord>, String> {
+    list_files(state.database().as_ref())
+}
+
+#[tauri::command]
+pub fn save_knowledge_file(
+    state: State<'_, AppState>,
+    input: SaveKnowledgeFileInput,
+) -> Result<Vec<KnowledgeFileRecord>, String> {
+    ingest_text_file(state.database().as_ref(), &state.app_dir(), &input)?;
+    list_knowledge_files(state)
+}
+
+#[tauri::command]
+pub fn delete_knowledge_file(
+    state: State<'_, AppState>,
+    knowledge_file_id: String,
+) -> Result<Vec<KnowledgeFileRecord>, String> {
+    delete_file(state.database().as_ref(), &knowledge_file_id)?;
+    list_knowledge_files(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1355,6 +1626,8 @@ mod tests {
             session_id: "session-1".to_string(),
             sequence_no,
             speaker_label: Some("Engineer".to_string()),
+            start_ms: None,
+            end_ms: None,
             text: text.to_string(),
             is_final: true,
             source: "capture".to_string(),
@@ -1389,12 +1662,15 @@ mod tests {
                 source_label: "Shared code editor".to_string(),
                 stale_ms: 0,
             }),
+            Some("Favor concise, risk-aware answers."),
+            "en",
         );
 
         assert!(prompt.contains("Shared screen context"));
         assert!(prompt.contains("Shared code editor"));
         assert!(prompt.contains("[Screen]"));
         assert!(prompt.contains("[S#]"));
+        assert!(prompt.contains("Favor concise, risk-aware answers."));
     }
 
     #[test]

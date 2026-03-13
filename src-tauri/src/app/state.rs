@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::audio::AudioRuntime;
 use crate::db::AppDatabase;
 use crate::permissions::PermissionService;
 use crate::providers::ProviderCatalog;
 use crate::secrets::{AppSecretStore, KeychainSecretStore};
+use crate::session::manager::SessionManager;
+use crate::window::WindowController;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,6 +16,9 @@ pub struct AppState {
     secret_store: Arc<dyn AppSecretStore>,
     permissions: PermissionService,
     providers: ProviderCatalog,
+    audio_runtime: AudioRuntime,
+    session_manager: SessionManager,
+    window_controller: WindowController,
 }
 
 impl AppState {
@@ -20,6 +26,16 @@ impl AppState {
         let database = AppDatabase::open(app_dir.join("cluely-desktop.db"))
             .map_err(|error| error.to_string())?;
         let secret_store = KeychainSecretStore::new("com.cluely.desktop");
+        let session_manager = SessionManager::new();
+        let active_session = database
+            .list_sessions()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|session| matches!(session.status.as_str(), "active" | "paused" | "preparing" | "finishing"));
+        session_manager.restore(
+            active_session.as_ref().map(|session| session.id.clone()),
+            active_session.map(|session| session.status),
+        );
 
         Ok(Self {
             app_dir: Arc::new(app_dir),
@@ -27,6 +43,9 @@ impl AppState {
             secret_store: Arc::new(secret_store),
             permissions: PermissionService::new(),
             providers: ProviderCatalog,
+            audio_runtime: AudioRuntime::new(),
+            session_manager,
+            window_controller: WindowController::new(),
         })
     }
 
@@ -48,5 +67,17 @@ impl AppState {
 
     pub fn providers(&self) -> &ProviderCatalog {
         &self.providers
+    }
+
+    pub fn audio_runtime(&self) -> &AudioRuntime {
+        &self.audio_runtime
+    }
+
+    pub fn session_manager(&self) -> &SessionManager {
+        &self.session_manager
+    }
+
+    pub fn window_controller(&self) -> &WindowController {
+        &self.window_controller
     }
 }

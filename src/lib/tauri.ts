@@ -4,27 +4,44 @@ import {
   askMockAssistant,
   bootstrapMockApp,
   completeMockSession,
+  deleteMockKnowledgeFile,
+  deleteMockPrompt,
+  exportMockSession,
+  getMockRuntimeState,
   getMockSessionDetail,
   getMockSecretValue,
+  listMockKnowledgeFiles,
+  listMockPrompts,
   listMockSessions,
   markMockGeneratedTicketPushed,
   pauseMockSession,
   replaceMockGeneratedTickets,
   resumeMockSession,
   runMockDynamicAction,
+  saveMockKnowledgeFile,
+  saveMockPrompt,
   saveMockSecret,
   saveMockSetting,
+  searchMockSessions,
+  setMockOverlayOpen,
   startMockSession,
 } from "./mock-backend";
 import type {
   AppendTranscriptInput,
   AskSessionInput,
   BootstrapPayload,
+  ExportedSessionPayload,
+  KnowledgeFileRecord,
   MarkGeneratedTicketPushedInput,
+  PromptRecord,
   RunDynamicActionInput,
+  RuntimeSnapshot,
+  SaveKnowledgeFileInput,
   SaveGeneratedTicketsInput,
+  SavePromptInput,
   SaveSecretInput,
   SaveSettingInput,
+  SearchSessionResult,
   SessionDetail,
   SessionRecord,
   SettingRecord,
@@ -157,4 +174,84 @@ export async function markGeneratedTicketPushed(
   }
 
   return invoke<SessionDetail | null>("mark_generated_ticket_pushed", { input });
+}
+
+export async function getRuntimeState(): Promise<RuntimeSnapshot> {
+  if (!isTauriRuntime()) {
+    return getMockRuntimeState();
+  }
+
+  return invoke<RuntimeSnapshot>("get_runtime_state");
+}
+
+export async function setOverlayOpen(open: boolean): Promise<RuntimeSnapshot> {
+  if (!isTauriRuntime()) {
+    return setMockOverlayOpen(open);
+  }
+
+  return invoke<RuntimeSnapshot>("set_overlay_open", { open });
+}
+
+export async function searchSessions(query: string): Promise<SearchSessionResult[]> {
+  if (!isTauriRuntime()) {
+    return searchMockSessions(query);
+  }
+
+  return invoke<SearchSessionResult[]>("search_sessions", { query });
+}
+
+export async function exportSessionMarkdown(sessionId: string): Promise<ExportedSessionPayload | null> {
+  if (!isTauriRuntime()) {
+    return exportMockSession(sessionId);
+  }
+
+  return invoke<ExportedSessionPayload | null>("export_session_markdown", { sessionId });
+}
+
+export async function listPrompts(): Promise<PromptRecord[]> {
+  if (!isTauriRuntime()) {
+    return listMockPrompts();
+  }
+
+  return invoke<PromptRecord[]>("list_system_prompts");
+}
+
+export async function savePrompt(input: SavePromptInput): Promise<PromptRecord[]> {
+  if (!isTauriRuntime()) {
+    return saveMockPrompt(input);
+  }
+
+  return invoke<PromptRecord[]>("save_system_prompt", { input });
+}
+
+export async function deletePrompt(promptId: string): Promise<PromptRecord[]> {
+  if (!isTauriRuntime()) {
+    return deleteMockPrompt(promptId);
+  }
+
+  return invoke<PromptRecord[]>("delete_system_prompt", { promptId });
+}
+
+export async function listKnowledgeFiles(): Promise<KnowledgeFileRecord[]> {
+  if (!isTauriRuntime()) {
+    return listMockKnowledgeFiles();
+  }
+
+  return invoke<KnowledgeFileRecord[]>("list_knowledge_files");
+}
+
+export async function saveKnowledgeFile(input: SaveKnowledgeFileInput): Promise<KnowledgeFileRecord[]> {
+  if (!isTauriRuntime()) {
+    return saveMockKnowledgeFile(input);
+  }
+
+  return invoke<KnowledgeFileRecord[]>("save_knowledge_file", { input });
+}
+
+export async function deleteKnowledgeFile(knowledgeFileId: string): Promise<KnowledgeFileRecord[]> {
+  if (!isTauriRuntime()) {
+    return deleteMockKnowledgeFile(knowledgeFileId);
+  }
+
+  return invoke<KnowledgeFileRecord[]>("delete_knowledge_file", { knowledgeFileId });
 }

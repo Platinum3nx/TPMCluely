@@ -4,15 +4,22 @@ import type {
   BootstrapPayload,
   ChatMessage,
   DynamicActionKey,
+  ExportedSessionPayload,
   GeneratedTicket,
+  KnowledgeFileRecord,
   MarkGeneratedTicketPushedInput,
   MessageAttachment,
   PermissionSnapshot,
+  PromptRecord,
   RunDynamicActionInput,
+  RuntimeSnapshot,
+  SaveKnowledgeFileInput,
   SessionDetail,
   SessionRecord,
+  SearchSessionResult,
   ScreenContextInput,
   SaveGeneratedTicketsInput,
+  SavePromptInput,
   SaveSecretInput,
   SaveSettingInput,
   SecretKey,
@@ -20,6 +27,7 @@ import type {
   StartSessionInput,
   TranscriptSegment,
 } from "./types";
+import { buildSessionMarkdown } from "./export";
 
 const SETTINGS_KEY = "cluely.desktop.settings";
 const SECRETS_KEY = "cluely.desktop.secrets";
@@ -27,6 +35,9 @@ const SESSIONS_KEY = "cluely.desktop.sessions";
 const TRANSCRIPTS_KEY = "cluely.desktop.transcripts";
 const MESSAGES_KEY = "cluely.desktop.messages";
 const GENERATED_TICKETS_KEY = "cluely.desktop.generated-tickets";
+const PROMPTS_KEY = "cluely.desktop.prompts";
+const KNOWLEDGE_FILES_KEY = "cluely.desktop.knowledge-files";
+const RUNTIME_KEY = "cluely.desktop.runtime";
 
 const defaultSettings: SettingRecord[] = [
   { key: "theme", value: "system" },
@@ -62,6 +73,11 @@ interface DerivedSessionArtifacts {
   actionItemsMd: string;
   followUpEmailMd: string;
   notesMd: string;
+}
+
+interface RuntimeState {
+  session: RuntimeSnapshot["session"];
+  window: RuntimeSnapshot["window"];
 }
 
 function nowIso(): string {
@@ -188,6 +204,79 @@ function readGeneratedTickets(): GeneratedTicket[] {
 
 function writeGeneratedTickets(tickets: GeneratedTicket[]): void {
   window.localStorage.setItem(GENERATED_TICKETS_KEY, JSON.stringify(tickets));
+}
+
+function readPrompts(): PromptRecord[] {
+  const raw = window.localStorage.getItem(PROMPTS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as PromptRecord[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePrompts(prompts: PromptRecord[]): void {
+  window.localStorage.setItem(PROMPTS_KEY, JSON.stringify(prompts));
+}
+
+function readKnowledgeFiles(): KnowledgeFileRecord[] {
+  const raw = window.localStorage.getItem(KNOWLEDGE_FILES_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as KnowledgeFileRecord[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeKnowledgeFiles(files: KnowledgeFileRecord[]): void {
+  window.localStorage.setItem(KNOWLEDGE_FILES_KEY, JSON.stringify(files));
+}
+
+function readRuntimeState(): RuntimeState {
+  const raw = window.localStorage.getItem(RUNTIME_KEY);
+  if (!raw) {
+    return {
+      session: {
+        activeSessionId: null,
+        activeStatus: null,
+        lastTransitionAt: null,
+      },
+      window: {
+        overlayOpen: false,
+        lastChangedAt: null,
+      },
+    };
+  }
+
+  try {
+    return JSON.parse(raw) as RuntimeState;
+  } catch {
+    return {
+      session: {
+        activeSessionId: null,
+        activeStatus: null,
+        lastTransitionAt: null,
+      },
+      window: {
+        overlayOpen: false,
+        lastChangedAt: null,
+      },
+    };
+  }
+}
+
+function writeRuntimeState(runtime: RuntimeState): void {
+  window.localStorage.setItem(RUNTIME_KEY, JSON.stringify(runtime));
 }
 
 function getSessionDetail(sessionId: string): SessionDetail | null {
@@ -325,6 +414,9 @@ function appendAssistantMessage(
 export async function bootstrapMockApp(): Promise<BootstrapPayload> {
   const settings = readSettings();
   const secrets = readSecrets();
+  const prompts = await listMockPrompts();
+  const knowledgeFiles = readKnowledgeFiles();
+  const runtime = readRuntimeState();
 
   return {
     appName: "TPMCluely",
@@ -350,7 +442,18 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
       keychainAvailable: false,
       databaseReady: true,
       stateMachineReady: true,
+      windowControllerReady: true,
+      searchReady: true,
+      promptLibraryReady: true,
+      knowledgeLibraryReady: true,
+      exportReady: true,
+      permissionDetectionReady: false,
+      captureBackend: "browser-media",
+      databasePath: "browser-local-storage",
     },
+    runtime,
+    prompts,
+    knowledgeFiles,
   };
 }
 
@@ -386,6 +489,161 @@ export async function getMockSessionDetail(sessionId: string): Promise<SessionDe
   return getSessionDetail(sessionId);
 }
 
+export async function getMockRuntimeState(): Promise<RuntimeSnapshot> {
+  return readRuntimeState();
+}
+
+export async function setMockOverlayOpen(open: boolean): Promise<RuntimeSnapshot> {
+  const current = readRuntimeState();
+  const next: RuntimeSnapshot = {
+    ...current,
+    window: {
+      overlayOpen: open,
+      lastChangedAt: nowIso(),
+    },
+  };
+  writeRuntimeState(next);
+  return next;
+}
+
+export async function searchMockSessions(query: string): Promise<SearchSessionResult[]> {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const details = readSessions().map((session) => getSessionDetail(session.id)).filter(Boolean) as SessionDetail[];
+  return details
+    .map((detail) => {
+      const transcriptMatch = detail.transcripts.find((segment) =>
+        segment.text.toLowerCase().includes(normalizedQuery)
+      );
+      const matchedField =
+        detail.session.finalSummary?.toLowerCase().includes(normalizedQuery)
+          ? "final_summary"
+          : detail.session.decisionsMd?.toLowerCase().includes(normalizedQuery)
+            ? "decisions"
+            : detail.session.actionItemsMd?.toLowerCase().includes(normalizedQuery)
+              ? "action_items"
+              : detail.session.notesMd?.toLowerCase().includes(normalizedQuery)
+                ? "notes"
+                : transcriptMatch
+                  ? "transcript"
+                  : detail.session.title.toLowerCase().includes(normalizedQuery)
+                    ? "title"
+                    : null;
+      if (!matchedField) {
+        return null;
+      }
+
+      const snippetSource =
+        transcriptMatch?.text ??
+        detail.session.finalSummary ??
+        detail.session.decisionsMd ??
+        detail.session.actionItemsMd ??
+        detail.session.notesMd ??
+        detail.session.title;
+
+      return {
+        sessionId: detail.session.id,
+        title: detail.session.title,
+        status: detail.session.status,
+        updatedAt: detail.session.updatedAt,
+        snippet: snippetSource.replace(/\s+/g, " ").slice(0, 220),
+        matchedField,
+        transcriptSequenceNo: transcriptMatch?.sequenceNo ?? null,
+      } satisfies SearchSessionResult;
+    })
+    .filter((result): result is SearchSessionResult => result !== null)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export async function exportMockSession(sessionId: string): Promise<ExportedSessionPayload | null> {
+  const detail = getSessionDetail(sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  return {
+    sessionId,
+    fileName: `${detail.session.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "session"}.md`,
+    markdown: buildSessionMarkdown(detail),
+    artifactId: null,
+  };
+}
+
+export async function listMockPrompts(): Promise<PromptRecord[]> {
+  const activePromptId = readSettings().find((setting) => setting.key === "active_prompt_id")?.value ?? null;
+  return readPrompts().map((prompt) => ({
+    ...prompt,
+    isActive: prompt.id === activePromptId,
+  }));
+}
+
+export async function saveMockPrompt(input: SavePromptInput): Promise<PromptRecord[]> {
+  const prompts = readPrompts();
+  const now = nowIso();
+  const nextPrompt: PromptRecord = {
+    id: input.id ?? createId("prompt"),
+    name: input.name.trim(),
+    content: input.content.trim(),
+    isDefault: input.isDefault ?? false,
+    createdAt: prompts.find((prompt) => prompt.id === input.id)?.createdAt ?? now,
+    updatedAt: now,
+    isActive: false,
+  };
+  const filtered = prompts.filter((prompt) => prompt.id !== nextPrompt.id).map((prompt) => ({
+    ...prompt,
+    isDefault: input.isDefault ? false : prompt.isDefault,
+  }));
+  let nextPrompts = [nextPrompt, ...filtered].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  if (input.makeActive || nextPrompts.length === 1) {
+    nextPrompts = nextPrompts.map((prompt) => ({
+      ...prompt,
+      isActive: prompt.id === nextPrompt.id,
+    }));
+    const settings = readSettings();
+    const nextSettings = settings.filter((setting) => setting.key !== "active_prompt_id");
+    nextSettings.push({ key: "active_prompt_id", value: nextPrompt.id });
+    writeSettings(nextSettings);
+  }
+  writePrompts(nextPrompts);
+  return listMockPrompts();
+}
+
+export async function deleteMockPrompt(promptId: string): Promise<PromptRecord[]> {
+  const prompts = readPrompts().filter((prompt) => prompt.id !== promptId);
+  writePrompts(prompts);
+  const settings = readSettings().filter((setting) => !(setting.key === "active_prompt_id" && setting.value === promptId));
+  writeSettings(settings);
+  return listMockPrompts();
+}
+
+export async function listMockKnowledgeFiles(): Promise<KnowledgeFileRecord[]> {
+  return readKnowledgeFiles();
+}
+
+export async function saveMockKnowledgeFile(input: SaveKnowledgeFileInput): Promise<KnowledgeFileRecord[]> {
+  const files = readKnowledgeFiles();
+  const nextFile: KnowledgeFileRecord = {
+    id: createId("knowledge"),
+    name: input.name,
+    mimeType: input.mimeType,
+    sha256: createId("sha"),
+    excerpt: input.content.replace(/\s+/g, " ").slice(0, 180),
+    createdAt: nowIso(),
+  };
+  const nextFiles = [nextFile, ...files].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  writeKnowledgeFiles(nextFiles);
+  return nextFiles;
+}
+
+export async function deleteMockKnowledgeFile(fileId: string): Promise<KnowledgeFileRecord[]> {
+  const files = readKnowledgeFiles().filter((file) => file.id !== fileId);
+  writeKnowledgeFiles(files);
+  return files;
+}
+
 export async function startMockSession(input: StartSessionInput): Promise<SessionDetail> {
   const now = nowIso();
   const session: SessionRecord = {
@@ -404,6 +662,14 @@ export async function startMockSession(input: StartSessionInput): Promise<Sessio
   };
 
   updateSessionRecord(session);
+  writeRuntimeState({
+    ...readRuntimeState(),
+    session: {
+      activeSessionId: session.id,
+      activeStatus: "active",
+      lastTransitionAt: now,
+    },
+  });
   appendAssistantMessage(session.id, "system", "Session started. Transcript capture is ready.");
 
   return getSessionDetail(session.id)!;
@@ -420,6 +686,14 @@ export async function pauseMockSession(sessionId: string): Promise<SessionDetail
     status: "paused",
     updatedAt: nowIso(),
   });
+  writeRuntimeState({
+    ...readRuntimeState(),
+    session: {
+      activeSessionId: sessionId,
+      activeStatus: "paused",
+      lastTransitionAt: nowIso(),
+    },
+  });
 
   return getSessionDetail(sessionId);
 }
@@ -434,6 +708,14 @@ export async function resumeMockSession(sessionId: string): Promise<SessionDetai
     ...detail.session,
     status: "active",
     updatedAt: nowIso(),
+  });
+  writeRuntimeState({
+    ...readRuntimeState(),
+    session: {
+      activeSessionId: sessionId,
+      activeStatus: "active",
+      lastTransitionAt: nowIso(),
+    },
   });
 
   return getSessionDetail(sessionId);
@@ -452,6 +734,14 @@ export async function completeMockSession(sessionId: string): Promise<SessionDet
     endedAt: nowIso(),
     updatedAt: nowIso(),
     ...derived,
+  });
+  writeRuntimeState({
+    ...readRuntimeState(),
+    session: {
+      activeSessionId: null,
+      activeStatus: "completed",
+      lastTransitionAt: nowIso(),
+    },
   });
   appendAssistantMessage(sessionId, "assistant", derived.finalSummary);
 
