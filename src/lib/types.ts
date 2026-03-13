@@ -53,6 +53,7 @@ export interface SessionRuntimeSnapshot {
 
 export interface WindowRuntimeSnapshot {
   overlayOpen: boolean;
+  stealthActive: boolean;
   lastChangedAt: string | null;
 }
 

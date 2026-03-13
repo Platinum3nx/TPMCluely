@@ -23,6 +23,11 @@ interface SettingsProps {
 
 const toggleSettings = [
   {
+    key: "stealth_mode",
+    title: "Stealth Mode",
+    description: "Hide the overlay from screen capture, screen sharing, and recording tools. The window stays visible locally.",
+  },
+  {
     key: "session_widget_enabled",
     title: "Session Widget",
     description: "Keep the live widget available during active sessions only.",

@@ -402,6 +402,7 @@ function readRuntimeState(): RuntimeState {
       },
       window: {
         overlayOpen: false,
+        stealthActive: false,
         lastChangedAt: null,
       },
     };
@@ -418,6 +419,7 @@ function readRuntimeState(): RuntimeState {
       },
       window: {
         overlayOpen: false,
+        stealthActive: false,
         lastChangedAt: null,
       },
     };
@@ -1035,6 +1037,7 @@ export async function setMockOverlayOpen(open: boolean): Promise<RuntimeSnapshot
   const next: RuntimeSnapshot = {
     ...current,
     window: {
+      ...current.window,
       overlayOpen: open,
       lastChangedAt: nowIso(),
     },

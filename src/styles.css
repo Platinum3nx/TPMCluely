@@ -1049,6 +1049,172 @@ button:disabled {
   text-decoration: underline;
 }
 
+/* ── Stealth overlay: compact center-top bar ── */
+
+.stealth-shell {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 420px;
+  max-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+}
+
+.stealth-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 0 0 18px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: none;
+  background:
+    linear-gradient(165deg, rgba(6, 12, 14, 0.94), rgba(11, 18, 21, 0.88));
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(28px);
+}
+
+.stealth-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(242, 138, 63, 0.72);
+  flex-shrink: 0;
+}
+
+.stealth-dot-live {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(82, 213, 158, 0.5);
+}
+
+.stealth-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90px;
+  flex-shrink: 0;
+}
+
+.stealth-input-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.stealth-input-wrap input {
+  width: 100%;
+  border: 1px solid rgba(167, 208, 205, 0.1);
+  border-radius: 10px;
+  background: rgba(5, 13, 15, 0.8);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 0.8rem;
+}
+
+.stealth-input-wrap input::placeholder {
+  color: rgba(168, 182, 180, 0.5);
+}
+
+.stealth-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.stealth-btn {
+  border: 1px solid rgba(167, 208, 205, 0.1);
+  background: rgba(15, 28, 31, 0.76);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.stealth-btn:hover {
+  border-color: rgba(242, 138, 63, 0.3);
+  color: var(--text);
+}
+
+.stealth-btn-primary {
+  border-color: rgba(242, 138, 63, 0.3);
+  background: linear-gradient(135deg, rgba(242, 138, 63, 0.18), rgba(18, 30, 33, 0.9));
+  color: var(--accent);
+}
+
+.stealth-expandable {
+  margin-top: 4px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(165deg, rgba(6, 12, 14, 0.94), rgba(11, 18, 21, 0.88));
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(28px);
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.stealth-expandable .transcript-feed,
+.stealth-expandable .message-feed {
+  max-height: 160px;
+}
+
+.stealth-expandable .card {
+  padding: 10px;
+  border: none;
+  background: transparent;
+}
+
+.stealth-expandable .card-title {
+  font-size: 0.8rem;
+  margin-bottom: 6px;
+}
+
+.stealth-expandable .section-header {
+  gap: 8px;
+}
+
+.stealth-expandable .section-meta {
+  font-size: 0.72rem;
+}
+
+.stealth-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.stealth-status-row strong {
+  color: var(--text);
+}
+
+.stealth-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.stealth-toolbar button {
+  font-size: 0.72rem;
+  padding: 5px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(167, 208, 205, 0.12);
+  background: rgba(10, 20, 22, 0.94);
+  color: var(--text);
+}
+
 @media (max-width: 1080px) {
   .workspace-shell,
   .panel-grid,

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { AssistantFeed } from "../components/AssistantFeed";
 import { captureModeLabel, getPreflightModeLabel } from "../lib/preflight";
 import type {
@@ -49,6 +50,7 @@ interface SessionWidgetProps {
   screenShareOwnedByCapture: boolean;
   screenShareState: ScreenShareState;
   selectedMicrophoneDeviceId: string;
+  stealthMode?: boolean;
   systemAudioPickerError: string | null;
   systemAudioPickerLoading: boolean;
   systemAudioPickerOpen: boolean;
@@ -192,6 +194,7 @@ export function SessionWidget({
   screenShareOwnedByCapture,
   screenShareState,
   selectedMicrophoneDeviceId,
+  stealthMode = false,
   systemAudioPickerError,
   systemAudioPickerLoading,
   systemAudioPickerOpen,
@@ -243,6 +246,32 @@ export function SessionWidget({
         </button>
       </div>
     );
+  }
+
+  if (overlayOpen && stealthMode) {
+    return <StealthOverlay
+      activeSession={activeSession}
+      askInFlight={askInFlight}
+      assistantError={assistantError}
+      assistantInFlightAction={assistantInFlightAction}
+      captureMode={captureMode}
+      captureState={captureState}
+      canStartSelectedMode={canStartSelectedMode}
+      isCapturing={isCapturing}
+      listeningLabel={listeningLabel}
+      partialTranscript={partialTranscript}
+      status={status}
+      onAsk={onAsk}
+      onCompleteSession={onCompleteSession}
+      onDynamicAction={onDynamicAction}
+      onPauseSession={onPauseSession}
+      onResumeSession={onResumeSession}
+      onRetryAssistantRequest={onRetryAssistantRequest}
+      onStartListening={onStartListening}
+      onStartLiveCapture={onStartLiveCapture}
+      onStopLiveCapture={onStopLiveCapture}
+      onToggleOverlay={onToggleOverlay}
+    />;
   }
 
   if (overlayOpen) {
@@ -620,6 +649,170 @@ export function SessionWidget({
           <AssistantFeed messages={activeSession?.messages ?? []} />
         </div>
       </div>
+    </section>
+  );
+}
+
+interface StealthOverlayProps {
+  activeSession: SessionDetail | null;
+  askInFlight: boolean;
+  assistantError: string | null;
+  assistantInFlightAction: DynamicActionKey | null;
+  captureMode: CaptureMode;
+  captureState: string;
+  canStartSelectedMode: boolean;
+  isCapturing: boolean;
+  listeningLabel: string;
+  partialTranscript: string;
+  status: string;
+  onAsk: (prompt: string) => Promise<void>;
+  onCompleteSession: (sessionId: string) => Promise<void>;
+  onDynamicAction: (action: DynamicActionKey) => Promise<void>;
+  onPauseSession: (sessionId: string) => Promise<void>;
+  onResumeSession: (sessionId: string) => Promise<void>;
+  onRetryAssistantRequest: () => Promise<void>;
+  onStartListening: () => Promise<void>;
+  onStartLiveCapture: () => Promise<void>;
+  onStopLiveCapture: () => Promise<void>;
+  onToggleOverlay: () => Promise<void>;
+}
+
+function StealthOverlay({
+  activeSession,
+  askInFlight,
+  assistantError,
+  assistantInFlightAction,
+  captureMode,
+  captureState,
+  canStartSelectedMode,
+  isCapturing,
+  listeningLabel,
+  partialTranscript,
+  status,
+  onAsk,
+  onCompleteSession,
+  onDynamicAction,
+  onPauseSession,
+  onResumeSession,
+  onRetryAssistantRequest,
+  onStartListening,
+  onStartLiveCapture,
+  onStopLiveCapture,
+  onToggleOverlay,
+}: StealthOverlayProps) {
+  const [prompt, setPrompt] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const isLoading = askInFlight || assistantInFlightAction !== null;
+  const lastMessage = activeSession?.messages.filter((m) => m.role === "assistant").slice(-1)[0];
+
+  if (!activeSession) {
+    return (
+      <section className="stealth-shell">
+        <div className="stealth-bar">
+          <span className="stealth-dot" />
+          <span className="stealth-title">Ready</span>
+          <div className="stealth-input-wrap">
+            <input placeholder="Start a meeting to begin..." disabled />
+          </div>
+          <div className="stealth-actions">
+            <button
+              type="button"
+              className="stealth-btn stealth-btn-primary"
+              disabled={!canStartSelectedMode && captureMode !== "manual"}
+              onClick={() => void onStartListening()}
+            >
+              Start
+            </button>
+            <button type="button" className="stealth-btn" onClick={() => void onToggleOverlay()}>
+              Hide
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="stealth-shell">
+      <div className="stealth-bar">
+        <span className={`stealth-dot ${isCapturing ? "stealth-dot-live" : ""}`} />
+        <button
+          type="button"
+          className="stealth-title"
+          onClick={() => setExpanded((v) => !v)}
+          title="Toggle details"
+          style={{ cursor: "pointer", background: "none", border: "none", padding: 0, textAlign: "left" }}
+        >
+          {listeningLabel}
+        </button>
+        <div className="stealth-input-wrap">
+          <input
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder={isLoading ? "Thinking..." : "Ask anything..."}
+            disabled={isLoading}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && prompt.trim()) {
+                void onAsk(prompt).then(() => setPrompt(""));
+              }
+            }}
+          />
+        </div>
+        <div className="stealth-actions">
+          {captureState === "listening" || captureState === "connecting" ? (
+            <button type="button" className="stealth-btn" onClick={() => void onStopLiveCapture()}>Stop</button>
+          ) : captureMode !== "manual" ? (
+            <button type="button" className="stealth-btn" onClick={() => void onStartLiveCapture()}>Listen</button>
+          ) : null}
+          <button type="button" className="stealth-btn" onClick={() => setExpanded((v) => !v)}>
+            {expanded ? "Less" : "More"}
+          </button>
+          <button type="button" className="stealth-btn" onClick={() => void onToggleOverlay()}>
+            Hide
+          </button>
+        </div>
+      </div>
+
+      {expanded ? (
+        <div className="stealth-expandable">
+          <div className="stealth-status-row">
+            <span>Session:</span>
+            <strong>{activeSession.session.title}</strong>
+            <span>{status === "paused" ? "Paused" : captureModeLabel(captureMode)}</span>
+          </div>
+
+          {partialTranscript ? (
+            <div className="partial-transcript" style={{ marginBottom: 8 }}>
+              <span>Listening live</span>
+              <p>{partialTranscript}</p>
+            </div>
+          ) : null}
+
+          {lastMessage ? (
+            <div className="message-card message-assistant" style={{ marginBottom: 8, fontSize: "0.85rem" }}>
+              <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>Last response</span>
+              <p>{lastMessage.content}</p>
+            </div>
+          ) : null}
+
+          <DynamicActions
+            disabled={!activeSession}
+            inFlightAction={assistantInFlightAction}
+            lastError={assistantError}
+            onRetry={assistantError ? onRetryAssistantRequest : undefined}
+            onRunAction={onDynamicAction}
+          />
+
+          <div className="stealth-toolbar">
+            {status === "paused" ? (
+              <button type="button" onClick={() => void onResumeSession(activeSession.session.id)}>Resume</button>
+            ) : status === "active" ? (
+              <button type="button" onClick={() => void onPauseSession(activeSession.session.id)}>Pause</button>
+            ) : null}
+            <button type="button" onClick={() => void onCompleteSession(activeSession.session.id)}>End</button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

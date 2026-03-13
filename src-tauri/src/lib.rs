@@ -23,8 +23,9 @@ use app::commands::{
     push_generated_ticket, push_generated_tickets, read_secret_value, resume_session,
     rename_session_speaker, run_dynamic_action, run_preflight_checks, save_generated_tickets, save_knowledge_file,
     save_secret, save_setting, save_system_prompt, search_sessions,
-    set_generated_ticket_review_state, set_overlay_open, start_session, start_system_audio_capture,
-    stop_system_audio_capture, update_browser_capture_session, update_generated_ticket_draft,
+    set_generated_ticket_review_state, set_overlay_open, set_stealth_mode, start_session,
+    start_system_audio_capture, stop_system_audio_capture, update_browser_capture_session,
+    update_generated_ticket_draft,
 };
 use app::state::AppState;
 use tauri::Manager;
@@ -78,6 +79,7 @@ pub fn run() {
             mark_generated_ticket_pushed,
             get_runtime_state,
             set_overlay_open,
+            set_stealth_mode,
             search_sessions,
             export_session_markdown,
             list_system_prompts,
