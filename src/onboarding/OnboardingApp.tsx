@@ -106,6 +106,14 @@ export function OnboardingApp({
               <span className="muted-label">Capture Backend</span>
               <strong>{bootstrap.diagnostics.captureBackend}</strong>
             </div>
+            <div>
+              <span className="muted-label">Native System Audio</span>
+              <strong>{bootstrap.captureCapabilities.nativeSystemAudio ? "Available" : "Unavailable"}</strong>
+            </div>
+            <div>
+              <span className="muted-label">Screen Recording</span>
+              <strong>{statusLabel(bootstrap.permissions.screenRecording)}</strong>
+            </div>
           </div>
         </article>
       </div>

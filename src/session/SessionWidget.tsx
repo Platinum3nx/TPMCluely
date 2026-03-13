@@ -1,6 +1,7 @@
 import { AskBar } from "./AskBar";
 import { DynamicActions } from "./DynamicActions";
 import { SessionControls } from "./SessionControls";
+import { SystemAudioSourcePicker } from "./SystemAudioSourcePicker";
 import { TranscriptPanel } from "./TranscriptPanel";
 import type {
   CaptureMode,
@@ -8,12 +9,14 @@ import type {
   DynamicActionKey,
   ScreenShareState,
   SessionDetail,
+  SystemAudioSource,
 } from "../lib/types";
 
 interface SessionWidgetProps {
   activeSession: SessionDetail | null;
   captureError: string | null;
   captureMode: CaptureMode;
+  captureSourceLabel: string | null;
   captureState: string;
   deepgramReady: boolean;
   geminiReady: boolean;
@@ -26,6 +29,10 @@ interface SessionWidgetProps {
   screenShareError: string | null;
   screenShareOwnedByCapture: boolean;
   screenShareState: ScreenShareState;
+  systemAudioPickerError: string | null;
+  systemAudioPickerLoading: boolean;
+  systemAudioPickerOpen: boolean;
+  systemAudioSources: SystemAudioSource[];
   onStartSession: (title: string) => Promise<void>;
   onPauseSession: (sessionId: string) => Promise<void>;
   onResumeSession: (sessionId: string) => Promise<void>;
@@ -34,11 +41,13 @@ interface SessionWidgetProps {
   onDynamicAction: (action: DynamicActionKey) => Promise<void>;
   onAsk: (prompt: string) => Promise<void>;
   onSetCaptureMode: (mode: CaptureMode) => void;
+  onSelectSystemAudioSource: (source: SystemAudioSource) => Promise<void>;
   onStartLiveCapture: () => Promise<void>;
   onStartListening: () => Promise<void>;
   onStartScreenShare: () => Promise<boolean>;
   onStopLiveCapture: () => Promise<void>;
   onStopScreenShare: () => Promise<void>;
+  onSystemAudioPickerClose: () => void;
   onToggleOverlay: () => Promise<void>;
 }
 
@@ -123,6 +132,7 @@ export function SessionWidget({
   activeSession,
   captureError,
   captureMode,
+  captureSourceLabel,
   captureState,
   deepgramReady,
   geminiReady,
@@ -135,6 +145,10 @@ export function SessionWidget({
   screenShareError,
   screenShareOwnedByCapture,
   screenShareState,
+  systemAudioPickerError,
+  systemAudioPickerLoading,
+  systemAudioPickerOpen,
+  systemAudioSources,
   onStartSession,
   onPauseSession,
   onResumeSession,
@@ -143,11 +157,13 @@ export function SessionWidget({
   onDynamicAction,
   onAsk,
   onSetCaptureMode,
+  onSelectSystemAudioSource,
   onStartLiveCapture,
   onStartListening,
   onStartScreenShare,
   onStopLiveCapture,
   onStopScreenShare,
+  onSystemAudioPickerClose,
   onToggleOverlay,
 }: SessionWidgetProps) {
   const status = activeSession?.session.status ?? "idle";
@@ -158,8 +174,17 @@ export function SessionWidget({
 
   if (overlayOpen) {
     return (
-      <section className="cluely-overlay-shell">
-        <div className="cluely-overlay-frame">
+      <>
+        <SystemAudioSourcePicker
+          error={systemAudioPickerError}
+          loading={systemAudioPickerLoading}
+          onClose={onSystemAudioPickerClose}
+          onSelect={(source) => void onSelectSystemAudioSource(source)}
+          open={systemAudioPickerOpen}
+          sources={systemAudioSources}
+        />
+        <section className="cluely-overlay-shell">
+          <div className="cluely-overlay-frame">
           <header className="cluely-overlay-header">
             <div className="cluely-brand-lockup">
               <span className={`cluely-brand-dot ${isCapturing ? "cluely-brand-dot-live" : ""}`} aria-hidden="true" />
@@ -170,6 +195,7 @@ export function SessionWidget({
             </div>
             <div className="cluely-overlay-header-actions">
               <span className={`overlay-pill ${isCapturing ? "overlay-pill-live" : ""}`}>{listeningLabel}</span>
+              {captureSourceLabel ? <span className="overlay-shortcut-badge">{captureSourceLabel}</span> : null}
               <button type="button" className="overlay-ghost-button" onClick={() => void onToggleOverlay()}>
                 Hide
               </button>
@@ -234,6 +260,7 @@ export function SessionWidget({
                   </div>
                   <div className="cluely-live-meta">
                     <span className={`overlay-pill ${isCapturing ? "overlay-pill-live" : ""}`}>{listeningLabel}</span>
+                    {captureSourceLabel ? <span className="overlay-shortcut-badge">{captureSourceLabel}</span> : null}
                     <span className={`overlay-pill ${screenShareState === "active" ? "overlay-pill-live" : ""}`}>
                       {screenStatusLabel(screenShareState)}
                     </span>
@@ -328,13 +355,22 @@ export function SessionWidget({
               </div>
             </section>
           )}
-        </div>
-      </section>
+          </div>
+        </section>
+      </>
     );
   }
 
   return (
     <section className="panel session-grid">
+      <SystemAudioSourcePicker
+        error={systemAudioPickerError}
+        loading={systemAudioPickerLoading}
+        onClose={onSystemAudioPickerClose}
+        onSelect={(source) => void onSelectSystemAudioSource(source)}
+        open={systemAudioPickerOpen}
+        sources={systemAudioSources}
+      />
       <div className="panel-hero">
         <p className="eyebrow">Live Session Widget</p>
         <h2>Live transcript, overlay controls, grounded answers, and auto-generated tickets.</h2>
@@ -350,6 +386,7 @@ export function SessionWidget({
             activeSession={activeSession}
             captureError={captureError}
             captureMode={captureMode}
+            captureSourceLabel={captureSourceLabel}
             captureState={captureState}
             overlayOpen={overlayOpen}
             overlayShortcut={overlayShortcut}

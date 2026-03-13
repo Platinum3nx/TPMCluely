@@ -201,7 +201,11 @@ int32_t tpm_get_microphone_permission_status(void) {
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error API_AVAILABLE(macos(13.0)) {
     if (self.eventCallback != NULL) {
-        self.eventCallback(4, TPMDuplicateCString(error.localizedDescription), self.userData);
+        char *message = TPMDuplicateCString(error.localizedDescription);
+        self.eventCallback(4, message, self.userData);
+        if (message != NULL) {
+            free(message);
+        }
     }
 }
 
@@ -218,7 +222,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         return;
     }
 
-    UInt32 bufferListSize = 0;
+    size_t bufferListSize = 0;
     CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sampleBuffer,
                                                             &bufferListSize,
                                                             NULL,

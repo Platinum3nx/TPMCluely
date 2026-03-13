@@ -5,6 +5,7 @@ interface SessionControlsProps {
   activeSession: SessionDetail | null;
   captureError: string | null;
   captureMode: CaptureMode;
+  captureSourceLabel: string | null;
   captureState: string;
   overlayOpen: boolean;
   overlayShortcut: string;
@@ -28,6 +29,7 @@ export function SessionControls({
   activeSession,
   captureError,
   captureMode,
+  captureSourceLabel,
   captureState,
   overlayOpen,
   overlayShortcut,
@@ -82,6 +84,12 @@ export function SessionControls({
         <span>Live transcript</span>
         <strong>{captureState}</strong>
       </div>
+      {captureSourceLabel ? (
+        <div className="readiness-row">
+          <span>Audio source</span>
+          <strong>{captureSourceLabel}</strong>
+        </div>
+      ) : null}
       <div className="readiness-row">
         <span>Screen context</span>
         <strong>{screenShareState}</strong>

@@ -2,6 +2,8 @@ import type {
   AppendTranscriptInput,
   AskSessionInput,
   BootstrapPayload,
+  CaptureCapabilities,
+  CaptureStatePayload,
   ChatMessage,
   DynamicActionKey,
   ExportedSessionPayload,
@@ -24,7 +26,9 @@ import type {
   SaveSettingInput,
   SecretKey,
   SettingRecord,
+  StartSystemAudioCaptureInput,
   StartSessionInput,
+  SystemAudioSourceListPayload,
   TranscriptSegment,
 } from "./types";
 import { buildSessionMarkdown } from "./export";
@@ -62,6 +66,12 @@ const defaultPermissions: PermissionSnapshot = {
   screenRecording: "unknown",
   microphone: "unknown",
   accessibility: "unknown",
+};
+
+const mockCaptureCapabilities: CaptureCapabilities = {
+  nativeSystemAudio: false,
+  screenRecordingRequired: true,
+  microphoneFallback: true,
 };
 
 type SecretMap = Partial<Record<SecretKey, string>>;
@@ -131,8 +141,26 @@ function readSessions(): SessionRecord[] {
   }
 
   try {
-    const parsed = JSON.parse(raw) as SessionRecord[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw) as Partial<SessionRecord>[];
+    return Array.isArray(parsed)
+      ? parsed.map((session) => ({
+          id: session.id ?? createId("session"),
+          title: session.title ?? "Untitled session",
+          status: session.status ?? "completed",
+          startedAt: session.startedAt ?? null,
+          endedAt: session.endedAt ?? null,
+          captureMode: session.captureMode ?? "manual",
+          captureTargetKind: session.captureTargetKind ?? null,
+          captureTargetLabel: session.captureTargetLabel ?? null,
+          updatedAt: session.updatedAt ?? nowIso(),
+          rollingSummary: session.rollingSummary ?? null,
+          finalSummary: session.finalSummary ?? null,
+          decisionsMd: session.decisionsMd ?? null,
+          actionItemsMd: session.actionItemsMd ?? null,
+          followUpEmailMd: session.followUpEmailMd ?? null,
+          notesMd: session.notesMd ?? null,
+        }))
+      : [];
   } catch {
     return [];
   }
@@ -149,8 +177,21 @@ function readTranscripts(): TranscriptSegment[] {
   }
 
   try {
-    const parsed = JSON.parse(raw) as TranscriptSegment[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw) as Partial<TranscriptSegment>[];
+    return Array.isArray(parsed)
+      ? parsed.map((segment) => ({
+          id: segment.id ?? createId("seg"),
+          sessionId: segment.sessionId ?? "",
+          sequenceNo: segment.sequenceNo ?? 1,
+          speakerLabel: segment.speakerLabel ?? null,
+          startMs: segment.startMs ?? null,
+          endMs: segment.endMs ?? null,
+          text: segment.text ?? "",
+          isFinal: segment.isFinal ?? true,
+          source: segment.source ?? "manual",
+          createdAt: segment.createdAt ?? nowIso(),
+        }))
+      : [];
   } catch {
     return [];
   }
@@ -451,6 +492,7 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
       captureBackend: "browser-media",
       databasePath: "browser-local-storage",
     },
+    captureCapabilities: mockCaptureCapabilities,
     runtime,
     prompts,
     knowledgeFiles,
@@ -652,6 +694,9 @@ export async function startMockSession(input: StartSessionInput): Promise<Sessio
     status: "active",
     startedAt: now,
     endedAt: null,
+    captureMode: "manual",
+    captureTargetKind: null,
+    captureTargetLabel: null,
     updatedAt: now,
     rollingSummary: null,
     finalSummary: null,
@@ -760,6 +805,8 @@ export async function appendMockTranscriptSegment(input: AppendTranscriptInput):
     sessionId: input.sessionId,
     sequenceNo: detail.transcripts.length + 1,
     speakerLabel: input.speakerLabel?.trim() || null,
+    startMs: null,
+    endMs: null,
     text: input.text.trim(),
     isFinal: input.isFinal ?? true,
     source: input.source ?? "manual",
@@ -809,6 +856,46 @@ export async function replaceMockGeneratedTickets(input: SaveGeneratedTicketsInp
   ]);
 
   return getSessionDetail(input.sessionId);
+}
+
+export async function listMockSystemAudioSources(): Promise<SystemAudioSourceListPayload> {
+  return {
+    sources: [],
+    permissionStatus: "restricted",
+    message: "Native system audio capture is unavailable in the browser mock runtime.",
+  };
+}
+
+export async function getMockCaptureStatus(): Promise<CaptureStatePayload> {
+  return {
+    sessionId: null,
+    runtimeState: "unsupported",
+    captureMode: "manual",
+    sourceLabel: null,
+    message: "Native system audio capture is unavailable in the browser mock runtime.",
+    permissionStatus: "restricted",
+    targetKind: null,
+    reconnectAttempt: 0,
+  };
+}
+
+export async function startMockSystemAudioCapture(
+  _input: StartSystemAudioCaptureInput
+): Promise<CaptureStatePayload> {
+  return getMockCaptureStatus();
+}
+
+export async function stopMockSystemAudioCapture(_sessionId: string): Promise<CaptureStatePayload> {
+  return {
+    sessionId: null,
+    runtimeState: "idle",
+    captureMode: "manual",
+    sourceLabel: null,
+    message: null,
+    permissionStatus: "restricted",
+    targetKind: null,
+    reconnectAttempt: 0,
+  };
 }
 
 export async function markMockGeneratedTicketPushed(

@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use crate::app::commands::{
     derive_session_update, map_session, map_transcript, SessionRecordPayload, TranscriptSegmentPayload,
 };
-use crate::db::{AppDatabase, SessionRow};
+use crate::db::AppDatabase;
 use crate::secrets::AppSecretStore;
 
 use super::buffering::{
@@ -197,7 +197,7 @@ struct CaptureServiceInner {
 
 struct ActiveCapture {
     session_id: String,
-    callback_context: Arc<NativeCallbackContext>,
+    _callback_context: Arc<NativeCallbackContext>,
     control_tx: mpsc::UnboundedSender<ControlMessage>,
     task_handle: JoinHandle<()>,
     native_handle: NativeCaptureHandle,
@@ -207,7 +207,6 @@ struct NativeCallbackContext {
     session_id: String,
     app: AppHandle,
     service: CaptureService,
-    source_label: String,
     queue_depth: AtomicUsize,
     dropped_frames: AtomicU64,
     reconnect_attempt: AtomicU64,
@@ -375,7 +374,6 @@ impl CaptureService {
             session_id: input.session_id.clone(),
             app: app.clone(),
             service: self.clone(),
-            source_label: input.source_label.clone(),
             queue_depth: AtomicUsize::new(0),
             dropped_frames: AtomicU64::new(0),
             reconnect_attempt: AtomicU64::new(0),
@@ -428,12 +426,12 @@ impl CaptureService {
             .lock()
             .expect("capture service mutex poisoned")
             .active = Some(ActiveCapture {
-            session_id: input.session_id,
-            callback_context,
-            control_tx,
-            task_handle,
-            native_handle,
-        });
+                session_id: input.session_id,
+                _callback_context: callback_context,
+                control_tx,
+                task_handle,
+                native_handle,
+            });
 
         Ok(payload)
     }
@@ -590,9 +588,8 @@ async fn run_capture_pipeline(
         let (mut writer, mut reader) = connection.split();
         let mut keep_alive = tokio::time::interval(KEEP_ALIVE_INTERVAL);
         let mut utterance = FinalizedUtteranceBuilder::default();
-        let mut should_restart = false;
 
-        loop {
+        let should_restart = loop {
             tokio::select! {
                 control = control_rx.recv() => {
                     match control {
@@ -606,13 +603,12 @@ async fn run_capture_pipeline(
                             return;
                         }
                         Some(ControlMessage::RestartDeepgram) => {
-                            should_restart = true;
                             let _ = writer.send(Message::Text("{\"type\":\"Finalize\"}".to_string())).await;
                             let _ = writer.send(Message::Text("{\"type\":\"CloseStream\"}".to_string())).await;
                             if let Some(final_utterance) = utterance.flush() {
                                 let _ = persist_finalized_utterance(&database, &app, &session_id, final_utterance);
                             }
-                            break;
+                            break true;
                         }
                         Some(ControlMessage::NativeStopped(message)) => {
                             let _ = database.update_session_status(&session_id, "capture_error", None);
@@ -658,7 +654,6 @@ async fn run_capture_pipeline(
                         saturating_decrement(&callback_context.queue_depth);
                         if let Err(error) = writer.send(Message::Binary(chunk.bytes)).await {
                             if reconnect_attempt == 0 {
-                                should_restart = true;
                                 service.emit_health(
                                     &app,
                                     CaptureHealthPayload {
@@ -670,7 +665,7 @@ async fn run_capture_pipeline(
                                         message: format!("Deepgram websocket write failed: {error}"),
                                     },
                                 );
-                                break;
+                                break true;
                             }
                             let _ = database.update_session_status(&session_id, "capture_error", None);
                             service.update_state(
@@ -717,12 +712,10 @@ async fn run_capture_pipeline(
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => {
-                            should_restart = reconnect_attempt == 0;
-                            break;
+                            break reconnect_attempt == 0;
                         }
                         Some(Err(error)) => {
                             if reconnect_attempt == 0 {
-                                should_restart = true;
                                 service.emit_health(
                                     &app,
                                     CaptureHealthPayload {
@@ -734,7 +727,7 @@ async fn run_capture_pipeline(
                                         message: format!("Deepgram websocket disconnected: {error}"),
                                     },
                                 );
-                                break;
+                                break true;
                             }
                             let _ = database.update_session_status(&session_id, "capture_error", None);
                             service.update_state(
@@ -757,7 +750,7 @@ async fn run_capture_pipeline(
                     }
                 }
             }
-        }
+        };
 
         if let Some(final_utterance) = utterance.flush() {
             let _ = persist_finalized_utterance(&database, &app, &session_id, final_utterance);

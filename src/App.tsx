@@ -40,6 +40,8 @@ import type {
   SearchSessionResult,
   ScreenContextInput,
   SettingRecord,
+  SystemAudioSource,
+  CaptureSegmentEventPayload,
 } from "./lib/types";
 import { useLiveTranscription } from "./session/useLiveTranscription";
 
@@ -75,6 +77,19 @@ function isSessionLive(status: SessionRecord["status"]): boolean {
   return ["active", "paused", "preparing", "finishing"].includes(status);
 }
 
+function describePermissionStatus(status: BootstrapPayload["permissions"]["screenRecording"]): string {
+  if (status === "granted") {
+    return "Ready";
+  }
+  if (status === "denied") {
+    return "Blocked";
+  }
+  if (status === "restricted") {
+    return "Restricted";
+  }
+  return "Pending";
+}
+
 function createOverlaySessionTitle(): string {
   const stamp = new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -103,6 +118,11 @@ export default function App() {
   const [selectedCaptureMode, setSelectedCaptureMode] = useState<CaptureMode>("manual");
   const [secretDrafts, setSecretDrafts] = useState(initialSecrets);
   const [savingSecretKey, setSavingSecretKey] = useState<SecretKey | null>(null);
+  const [systemAudioPickerError, setSystemAudioPickerError] = useState<string | null>(null);
+  const [systemAudioPickerLoading, setSystemAudioPickerLoading] = useState(false);
+  const [systemAudioPickerOpen, setSystemAudioPickerOpen] = useState(false);
+  const [systemAudioPickerSessionId, setSystemAudioPickerSessionId] = useState<string | null>(null);
+  const [systemAudioSources, setSystemAudioSources] = useState<SystemAudioSource[]>([]);
 
   const previousWindowFrameRef = useRef<WindowFrame | null>(null);
   const overlayOpenRef = useRef(false);
@@ -123,10 +143,38 @@ export default function App() {
     setActiveSessionDetail(isSessionLive(detail.session.status) ? detail : null);
   }
 
+  function mergeCaptureSegment(detail: SessionDetail | null, payload: CaptureSegmentEventPayload): SessionDetail | null {
+    if (!detail || detail.session.id !== payload.session.id) {
+      return detail;
+    }
+
+    const transcripts = [...detail.transcripts.filter((segment) => segment.id !== payload.segment.id), payload.segment].sort(
+      (left, right) => left.sequenceNo - right.sequenceNo
+    );
+
+    return {
+      ...detail,
+      session: payload.session,
+      transcripts,
+    };
+  }
+
+  function applyNativeCaptureSegment(payload: CaptureSegmentEventPayload) {
+    setSessions((current) =>
+      [payload.session, ...current.filter((session) => session.id !== payload.session.id)].sort((left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt)
+      )
+    );
+    setActiveSessionDetail((current) => mergeCaptureSegment(current, payload));
+    setSelectedSessionDetail((current) => mergeCaptureSegment(current, payload));
+  }
+
   const {
     captureError,
+    captureSourceLabel,
     captureState,
     isCapturing,
+    listAvailableSystemAudioSources,
     partialTranscript,
     screenShareError,
     screenShareOwnedByCapture,
@@ -137,7 +185,7 @@ export default function App() {
     stopScreenShare,
     captureScreenContext,
   } = useLiveTranscription({
-    onFinalTranscript: async (segment) => {
+    onMicrophoneFinalTranscript: async (segment) => {
       if (!activeSessionRef.current) {
         return;
       }
@@ -151,6 +199,7 @@ export default function App() {
       });
       applySessionDetail(detail);
     },
+    onNativeCaptureSegment: applyNativeCaptureSegment,
   });
 
   useEffect(() => {
@@ -419,11 +468,90 @@ export default function App() {
     void updateOverlayWindowLayout();
   }, [activeSessionDetail, overlayOpen, updateOverlayWindowLayout]);
 
-  async function startLiveCaptureForSession() {
+  function closeSystemAudioPicker() {
+    setSystemAudioPickerError(null);
+    setSystemAudioPickerLoading(false);
+    setSystemAudioPickerOpen(false);
+    setSystemAudioPickerSessionId(null);
+    setSystemAudioSources([]);
+  }
+
+  async function openSystemAudioPicker(sessionId: string) {
+    setSystemAudioPickerSessionId(sessionId);
+    setSystemAudioPickerError(null);
+    setSystemAudioPickerLoading(true);
+    setSystemAudioPickerOpen(true);
+    setSystemAudioSources([]);
+
+    try {
+      const payload = await listAvailableSystemAudioSources();
+      setSystemAudioSources(payload.sources);
+
+      if (payload.permissionStatus !== "granted") {
+        setSystemAudioPickerError(
+          payload.message ?? "Screen Recording permission is required before TPMCluely can capture system audio."
+        );
+      }
+    } catch (unknownError) {
+      const message =
+        unknownError instanceof Error ? unknownError.message : "Shareable system audio sources could not be loaded.";
+      setSystemAudioPickerError(message);
+      setError(message);
+    } finally {
+      setSystemAudioPickerLoading(false);
+    }
+  }
+
+  async function handleSelectSystemAudioSource(source: SystemAudioSource) {
+    if (!systemAudioPickerSessionId) {
+      setSystemAudioPickerError("Start or resume a meeting before selecting a system audio source.");
+      return;
+    }
+
+    try {
+      setError(null);
+      setSystemAudioPickerError(null);
+      setSystemAudioPickerLoading(true);
+      await startCapture({
+        language: audioLanguage,
+        mode: "system_audio",
+        sessionId: systemAudioPickerSessionId,
+        source,
+      });
+      closeSystemAudioPicker();
+    } catch (unknownError) {
+      const message =
+        unknownError instanceof Error ? unknownError.message : "Native system audio capture could not start.";
+      setSystemAudioPickerError(message);
+      setError(message);
+    } finally {
+      setSystemAudioPickerLoading(false);
+    }
+  }
+
+  async function startLiveCaptureForSession(sessionId?: string) {
+    const targetSessionId = sessionId ?? activeSessionRef.current?.session.id;
+    if (!targetSessionId) {
+      setError("Start a meeting before enabling live transcription.");
+      return;
+    }
+
     if (selectedCaptureMode !== "microphone" && selectedCaptureMode !== "system_audio") {
       setError("Set capture mode to microphone or system audio to start Deepgram live transcription.");
       return;
     }
+
+    if (selectedCaptureMode === "system_audio") {
+      if (!bootstrap?.captureCapabilities.nativeSystemAudio) {
+        setError("System audio capture is available only in the native macOS desktop runtime.");
+        return;
+      }
+
+      await openSystemAudioPicker(targetSessionId);
+      return;
+    }
+
+    closeSystemAudioPicker();
 
     const apiKey = await getSecretValue("deepgram_api_key");
     if (!apiKey) {
@@ -435,8 +563,9 @@ export default function App() {
     await startCapture({
       apiKey,
       language: audioLanguage,
-      mode: selectedCaptureMode,
+      mode: "microphone",
       speakerLabel: "Meeting",
+      sessionId: targetSessionId,
     });
   }
 
@@ -449,7 +578,7 @@ export default function App() {
 
   async function handleStartSession(title: string) {
     try {
-      await createSessionRecord(title);
+      const detail = await createSessionRecord(title);
       if (sessionWidgetEnabled) {
         await syncOverlayWindow(true);
       }
@@ -457,7 +586,7 @@ export default function App() {
         bootstrap?.secrets.deepgramConfigured &&
         (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
       ) {
-        await startLiveCaptureForSession();
+        await startLiveCaptureForSession(detail.session.id);
       }
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to start session.";
@@ -468,8 +597,9 @@ export default function App() {
   async function handleStartListening() {
     try {
       setError(null);
+      let detail = activeSessionRef.current;
       if (!activeSessionRef.current) {
-        await createSessionRecord(createOverlaySessionTitle());
+        detail = await createSessionRecord(createOverlaySessionTitle());
       }
 
       if (!overlayOpenRef.current) {
@@ -480,7 +610,7 @@ export default function App() {
         return;
       }
 
-      await startLiveCaptureForSession();
+      await startLiveCaptureForSession(detail?.session.id);
     } catch (unknownError) {
       const message = unknownError instanceof Error ? unknownError.message : "Failed to start listening.";
       setError(message);
@@ -489,8 +619,9 @@ export default function App() {
 
   async function handlePauseSession(sessionId: string) {
     if (isCapturing) {
-      await stopCapture();
+      await stopCapture(sessionId);
     }
+    closeSystemAudioPicker();
     const detail = await pauseSession(sessionId);
     applySessionDetail(detail);
   }
@@ -503,14 +634,15 @@ export default function App() {
       bootstrap?.secrets.deepgramConfigured &&
       (selectedCaptureMode === "microphone" || selectedCaptureMode === "system_audio")
     ) {
-      await startLiveCaptureForSession();
+      await startLiveCaptureForSession(detail.session.id);
     }
   }
 
   async function handleCompleteSession(sessionId: string) {
     if (isCapturing) {
-      await stopCapture();
+      await stopCapture(sessionId);
     }
+    closeSystemAudioPicker();
     if (screenShareState === "active" || screenShareState === "error") {
       await stopScreenShare();
     }
@@ -569,11 +701,12 @@ export default function App() {
       return;
     }
 
-    await startLiveCaptureForSession();
+    await startLiveCaptureForSession(activeSessionRef.current.session.id);
   }
 
   async function handleStopLiveCapture() {
-    await stopCapture();
+    closeSystemAudioPicker();
+    await stopCapture(activeSessionRef.current?.session.id);
   }
 
   async function captureScreenContextSafely(): Promise<ScreenContextInput | null> {
@@ -694,6 +827,7 @@ export default function App() {
           activeSession={activeSessionDetail}
           captureError={captureError ?? error}
           captureMode={selectedCaptureMode}
+          captureSourceLabel={captureSourceLabel}
           captureState={captureState}
           deepgramReady={bootstrap.secrets.deepgramConfigured}
           geminiReady={bootstrap.secrets.geminiConfigured}
@@ -706,6 +840,10 @@ export default function App() {
           screenShareError={screenShareError}
           screenShareOwnedByCapture={screenShareOwnedByCapture}
           screenShareState={screenShareState}
+          systemAudioPickerError={systemAudioPickerError}
+          systemAudioPickerLoading={systemAudioPickerLoading}
+          systemAudioPickerOpen={systemAudioPickerOpen}
+          systemAudioSources={systemAudioSources}
           onStartSession={handleStartSession}
           onPauseSession={handlePauseSession}
           onResumeSession={handleResumeSession}
@@ -714,11 +852,13 @@ export default function App() {
           onDynamicAction={handleDynamicAction}
           onAsk={handleAsk}
           onSetCaptureMode={setSelectedCaptureMode}
+          onSelectSystemAudioSource={handleSelectSystemAudioSource}
           onStartLiveCapture={handleStartLiveCapture}
           onStartListening={handleStartListening}
           onStartScreenShare={startScreenShare}
           onStopLiveCapture={handleStopLiveCapture}
           onStopScreenShare={stopScreenShare}
+          onSystemAudioPickerClose={closeSystemAudioPicker}
           onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
         />
       </main>
@@ -777,6 +917,14 @@ export default function App() {
               <strong>
                 {bootstrap.diagnostics.searchReady && bootstrap.diagnostics.exportReady ? "Ready" : "Pending"}
               </strong>
+            </div>
+            <div className="readiness-row">
+              <span>Screen Recording</span>
+              <strong>{describePermissionStatus(bootstrap.permissions.screenRecording)}</strong>
+            </div>
+            <div className="readiness-row">
+              <span>Native System Audio</span>
+              <strong>{bootstrap.captureCapabilities.nativeSystemAudio ? "Available" : "Desktop only"}</strong>
             </div>
           </article>
         </aside>
@@ -837,6 +985,7 @@ export default function App() {
               activeSession={activeSessionDetail}
               captureError={captureError ?? error}
               captureMode={selectedCaptureMode}
+              captureSourceLabel={captureSourceLabel}
               captureState={captureState}
               deepgramReady={bootstrap.secrets.deepgramConfigured}
               geminiReady={bootstrap.secrets.geminiConfigured}
@@ -849,6 +998,10 @@ export default function App() {
               screenShareError={screenShareError}
               screenShareOwnedByCapture={screenShareOwnedByCapture}
               screenShareState={screenShareState}
+              systemAudioPickerError={systemAudioPickerError}
+              systemAudioPickerLoading={systemAudioPickerLoading}
+              systemAudioPickerOpen={systemAudioPickerOpen}
+              systemAudioSources={systemAudioSources}
               onStartSession={handleStartSession}
               onPauseSession={handlePauseSession}
               onResumeSession={handleResumeSession}
@@ -857,11 +1010,13 @@ export default function App() {
               onDynamicAction={handleDynamicAction}
               onAsk={handleAsk}
               onSetCaptureMode={setSelectedCaptureMode}
+              onSelectSystemAudioSource={handleSelectSystemAudioSource}
               onStartLiveCapture={handleStartLiveCapture}
               onStartListening={handleStartListening}
               onStartScreenShare={startScreenShare}
               onStopLiveCapture={handleStopLiveCapture}
               onStopScreenShare={stopScreenShare}
+              onSystemAudioPickerClose={closeSystemAudioPicker}
               onToggleOverlay={() => syncOverlayWindow(!overlayOpenRef.current)}
             />
           ) : null}

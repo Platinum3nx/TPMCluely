@@ -7,12 +7,14 @@ import {
   deleteMockKnowledgeFile,
   deleteMockPrompt,
   exportMockSession,
+  getMockCaptureStatus,
   getMockRuntimeState,
   getMockSessionDetail,
   getMockSecretValue,
   listMockKnowledgeFiles,
   listMockPrompts,
   listMockSessions,
+  listMockSystemAudioSources,
   markMockGeneratedTicketPushed,
   pauseMockSession,
   replaceMockGeneratedTickets,
@@ -24,12 +26,15 @@ import {
   saveMockSetting,
   searchMockSessions,
   setMockOverlayOpen,
+  startMockSystemAudioCapture,
   startMockSession,
+  stopMockSystemAudioCapture,
 } from "./mock-backend";
 import type {
   AppendTranscriptInput,
   AskSessionInput,
   BootstrapPayload,
+  CaptureStatePayload,
   ExportedSessionPayload,
   KnowledgeFileRecord,
   MarkGeneratedTicketPushedInput,
@@ -46,7 +51,9 @@ import type {
   SessionRecord,
   SettingRecord,
   SecretKey,
+  StartSystemAudioCaptureInput,
   StartSessionInput,
+  SystemAudioSourceListPayload,
 } from "./types";
 
 function isTauriRuntime(): boolean {
@@ -102,12 +109,38 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
   return invoke<SessionDetail | null>("get_session_detail", { sessionId });
 }
 
+export async function listSystemAudioSources(): Promise<SystemAudioSourceListPayload> {
+  if (!isTauriRuntime()) {
+    return listMockSystemAudioSources();
+  }
+
+  return invoke<SystemAudioSourceListPayload>("list_system_audio_sources");
+}
+
+export async function getCaptureStatus(sessionId: string): Promise<CaptureStatePayload> {
+  if (!isTauriRuntime()) {
+    return getMockCaptureStatus();
+  }
+
+  return invoke<CaptureStatePayload>("get_capture_status", { sessionId });
+}
+
 export async function startSession(input: StartSessionInput): Promise<SessionDetail> {
   if (!isTauriRuntime()) {
     return startMockSession(input);
   }
 
   return invoke<SessionDetail>("start_session", { input });
+}
+
+export async function startSystemAudioCapture(
+  input: StartSystemAudioCaptureInput
+): Promise<CaptureStatePayload> {
+  if (!isTauriRuntime()) {
+    return startMockSystemAudioCapture(input);
+  }
+
+  return invoke<CaptureStatePayload>("start_system_audio_capture", { input });
 }
 
 export async function pauseSession(sessionId: string): Promise<SessionDetail | null> {
@@ -124,6 +157,14 @@ export async function resumeSession(sessionId: string): Promise<SessionDetail | 
   }
 
   return invoke<SessionDetail | null>("resume_session", { sessionId });
+}
+
+export async function stopSystemAudioCapture(sessionId: string): Promise<CaptureStatePayload> {
+  if (!isTauriRuntime()) {
+    return stopMockSystemAudioCapture(sessionId);
+  }
+
+  return invoke<CaptureStatePayload>("stop_system_audio_capture", { sessionId });
 }
 
 export async function completeSession(sessionId: string): Promise<SessionDetail | null> {
