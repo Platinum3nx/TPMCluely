@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::time::Instant;
 
 use base64::Engine as _;
 use chrono::Utc;
@@ -14,19 +15,25 @@ use crate::audio::{
     SystemAudioSourceListPayload,
 };
 use crate::db::{
-    GeneratedTicketInputRow, GeneratedTicketRow, MessageRow, SearchResultRow,
-    SessionDerivedUpdate, SessionRow, TranscriptRow,
+    GeneratedTicketInputRow, GeneratedTicketRow, MessageRow, SearchResultRow, SessionDerivedUpdate,
+    SessionRow, TranscriptRow,
 };
 use crate::exports::build_session_markdown;
-use crate::knowledge::{delete_file, ingest_text_file, list_files, KnowledgeFileRecord, SaveKnowledgeFileInput};
+use crate::knowledge::{
+    delete_file, ingest_text_file, list_files, KnowledgeFileRecord, SaveKnowledgeFileInput,
+};
 use crate::permissions::PermissionSnapshot;
-use crate::providers::ProviderSnapshot;
+use crate::prompts::{list_prompts, save_prompt, PromptRecord, SavePromptInput};
 use crate::providers::linear::{
-    build_linear_dedupe_key, build_linear_dedupe_marker, choose_canonical_issue, create_issue,
+    build_linear_dedupe_key, build_linear_dedupe_marker,
+    check_connectivity as check_linear_connectivity, choose_canonical_issue, create_issue,
     find_issues_by_marker, LinearIssue, LinearIssueMatch, LinearIssueRequest,
 };
-use crate::providers::llm::{generate_text, generate_text_multimodal, LlmPart};
-use crate::prompts::{list_prompts, save_prompt, PromptRecord, SavePromptInput};
+use crate::providers::llm::{
+    check_connectivity as check_llm_connectivity, generate_text, generate_text_multimodal, LlmPart,
+};
+use crate::providers::stt::check_connectivity as check_stt_connectivity;
+use crate::providers::ProviderSnapshot;
 use crate::screenshot::ScreenshotStore;
 use crate::secrets::SecretPresence;
 use crate::session::manager::SessionRuntimeSnapshot;
@@ -144,6 +151,7 @@ pub struct ChatMessagePayload {
     pub content: String,
     pub context_snapshot: Option<String>,
     pub attachments: Vec<MessageAttachmentPayload>,
+    pub metadata: Option<MessageMetadataPayload>,
     pub created_at: String,
 }
 
@@ -158,6 +166,17 @@ pub struct MessageAttachmentPayload {
     pub height: u32,
     pub source_label: String,
     pub persisted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageMetadataPayload {
+    pub response_mode: Option<String>,
+    pub provider_name: Option<String>,
+    pub provider_error: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub used_screen_context: bool,
+    pub citations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,6 +199,11 @@ pub struct GeneratedTicketPayload {
     pub linear_last_error: Option<String>,
     pub linear_last_attempt_at: Option<String>,
     pub linear_deduped: bool,
+    pub review_state: String,
+    pub approved_at: Option<String>,
+    pub rejected_at: Option<String>,
+    pub rejection_reason: Option<String>,
+    pub reviewed_at: Option<String>,
     pub created_at: String,
 }
 
@@ -211,6 +235,32 @@ pub struct ExportSessionPayload {
     pub file_name: String,
     pub markdown: String,
     pub artifact_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightCheckPayload {
+    pub key: String,
+    pub title: String,
+    pub status: String,
+    pub message: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightModePayload {
+    pub mode: String,
+    pub can_start: bool,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightReportPayload {
+    pub checked_at: String,
+    pub checks: Vec<PreflightCheckPayload>,
+    pub modes: Vec<PreflightModePayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -290,6 +340,27 @@ pub struct SaveGeneratedTicketsInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateGeneratedTicketDraftInput {
+    pub session_id: String,
+    pub idempotency_key: String,
+    pub title: String,
+    pub description: String,
+    pub acceptance_criteria: Vec<String>,
+    #[serde(rename = "type")]
+    pub ticket_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetGeneratedTicketReviewStateInput {
+    pub session_id: String,
+    pub idempotency_key: String,
+    pub review_state: String,
+    pub rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MarkGeneratedTicketPushedInput {
     pub session_id: String,
     pub idempotency_key: String,
@@ -352,6 +423,10 @@ pub(crate) fn map_transcript(row: TranscriptRow) -> TranscriptSegmentPayload {
     }
 }
 
+fn parse_message_metadata(raw: Option<&str>) -> Option<MessageMetadataPayload> {
+    raw.and_then(|value| serde_json::from_str::<MessageMetadataPayload>(value).ok())
+}
+
 fn map_message(row: MessageRow) -> ChatMessagePayload {
     ChatMessagePayload {
         id: row.id,
@@ -364,6 +439,7 @@ fn map_message(row: MessageRow) -> ChatMessagePayload {
             .as_deref()
             .and_then(|attachments| serde_json::from_str(attachments).ok())
             .unwrap_or_default(),
+        metadata: parse_message_metadata(row.metadata_json.as_deref()),
         created_at: row.created_at,
     }
 }
@@ -386,6 +462,11 @@ fn map_generated_ticket(row: GeneratedTicketRow) -> GeneratedTicketPayload {
         linear_last_error: row.linear_last_error,
         linear_last_attempt_at: row.linear_last_attempt_at,
         linear_deduped: row.linear_deduped,
+        review_state: row.review_state,
+        approved_at: row.approved_at,
+        rejected_at: row.rejected_at,
+        rejection_reason: row.rejection_reason,
+        reviewed_at: row.reviewed_at,
         created_at: row.created_at,
     }
 }
@@ -553,7 +634,11 @@ fn format_recent_messages(messages: &[MessageRow]) -> String {
                 message.content.trim(),
                 snapshot.trim()
             ),
-            _ => format!("{}: {}", message.role.to_uppercase(), message.content.trim()),
+            _ => format!(
+                "{}: {}",
+                message.role.to_uppercase(),
+                message.content.trim()
+            ),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -641,7 +726,10 @@ fn build_action_prompt(
     )
 }
 
-fn multimodal_user_parts(prompt: String, screen_context: Option<&ScreenContextInput>) -> Vec<LlmPart> {
+fn multimodal_user_parts(
+    prompt: String,
+    screen_context: Option<&ScreenContextInput>,
+) -> Vec<LlmPart> {
     let mut parts = vec![LlmPart::Text(prompt)];
     if let Some(screen_context) = screen_context {
         parts.push(LlmPart::InlineImage {
@@ -661,6 +749,436 @@ fn screen_context_snapshot(screen_context: &ScreenContextInput) -> String {
         screen_context.height,
         screen_context.stale_ms
     )
+}
+
+fn insufficient_transcript_message() -> String {
+    "I do not have enough transcript yet to answer that. Let the meeting run a little longer or add a manual transcript line first.".to_string()
+}
+
+fn extract_citations(content: &str) -> Vec<String> {
+    let mut citations = Vec::new();
+    let mut seen = HashSet::new();
+
+    if content.contains("[Screen]") && seen.insert("[Screen]".to_string()) {
+        citations.push("[Screen]".to_string());
+    }
+
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    while index + 3 < bytes.len() {
+        if bytes[index] == b'[' && bytes[index + 1] == b'S' {
+            let mut cursor = index + 2;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            if cursor > index + 2 && cursor < bytes.len() && bytes[cursor] == b']' {
+                let citation = content[index..=cursor].to_string();
+                if seen.insert(citation.clone()) {
+                    citations.push(citation);
+                }
+                index = cursor;
+            }
+        }
+        index += 1;
+    }
+
+    citations
+}
+
+fn build_message_metadata(
+    response_mode: &str,
+    provider_name: Option<&str>,
+    provider_error: Option<String>,
+    latency_ms: Option<u64>,
+    used_screen_context: bool,
+    content: &str,
+) -> MessageMetadataPayload {
+    MessageMetadataPayload {
+        response_mode: Some(response_mode.to_string()),
+        provider_name: provider_name.map(str::to_string),
+        provider_error,
+        latency_ms,
+        used_screen_context,
+        citations: extract_citations(content),
+    }
+}
+
+fn metadata_json(metadata: &MessageMetadataPayload) -> Result<String, String> {
+    serde_json::to_string(metadata).map_err(|error| error.to_string())
+}
+
+async fn generate_grounded_response(
+    gemini_api_key: Option<String>,
+    system_prompt: &str,
+    prompt: String,
+    screen_context: Option<&ScreenContextInput>,
+    fallback_response: String,
+) -> (String, MessageMetadataPayload) {
+    let started_at = Instant::now();
+    let requested_screen_context = screen_context.is_some();
+
+    let Some(gemini_api_key) = gemini_api_key else {
+        let metadata = build_message_metadata(
+            "transcript_fallback",
+            Some("Gemini"),
+            Some("Gemini API key is not configured.".to_string()),
+            Some(0),
+            false,
+            &fallback_response,
+        );
+        return (fallback_response, metadata);
+    };
+
+    let generation_result = match screen_context {
+        Some(context) => {
+            generate_text_multimodal(
+                &gemini_api_key,
+                system_prompt,
+                &multimodal_user_parts(prompt, Some(context)),
+            )
+            .await
+        }
+        None => generate_text(&gemini_api_key, system_prompt, &prompt).await,
+    };
+    let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+
+    match generation_result {
+        Ok(reply) if !reply.trim().is_empty() => {
+            let response = reply.trim().to_string();
+            let metadata = build_message_metadata(
+                "gemini",
+                Some("Gemini"),
+                None,
+                Some(latency_ms),
+                requested_screen_context && response.contains("[Screen]"),
+                &response,
+            );
+            (response, metadata)
+        }
+        Ok(_) => {
+            let metadata = build_message_metadata(
+                "transcript_fallback",
+                Some("Gemini"),
+                Some("Gemini returned an empty response.".to_string()),
+                Some(latency_ms),
+                false,
+                &fallback_response,
+            );
+            (fallback_response, metadata)
+        }
+        Err(error) => {
+            let metadata = build_message_metadata(
+                "transcript_fallback",
+                Some("Gemini"),
+                Some(error.to_string()),
+                Some(latency_ms),
+                false,
+                &fallback_response,
+            );
+            (fallback_response, metadata)
+        }
+    }
+}
+
+fn build_preflight_check(
+    key: &str,
+    title: &str,
+    status: &str,
+    message: impl Into<String>,
+    detail: Option<String>,
+) -> PreflightCheckPayload {
+    PreflightCheckPayload {
+        key: key.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        message: message.into(),
+        detail,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreflightInputs {
+    checked_at: String,
+    permissions: PermissionSnapshot,
+    capture_capabilities: CaptureCapabilities,
+    database_ready: bool,
+    keychain_ready: bool,
+    gemini_ready: bool,
+    gemini_connectivity: bool,
+    deepgram_ready: bool,
+    deepgram_connectivity: bool,
+    linear_ready: bool,
+    linear_connectivity: bool,
+    preferred_microphone_device_id: String,
+    screen_context_enabled: bool,
+}
+
+fn build_preflight_report(input: PreflightInputs) -> PreflightReportPayload {
+    let microphone_permission_allows =
+        !matches!(input.permissions.microphone, "denied" | "restricted");
+    let screen_permission_granted = input.permissions.screen_recording == "granted";
+
+    let mut checks = Vec::new();
+    checks.push(build_preflight_check(
+        "desktop_runtime",
+        "Desktop runtime",
+        "ready",
+        "Native TPMCluely desktop runtime detected.",
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "database_ready",
+        "Session database",
+        if input.database_ready {
+            "ready"
+        } else {
+            "blocked"
+        },
+        if input.database_ready {
+            "Local session database is ready."
+        } else {
+            "Local session database is unavailable."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "keychain_ready",
+        "Keychain",
+        if input.keychain_ready {
+            "ready"
+        } else {
+            "warning"
+        },
+        if input.keychain_ready {
+            "Secure secret storage is available."
+        } else {
+            "Keychain could not be verified. Secret-backed features may fail."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "gemini_key",
+        "Gemini key",
+        if input.gemini_ready {
+            "ready"
+        } else {
+            "warning"
+        },
+        if input.gemini_ready {
+            "Gemini API key is configured."
+        } else {
+            "Gemini API key is missing. Ask TPMCluely will use transcript fallback answers."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "gemini_connectivity",
+        "Gemini connectivity",
+        if input.gemini_ready && input.gemini_connectivity {
+            "ready"
+        } else {
+            "warning"
+        },
+        if input.gemini_ready && input.gemini_connectivity {
+            "Gemini connectivity check succeeded."
+        } else if input.gemini_ready {
+            "Gemini connectivity check failed. Transcript fallback answers will be used."
+        } else {
+            "Gemini connectivity was skipped because no key is configured."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "deepgram_key",
+        "Deepgram key",
+        if input.deepgram_ready { "ready" } else { "blocked" },
+        if input.deepgram_ready {
+            "Deepgram API key is configured."
+        } else {
+            "Deepgram API key is missing. Live transcription cannot start in microphone or system-audio mode."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "deepgram_connectivity",
+        "Deepgram connectivity",
+        if input.deepgram_ready && input.deepgram_connectivity {
+            "ready"
+        } else {
+            "blocked"
+        },
+        if input.deepgram_ready && input.deepgram_connectivity {
+            "Deepgram connectivity check succeeded."
+        } else if input.deepgram_ready {
+            "Deepgram connectivity check failed. Live transcription cannot start until this is fixed."
+        } else {
+            "Deepgram connectivity was skipped because no key is configured."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "linear_auth",
+        "Linear auth",
+        if input.linear_ready { "ready" } else { "warning" },
+        if input.linear_ready {
+            "Linear API key and team ID are configured."
+        } else {
+            "Linear API key or team ID is missing. Ticket push will remain local-only until configured."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "linear_team_lookup",
+        "Linear team lookup",
+        if input.linear_ready && input.linear_connectivity {
+            "ready"
+        } else {
+            "warning"
+        },
+        if input.linear_ready && input.linear_connectivity {
+            "Linear team lookup succeeded."
+        } else if input.linear_ready {
+            "Linear team lookup failed. Review-generated tickets will stay local until connectivity is restored."
+        } else {
+            "Linear lookup was skipped because credentials are incomplete."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "microphone_permission",
+        "Microphone permission",
+        match input.permissions.microphone {
+            "granted" => "ready",
+            "denied" | "restricted" => "blocked",
+            _ => "warning",
+        },
+        match input.permissions.microphone {
+            "granted" => "Microphone access is granted.",
+            "denied" => "Microphone access is denied.",
+            "restricted" => "Microphone access is restricted by macOS.",
+            _ => "Microphone access will be requested on first use.",
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "screen_recording_permission",
+        "Screen Recording permission",
+        match input.permissions.screen_recording {
+            "granted" => "ready",
+            "denied" | "restricted" => "blocked",
+            _ => "warning",
+        },
+        match input.permissions.screen_recording {
+            "granted" => "Screen Recording access is granted.",
+            "denied" => "Screen Recording access is denied.",
+            "restricted" => "Screen Recording access is restricted by macOS.",
+            _ => "Screen Recording access has not been granted yet.",
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "preferred_microphone",
+        "Preferred microphone",
+        if input.preferred_microphone_device_id.trim().is_empty() {
+            "warning"
+        } else {
+            "ready"
+        },
+        if input.preferred_microphone_device_id.trim().is_empty() {
+            "No preferred microphone is saved yet. Select one in the live session before the meeting starts."
+        } else {
+            "A preferred microphone is saved and will be verified in the live session UI."
+        },
+        if input.preferred_microphone_device_id.trim().is_empty() {
+            None
+        } else {
+            Some(input.preferred_microphone_device_id.clone())
+        },
+    ));
+    checks.push(build_preflight_check(
+        "system_audio_capability",
+        "System audio capture",
+        if input.capture_capabilities.native_system_audio {
+            if screen_permission_granted {
+                "ready"
+            } else {
+                "blocked"
+            }
+        } else {
+            "blocked"
+        },
+        if input.capture_capabilities.native_system_audio && screen_permission_granted {
+            "Native system-audio capture is available."
+        } else if input.capture_capabilities.native_system_audio {
+            "System-audio capture is available once Screen Recording is granted."
+        } else {
+            "System-audio capture is only available in the macOS Tauri desktop runtime."
+        },
+        None,
+    ));
+    checks.push(build_preflight_check(
+        "screen_context",
+        "Screen context",
+        if !input.screen_context_enabled {
+            "warning"
+        } else if screen_permission_granted {
+            "ready"
+        } else {
+            "blocked"
+        },
+        if !input.screen_context_enabled {
+            "Screen context is disabled in settings. Ask TPMCluely will remain transcript-only."
+        } else if screen_permission_granted {
+            "Screen context can be captured when you choose to share a screen."
+        } else {
+            "Screen context is enabled but Screen Recording permission is not ready."
+        },
+        None,
+    ));
+
+    let microphone_ready = input.database_ready
+        && input.deepgram_ready
+        && input.deepgram_connectivity
+        && microphone_permission_allows;
+    let system_audio_ready = input.database_ready
+        && input.deepgram_ready
+        && input.deepgram_connectivity
+        && input.capture_capabilities.native_system_audio
+        && screen_permission_granted;
+
+    PreflightReportPayload {
+        checked_at: input.checked_at,
+        checks,
+        modes: vec![
+            PreflightModePayload {
+                mode: "manual".to_string(),
+                can_start: input.database_ready,
+                summary: if input.database_ready {
+                    "Manual mode is ready. You can start the meeting even if providers are still being configured.".to_string()
+                } else {
+                    "Manual mode is blocked until the local database is ready.".to_string()
+                },
+            },
+            PreflightModePayload {
+                mode: "microphone".to_string(),
+                can_start: microphone_ready,
+                summary: if microphone_ready {
+                    "Microphone capture is ready for a real meeting.".to_string()
+                } else {
+                    "Microphone capture is blocked until Deepgram is configured and microphone permission is available.".to_string()
+                },
+            },
+            PreflightModePayload {
+                mode: "system_audio".to_string(),
+                can_start: system_audio_ready,
+                summary: if system_audio_ready {
+                    "System-audio capture is ready once you choose a source.".to_string()
+                } else {
+                    "System-audio capture is blocked until Deepgram, native capture, and Screen Recording are ready.".to_string()
+                },
+            },
+        ],
+    }
 }
 
 fn build_screen_attachment(
@@ -799,7 +1317,10 @@ fn append_system_message(state: &AppState, session_id: &str, content: &str) -> R
     Ok(())
 }
 
-async fn generate_session_tickets_inner(state: &AppState, session_id: &str) -> Result<usize, String> {
+async fn generate_session_tickets_inner(
+    state: &AppState,
+    session_id: &str,
+) -> Result<usize, String> {
     let database = state.database();
     let session = database
         .get_session(session_id)
@@ -813,11 +1334,13 @@ async fn generate_session_tickets_inner(state: &AppState, session_id: &str) -> R
     let existing = database
         .list_generated_tickets(session_id)
         .map_err(|error| error.to_string())?;
-    if existing
-        .iter()
-        .any(|ticket| ticket.linear_push_state == "pushed" && ticket.linear_issue_url.is_some())
-    {
-        let message = "Tickets already linked to Linear cannot be regenerated for this session.";
+    if existing.iter().any(|ticket| {
+        ticket.linear_push_state == "pushed"
+            || ticket.review_state != "draft"
+            || ticket.reviewed_at.is_some()
+    }) {
+        let message =
+            "Ticket regeneration is only allowed while all generated tickets remain unpushed drafts.";
         database
             .update_session_ticket_generation(session_id, "failed", Some(message), None)
             .map_err(|error| error.to_string())?;
@@ -828,7 +1351,8 @@ async fn generate_session_tickets_inner(state: &AppState, session_id: &str) -> R
     let gemini_api_key = match load_gemini_api_key(state)? {
         Some(key) => key,
         None => {
-            let message = "Gemini API key is required before TPMCluely can generate tickets.".to_string();
+            let message =
+                "Gemini API key is required before TPMCluely can generate tickets.".to_string();
             database
                 .update_session_ticket_generation(session_id, "failed", Some(&message), None)
                 .map_err(|error| error.to_string())?;
@@ -860,7 +1384,8 @@ async fn generate_session_tickets_inner(state: &AppState, session_id: &str) -> R
 
     if generated.raw_ticket_count > 0 && generated.tickets.is_empty() {
         let message =
-            "Ticket generation returned output, but none of the tickets were valid enough to keep.".to_string();
+            "Ticket generation returned output, but none of the tickets were valid enough to keep."
+                .to_string();
         database
             .update_session_ticket_generation(session_id, "failed", Some(&message), None)
             .map_err(|error| error.to_string())?;
@@ -904,7 +1429,10 @@ async fn generate_session_tickets_inner(state: &AppState, session_id: &str) -> R
         append_system_message(
             state,
             session_id,
-            &format!("Generated {} ticket(s) from this meeting transcript.", generated.tickets.len()),
+            &format!(
+                "Generated {} draft ticket(s) from this meeting transcript. Review and approve them before pushing to Linear.",
+                generated.tickets.len()
+            ),
         )?;
     }
 
@@ -965,6 +1493,10 @@ async fn push_generated_ticket_inner(
         });
     }
 
+    if !matches!(ticket.review_state.as_str(), "approved" | "push_failed") {
+        return Err("Approve the ticket draft before pushing it to Linear.".to_string());
+    }
+
     let Some(linear_config) = load_linear_config(state)? else {
         let message = "Linear API key and team ID are required before TPMCluely can push tickets.";
         let attempted_at = Utc::now().to_rfc3339();
@@ -979,13 +1511,24 @@ async fn push_generated_ticket_inner(
 
     let linear_dedupe_key = build_linear_dedupe_key(session_id, idempotency_key);
     let marker = build_linear_dedupe_marker(&linear_dedupe_key);
-    let remote_matches = match find_issues_by_marker(&linear_config.api_key, &linear_config.team_id, &marker).await {
+    let remote_matches = match find_issues_by_marker(
+        &linear_config.api_key,
+        &linear_config.team_id,
+        &marker,
+    )
+    .await
+    {
         Ok(matches) => matches,
         Err(error) => {
             let message = error.to_string();
             let attempted_at = Utc::now().to_rfc3339();
             database
-                .mark_generated_ticket_push_failed(session_id, idempotency_key, &message, &attempted_at)
+                .mark_generated_ticket_push_failed(
+                    session_id,
+                    idempotency_key,
+                    &message,
+                    &attempted_at,
+                )
                 .map_err(|db_error| db_error.to_string())?;
             return Ok(TicketPushOutcome {
                 status: TicketPushStatus::Failed,
@@ -1037,7 +1580,12 @@ async fn push_generated_ticket_inner(
             let message = error.to_string();
             let attempted_at = Utc::now().to_rfc3339();
             database
-                .mark_generated_ticket_push_failed(session_id, idempotency_key, &message, &attempted_at)
+                .mark_generated_ticket_push_failed(
+                    session_id,
+                    idempotency_key,
+                    &message,
+                    &attempted_at,
+                )
                 .map_err(|db_error| db_error.to_string())?;
             return Ok(TicketPushOutcome {
                 status: TicketPushStatus::Failed,
@@ -1063,11 +1611,12 @@ async fn push_generated_tickets_inner(
         .map_err(|error| error.to_string())?;
     let mut summary = TicketPushSummary::default();
 
-    for ticket in tickets
-        .iter()
-        .filter(|ticket| ticket.linear_push_state == "pending" || ticket.linear_push_state == "failed")
-    {
-        let outcome = push_generated_ticket_inner(state, session_id, &ticket.idempotency_key).await?;
+    for ticket in tickets.iter().filter(|ticket| {
+        (ticket.linear_push_state == "pending" || ticket.linear_push_state == "failed")
+            && matches!(ticket.review_state.as_str(), "approved" | "push_failed")
+    }) {
+        let outcome =
+            push_generated_ticket_inner(state, session_id, &ticket.idempotency_key).await?;
         let _ = outcome.warning.as_deref();
 
         match outcome.status {
@@ -1090,12 +1639,20 @@ async fn push_generated_tickets_inner(
     Ok(summary)
 }
 
-fn load_gemini_api_key(state: &AppState) -> Result<Option<String>, String> {
+fn load_nonempty_secret(state: &AppState, key: &str) -> Result<Option<String>, String> {
     state
         .secret_store()
-        .read_secret("gemini_api_key")
+        .read_secret(key)
         .map_err(|error| error.to_string())
-        .map(|value| value.filter(|key| !key.trim().is_empty()))
+        .map(|value| value.filter(|secret| !secret.trim().is_empty()))
+}
+
+fn load_gemini_api_key(state: &AppState) -> Result<Option<String>, String> {
+    load_nonempty_secret(state, "gemini_api_key")
+}
+
+fn load_deepgram_api_key(state: &AppState) -> Result<Option<String>, String> {
+    load_nonempty_secret(state, "deepgram_api_key")
 }
 
 fn load_active_prompt_id(settings: &[SettingRecord]) -> Option<&str> {
@@ -1136,7 +1693,10 @@ fn map_search_result(row: SearchResultRow) -> SearchResultPayload {
     }
 }
 
-fn load_session_detail(state: &AppState, session_id: &str) -> Result<Option<SessionDetailPayload>, String> {
+fn load_session_detail(
+    state: &AppState,
+    session_id: &str,
+) -> Result<Option<SessionDetailPayload>, String> {
     let database = state.database();
     let session = database
         .get_session(session_id)
@@ -1186,7 +1746,10 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
         .map(|(key, value)| SettingRecord { key, value })
         .collect::<Vec<_>>();
     let database_ready = state.database().healthcheck().is_ok();
-    let keychain_available = state.secret_store().read_secret("__tpmcluely_healthcheck__").is_ok();
+    let keychain_available = state
+        .secret_store()
+        .read_secret("__tpmcluely_healthcheck__")
+        .is_ok();
     let prompts = list_prompts(state.database().as_ref(), load_active_prompt_id(&settings))?;
     let knowledge_files = list_files(state.database().as_ref())?;
 
@@ -1230,6 +1793,63 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
 }
 
 #[tauri::command]
+pub async fn run_preflight_checks(
+    state: State<'_, AppState>,
+) -> Result<PreflightReportPayload, String> {
+    let state = state.inner().clone();
+    let permissions = state.permissions().snapshot();
+    let settings = load_settings_map(&state)?;
+    let capture_capabilities = state.audio_runtime().capture().capabilities();
+
+    let database_ready = state.database().healthcheck().is_ok();
+    let keychain_ready = state.secret_store().presence().is_ok();
+    let gemini_api_key = load_gemini_api_key(&state)?;
+    let deepgram_api_key = load_deepgram_api_key(&state)?;
+    let linear_config = load_linear_config(&state)?;
+
+    let gemini_ready = gemini_api_key.is_some();
+    let deepgram_ready = deepgram_api_key.is_some();
+    let linear_ready = linear_config.is_some();
+
+    let gemini_connectivity = match gemini_api_key.as_deref() {
+        Some(api_key) => check_llm_connectivity(api_key).await.is_ok(),
+        None => false,
+    };
+    let deepgram_connectivity = match deepgram_api_key.as_deref() {
+        Some(api_key) => check_stt_connectivity(api_key, "auto").await.is_ok(),
+        None => false,
+    };
+    let linear_connectivity = match linear_config.as_ref() {
+        Some(config) => check_linear_connectivity(&config.api_key, &config.team_id)
+            .await
+            .is_ok(),
+        None => false,
+    };
+
+    let preferred_microphone_device_id = settings
+        .get("preferred_microphone_device_id")
+        .cloned()
+        .unwrap_or_default();
+    let screen_context_enabled = setting_enabled(&settings, "screen_context_enabled", true);
+
+    Ok(build_preflight_report(PreflightInputs {
+        checked_at: Utc::now().to_rfc3339(),
+        permissions,
+        capture_capabilities,
+        database_ready,
+        keychain_ready,
+        gemini_ready,
+        gemini_connectivity,
+        deepgram_ready,
+        deepgram_connectivity,
+        linear_ready,
+        linear_connectivity,
+        preferred_microphone_device_id,
+        screen_context_enabled,
+    }))
+}
+
+#[tauri::command]
 pub fn save_setting(
     state: State<'_, AppState>,
     input: SaveSettingInput,
@@ -1259,7 +1879,10 @@ pub fn save_secret(state: State<'_, AppState>, input: SaveSecretInput) -> Result
 }
 
 #[tauri::command]
-pub fn read_secret_value(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+pub fn read_secret_value(
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<Option<String>, String> {
     state
         .secret_store()
         .read_secret(&key)
@@ -1295,7 +1918,10 @@ pub fn list_system_audio_sources(
 }
 
 #[tauri::command]
-pub fn get_capture_status(state: State<'_, AppState>, _session_id: String) -> Result<CaptureStatePayload, String> {
+pub fn get_capture_status(
+    state: State<'_, AppState>,
+    _session_id: String,
+) -> Result<CaptureStatePayload, String> {
     Ok(state.audio_runtime().capture().current_state())
 }
 
@@ -1309,7 +1935,11 @@ pub fn start_session(
         .create_session(input.title.trim())
         .map_err(|error| error.to_string())?;
     database
-        .append_message(&session.id, "system", "Session started. Transcript capture is ready.")
+        .append_message(
+            &session.id,
+            "system",
+            "Session started. Transcript capture is ready.",
+        )
         .map_err(|error| error.to_string())?;
     state
         .session_manager()
@@ -1419,29 +2049,14 @@ pub async fn complete_session(
                 .unwrap_or("No summary available yet."),
         )
         .map_err(|error| error.to_string())?;
-    state
-        .session_manager()
-        .clear(&session_id);
+    state.session_manager().clear(&session_id);
 
     let settings = load_settings_map(&state)?;
     let should_auto_generate = setting_enabled(&settings, "ticket_generation_enabled", true)
         && setting_enabled(&settings, "auto_generate_tickets", true);
-    let should_auto_push = setting_enabled(&settings, "auto_push_linear", true);
 
     if should_auto_generate {
-        match generate_session_tickets_inner(&state, &session_id).await {
-            Ok(_) if should_auto_push => {
-                if let Err(error) = push_generated_tickets_inner(&state, &session_id).await {
-                    append_system_message(
-                        &state,
-                        &session_id,
-                        &format!("Linear sync could not finish automatically: {error}"),
-                    )?;
-                }
-            }
-            Ok(_) => {}
-            Err(_) => {}
-        }
+        let _ = generate_session_tickets_inner(&state, &session_id).await;
     }
 
     load_session_detail(&state, &session_id)
@@ -1521,10 +2136,20 @@ pub async fn run_dynamic_action(
     } else {
         None
     };
-    let (output_language, prompt_snapshot) = load_session_prompt_context(&state, &input.session_id)?;
-    let response = if transcripts.is_empty() {
-        "I do not have enough transcript yet to answer that. Let the meeting run a little longer or add a manual transcript line first.".to_string()
-    } else if let Some(gemini_api_key) = load_gemini_api_key(&state)? {
+    let (output_language, prompt_snapshot) =
+        load_session_prompt_context(&state, &input.session_id)?;
+    let (response, metadata) = if transcripts.is_empty() {
+        let response = insufficient_transcript_message();
+        let metadata = build_message_metadata(
+            "insufficient_transcript",
+            Some("Transcript"),
+            None,
+            Some(0),
+            false,
+            &response,
+        );
+        (response, metadata)
+    } else {
         let prompt = build_action_prompt(
             &input.action,
             &transcripts,
@@ -1533,23 +2158,14 @@ pub async fn run_dynamic_action(
             prompt_snapshot.as_deref(),
             &output_language,
         );
-        let generation_result = match screen_context {
-            Some(context) => {
-                generate_text_multimodal(
-                    &gemini_api_key,
-                    ACTION_ASSISTANT_SYSTEM_PROMPT,
-                    &multimodal_user_parts(prompt, Some(context)),
-                )
-                .await
-            }
-            None => generate_text(&gemini_api_key, ACTION_ASSISTANT_SYSTEM_PROMPT, &prompt).await,
-        };
-        match generation_result {
-            Ok(reply) if !reply.trim().is_empty() => reply.trim().to_string(),
-            _ => fallback_response,
-        }
-    } else {
-        fallback_response
+        generate_grounded_response(
+            load_gemini_api_key(&state)?,
+            ACTION_ASSISTANT_SYSTEM_PROMPT,
+            prompt,
+            screen_context,
+            fallback_response,
+        )
+        .await
     };
 
     database
@@ -1565,10 +2181,9 @@ pub async fn run_dynamic_action(
     let assistant_attachments_json = if assistant_attachments.is_empty() {
         None
     } else {
-        Some(
-            serde_json::to_string(&assistant_attachments).map_err(|error| error.to_string())?,
-        )
+        Some(serde_json::to_string(&assistant_attachments).map_err(|error| error.to_string())?)
     };
+    let assistant_metadata_json = metadata_json(&metadata)?;
     database
         .append_message_with_metadata(
             &input.session_id,
@@ -1576,6 +2191,7 @@ pub async fn run_dynamic_action(
             &response,
             screen_context.map(screen_context_snapshot).as_deref(),
             assistant_attachments_json.as_deref(),
+            Some(&assistant_metadata_json),
             Some(&assistant_message_id),
         )
         .map_err(|error| error.to_string())?;
@@ -1595,10 +2211,7 @@ pub async fn ask_assistant(
         .map_err(|error| error.to_string())?;
     let derived = derive_session_update(&transcripts);
 
-    let user_context_snapshot = input
-        .screen_context
-        .as_ref()
-        .map(screen_context_snapshot);
+    let user_context_snapshot = input.screen_context.as_ref().map(screen_context_snapshot);
     database
         .append_message_with_metadata(
             &input.session_id,
@@ -1607,16 +2220,27 @@ pub async fn ask_assistant(
             user_context_snapshot.as_deref(),
             None,
             None,
+            None,
         )
         .map_err(|error| error.to_string())?;
     let messages = database
         .list_messages(&input.session_id)
         .map_err(|error| error.to_string())?;
     let fallback_response = assistant_response_for_prompt(&input.prompt, &derived);
-    let (output_language, prompt_snapshot) = load_session_prompt_context(&state, &input.session_id)?;
-    let response = if transcripts.is_empty() {
-        "I do not have enough transcript yet to answer that. Let the meeting run a little longer or add a manual transcript line first.".to_string()
-    } else if let Some(gemini_api_key) = load_gemini_api_key(&state)? {
+    let (output_language, prompt_snapshot) =
+        load_session_prompt_context(&state, &input.session_id)?;
+    let (response, metadata) = if transcripts.is_empty() {
+        let response = insufficient_transcript_message();
+        let metadata = build_message_metadata(
+            "insufficient_transcript",
+            Some("Transcript"),
+            None,
+            Some(0),
+            false,
+            &response,
+        );
+        (response, metadata)
+    } else {
         let prompt = build_question_prompt(
             &input.prompt,
             &transcripts,
@@ -1626,23 +2250,14 @@ pub async fn ask_assistant(
             prompt_snapshot.as_deref(),
             &output_language,
         );
-        let generation_result = match input.screen_context.as_ref() {
-            Some(context) => {
-                generate_text_multimodal(
-                    &gemini_api_key,
-                    MEETING_ASSISTANT_SYSTEM_PROMPT,
-                    &multimodal_user_parts(prompt, Some(context)),
-                )
-                .await
-            }
-            None => generate_text(&gemini_api_key, MEETING_ASSISTANT_SYSTEM_PROMPT, &prompt).await,
-        };
-        match generation_result {
-            Ok(reply) if !reply.trim().is_empty() => reply.trim().to_string(),
-            _ => fallback_response,
-        }
-    } else {
-        fallback_response
+        generate_grounded_response(
+            load_gemini_api_key(&state)?,
+            MEETING_ASSISTANT_SYSTEM_PROMPT,
+            prompt,
+            input.screen_context.as_ref(),
+            fallback_response,
+        )
+        .await
     };
     let assistant_message_id = Uuid::new_v4().to_string();
     let assistant_attachments = maybe_store_screen_artifact(
@@ -1654,10 +2269,9 @@ pub async fn ask_assistant(
     let assistant_attachments_json = if assistant_attachments.is_empty() {
         None
     } else {
-        Some(
-            serde_json::to_string(&assistant_attachments).map_err(|error| error.to_string())?,
-        )
+        Some(serde_json::to_string(&assistant_attachments).map_err(|error| error.to_string())?)
     };
+    let assistant_metadata_json = metadata_json(&metadata)?;
     database
         .append_message_with_metadata(
             &input.session_id,
@@ -1665,6 +2279,7 @@ pub async fn ask_assistant(
             &response,
             user_context_snapshot.as_deref(),
             assistant_attachments_json.as_deref(),
+            Some(&assistant_metadata_json),
             Some(&assistant_message_id),
         )
         .map_err(|error| error.to_string())?;
@@ -1696,6 +2311,53 @@ pub fn save_generated_tickets(
     state
         .database()
         .replace_generated_tickets(&input.session_id, &ticket_rows)
+        .map_err(|error| error.to_string())?;
+
+    load_session_detail(&state, &input.session_id)
+}
+
+#[tauri::command]
+pub fn update_generated_ticket_draft(
+    state: State<'_, AppState>,
+    input: UpdateGeneratedTicketDraftInput,
+) -> Result<Option<SessionDetailPayload>, String> {
+    let acceptance_criteria =
+        serde_json::to_string(&input.acceptance_criteria).map_err(|error| error.to_string())?;
+    state
+        .database()
+        .update_generated_ticket_draft(
+            &input.session_id,
+            &input.idempotency_key,
+            &input.title,
+            &input.description,
+            &acceptance_criteria,
+            &input.ticket_type,
+        )
+        .map_err(|error| error.to_string())?;
+
+    load_session_detail(&state, &input.session_id)
+}
+
+#[tauri::command]
+pub fn set_generated_ticket_review_state(
+    state: State<'_, AppState>,
+    input: SetGeneratedTicketReviewStateInput,
+) -> Result<Option<SessionDetailPayload>, String> {
+    if !matches!(
+        input.review_state.as_str(),
+        "draft" | "approved" | "rejected"
+    ) {
+        return Err("Unsupported review state transition requested.".to_string());
+    }
+
+    state
+        .database()
+        .set_generated_ticket_review_state(
+            &input.session_id,
+            &input.idempotency_key,
+            &input.review_state,
+            input.rejection_reason.as_deref(),
+        )
         .map_err(|error| error.to_string())?;
 
     load_session_detail(&state, &input.session_id)
@@ -1854,7 +2516,9 @@ pub fn delete_system_prompt(
 }
 
 #[tauri::command]
-pub fn list_knowledge_files(state: State<'_, AppState>) -> Result<Vec<KnowledgeFileRecord>, String> {
+pub fn list_knowledge_files(
+    state: State<'_, AppState>,
+) -> Result<Vec<KnowledgeFileRecord>, String> {
     list_files(state.database().as_ref())
 }
 
@@ -1879,10 +2543,13 @@ pub fn delete_knowledge_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_question_prompt, format_screen_context_note, map_message, MessageAttachmentPayload,
-        ScreenContextInput,
+        build_preflight_report, build_question_prompt, extract_citations,
+        format_screen_context_note, generate_grounded_response, map_message,
+        MessageAttachmentPayload, PreflightInputs, ScreenContextInput,
     };
+    use crate::audio::CaptureCapabilities;
     use crate::db::{MessageRow, SessionDerivedUpdate, TranscriptRow};
+    use crate::permissions::PermissionSnapshot;
 
     fn sample_transcript(sequence_no: i64, text: &str) -> TranscriptRow {
         TranscriptRow {
@@ -1903,7 +2570,10 @@ mod tests {
     fn question_prompt_mentions_screen_context_and_citations() {
         let prompt = build_question_prompt(
             "What should I say about the auth error?",
-            &[sample_transcript(1, "We need to fix the auth timeout before rollout.")],
+            &[sample_transcript(
+                1,
+                "We need to fix the auth timeout before rollout.",
+            )],
             &[MessageRow {
                 id: "msg-1".to_string(),
                 session_id: "session-1".to_string(),
@@ -1911,6 +2581,7 @@ mod tests {
                 content: "What is the risk?".to_string(),
                 context_snapshot: None,
                 attachments_json: None,
+                metadata_json: None,
                 created_at: "2026-03-12T15:00:00Z".to_string(),
             }],
             &SessionDerivedUpdate {
@@ -1966,11 +2637,139 @@ mod tests {
                 stale_ms: 0,
             }))),
             attachments_json: Some(attachments),
+            metadata_json: None,
             created_at: "2026-03-12T15:01:05Z".to_string(),
         });
 
         assert_eq!(payload.attachments.len(), 1);
         assert_eq!(payload.attachments[0].kind, "screenshot");
-        assert_eq!(payload.attachments[0].artifact_id.as_deref(), Some("artifact-1"));
+        assert_eq!(
+            payload.attachments[0].artifact_id.as_deref(),
+            Some("artifact-1")
+        );
+    }
+
+    #[test]
+    fn extract_citations_preserves_unique_transcript_and_screen_references() {
+        let citations = extract_citations(
+            "Say the rollout is blocked by auth timeouts [S3], note the owner [S9], and reference the shared dashboard [Screen]. Repeat [S3].",
+        );
+
+        assert_eq!(citations, vec!["[Screen]", "[S3]", "[S9]"]);
+    }
+
+    #[tokio::test]
+    async fn grounded_response_without_gemini_key_is_explicit_transcript_fallback() {
+        let (response, metadata) = generate_grounded_response(
+            None,
+            "system",
+            "prompt".to_string(),
+            None,
+            "Transcript-backed fallback [S4]".to_string(),
+        )
+        .await;
+
+        assert_eq!(response, "Transcript-backed fallback [S4]");
+        assert_eq!(
+            metadata.response_mode.as_deref(),
+            Some("transcript_fallback")
+        );
+        assert_eq!(metadata.provider_name.as_deref(), Some("Gemini"));
+        assert_eq!(
+            metadata.provider_error.as_deref(),
+            Some("Gemini API key is not configured.")
+        );
+        assert_eq!(metadata.citations, vec!["[S4]"]);
+        assert!(!metadata.used_screen_context);
+    }
+
+    #[test]
+    fn preflight_report_blocks_microphone_without_deepgram_and_keeps_manual_ready() {
+        let report = build_preflight_report(PreflightInputs {
+            checked_at: "2026-03-13T15:00:00Z".to_string(),
+            permissions: PermissionSnapshot {
+                screen_recording: "unknown",
+                microphone: "granted",
+                accessibility: "unknown",
+            },
+            capture_capabilities: CaptureCapabilities {
+                native_system_audio: false,
+                screen_recording_required: true,
+                microphone_fallback: true,
+            },
+            database_ready: true,
+            keychain_ready: true,
+            gemini_ready: false,
+            gemini_connectivity: false,
+            deepgram_ready: false,
+            deepgram_connectivity: false,
+            linear_ready: false,
+            linear_connectivity: false,
+            preferred_microphone_device_id: String::new(),
+            screen_context_enabled: true,
+        });
+
+        let manual = report
+            .modes
+            .iter()
+            .find(|mode| mode.mode == "manual")
+            .expect("manual mode should exist");
+        let microphone = report
+            .modes
+            .iter()
+            .find(|mode| mode.mode == "microphone")
+            .expect("microphone mode should exist");
+        let deepgram_key = report
+            .checks
+            .iter()
+            .find(|check| check.key == "deepgram_key")
+            .expect("deepgram key check should exist");
+
+        assert!(manual.can_start);
+        assert!(!microphone.can_start);
+        assert_eq!(deepgram_key.status, "blocked");
+        assert!(microphone.summary.contains("blocked"));
+    }
+
+    #[test]
+    fn preflight_report_marks_system_audio_ready_when_permissions_and_connectivity_exist() {
+        let report = build_preflight_report(PreflightInputs {
+            checked_at: "2026-03-13T15:00:00Z".to_string(),
+            permissions: PermissionSnapshot {
+                screen_recording: "granted",
+                microphone: "granted",
+                accessibility: "granted",
+            },
+            capture_capabilities: CaptureCapabilities {
+                native_system_audio: true,
+                screen_recording_required: true,
+                microphone_fallback: true,
+            },
+            database_ready: true,
+            keychain_ready: true,
+            gemini_ready: true,
+            gemini_connectivity: true,
+            deepgram_ready: true,
+            deepgram_connectivity: true,
+            linear_ready: true,
+            linear_connectivity: true,
+            preferred_microphone_device_id: "built-in-mic".to_string(),
+            screen_context_enabled: true,
+        });
+
+        let system_audio = report
+            .modes
+            .iter()
+            .find(|mode| mode.mode == "system_audio")
+            .expect("system-audio mode should exist");
+        let screen_context = report
+            .checks
+            .iter()
+            .find(|check| check.key == "screen_context")
+            .expect("screen context check should exist");
+
+        assert!(system_audio.can_start);
+        assert_eq!(screen_context.status, "ready");
+        assert!(system_audio.summary.contains("ready"));
     }
 }

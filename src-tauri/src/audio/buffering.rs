@@ -159,7 +159,12 @@ impl FinalizedUtteranceBuilder {
 }
 
 pub fn normalize_transcript_text(input: &str) -> String {
-    input.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
+    input
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 pub fn dedupe_key(source: &str, start_ms: Option<i64>, end_ms: Option<i64>, text: &str) -> String {
@@ -196,7 +201,10 @@ mod tests {
             .expect("resampler should produce samples");
 
         let sample_count = chunk.bytes.len() / 2;
-        assert_eq!(sample_count, frames / (source_rate / TARGET_SAMPLE_RATE) as usize);
+        assert_eq!(
+            sample_count,
+            frames / (source_rate / TARGET_SAMPLE_RATE) as usize
+        );
     }
 
     #[test]

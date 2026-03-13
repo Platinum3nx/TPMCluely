@@ -6,6 +6,7 @@ import {
   pushMockGeneratedTicket,
   regenerateMockSessionTickets,
   saveMockSecret,
+  setMockGeneratedTicketReviewState,
   startMockSession,
 } from "../lib/mock-backend";
 
@@ -39,7 +40,7 @@ describe("mock ticket pipeline", () => {
     expect(failed?.generatedTickets).toEqual(completed?.generatedTickets);
   });
 
-  it("preserves push metadata for unchanged tickets during regeneration", async () => {
+  it("requires approval before push and blocks regeneration once review history exists", async () => {
     await saveMockSecret({ key: "linear_api_key", value: "linear-key" });
     await saveMockSecret({ key: "linear_team_id", value: "team-123" });
 
@@ -55,6 +56,14 @@ describe("mock ticket pipeline", () => {
     const firstTicket = completed?.generatedTickets[0];
     expect(firstTicket).toBeTruthy();
 
+    const approved = await setMockGeneratedTicketReviewState({
+      sessionId: session.session.id,
+      idempotencyKey: firstTicket?.idempotencyKey ?? "",
+      reviewState: "approved",
+    });
+    const approvedTicket = approved?.generatedTickets.find((ticket) => ticket.idempotencyKey === firstTicket?.idempotencyKey);
+    expect(approvedTicket?.reviewState).toBe("approved");
+
     const pushed = await pushMockGeneratedTicket({
       sessionId: session.session.id,
       idempotencyKey: firstTicket?.idempotencyKey ?? "",
@@ -64,13 +73,10 @@ describe("mock ticket pipeline", () => {
     expect(pushedTicket?.linearIssueKey).toBeTruthy();
 
     const regenerated = await regenerateMockSessionTickets(session.session.id);
-    const regeneratedTicket = regenerated?.generatedTickets.find(
-      (ticket) => ticket.idempotencyKey === firstTicket?.idempotencyKey
-    );
-
-    expect(regenerated?.session.ticketGenerationState).toBe("succeeded");
-    expect(regeneratedTicket?.linearPushState).toBe("pushed");
-    expect(regeneratedTicket?.linearIssueKey).toBe(pushedTicket?.linearIssueKey);
-    expect(regeneratedTicket?.linearIssueUrl).toBe(pushedTicket?.linearIssueUrl);
+    expect(regenerated?.session.ticketGenerationState).toBe("failed");
+    expect(regenerated?.session.ticketGenerationError).toContain("only allowed while all generated tickets remain unpushed drafts");
+    expect(
+      regenerated?.generatedTickets.find((ticket) => ticket.idempotencyKey === firstTicket?.idempotencyKey)?.linearPushState
+    ).toBe("pushed");
   });
 });

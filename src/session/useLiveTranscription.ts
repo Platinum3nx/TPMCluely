@@ -8,6 +8,7 @@ import {
   stopSystemAudioCapture,
 } from "../lib/tauri";
 import type {
+  AudioInputDevice,
   CaptureHealthPayload,
   CapturePartialEventPayload,
   CaptureRuntimeState,
@@ -22,6 +23,7 @@ import type {
 } from "../lib/types";
 
 const KEEP_ALIVE_INTERVAL_MS = 8_000;
+const FIRST_TRANSCRIPT_WARNING_MS = 12_000;
 const MAX_SCREEN_CONTEXT_BYTES = 1_500_000;
 const MAX_SCREEN_CONTEXT_STALE_MS = 5_000;
 const MAX_SCREEN_LONG_EDGE = 1_440;
@@ -30,6 +32,8 @@ const MIN_SCREEN_HEIGHT = 270;
 const INITIAL_SCREEN_QUALITY = 0.82;
 const MIN_SCREEN_QUALITY = 0.56;
 const SCREEN_COMPRESSION_ATTEMPTS = 6;
+const TRANSCRIPT_STALE_WARNING_MS = 20_000;
+const MICROPHONE_RECONNECT_DELAYS_MS = [1_000, 2_500, 5_000];
 
 type CaptureSegment = {
   speakerLabel?: string;
@@ -39,6 +43,7 @@ type CaptureSegment = {
 
 interface StartCaptureOptions {
   apiKey?: string;
+  deviceId?: string;
   language: string;
   mode: CaptureMode;
   speakerLabel?: string;
@@ -49,6 +54,7 @@ interface StartCaptureOptions {
 interface UseLiveTranscriptionOptions {
   onMicrophoneFinalTranscript: (segment: CaptureSegment) => Promise<void>;
   onNativeCaptureSegment: (payload: CaptureSegmentEventPayload) => void;
+  preferredMicrophoneDeviceId?: string;
 }
 
 interface DeepgramResultsMessage {
@@ -90,6 +96,58 @@ function mapAudioLanguage(language: string): string | null {
     return "fr";
   }
   return language;
+}
+
+function deepgramListenEndpoint(language: string, sampleRate: number): URL {
+  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+  const endpoint = new URL(env?.VITE_DEEPGRAM_WS_URL ?? "wss://api.deepgram.com/v1/listen");
+  endpoint.searchParams.set("encoding", "linear16");
+  endpoint.searchParams.set("channels", "1");
+  endpoint.searchParams.set("sample_rate", String(Math.round(sampleRate)));
+  endpoint.searchParams.set("punctuate", "true");
+  endpoint.searchParams.set("smart_format", "true");
+  endpoint.searchParams.set("interim_results", "true");
+  endpoint.searchParams.set("model", "nova-3");
+  const mappedLanguage = mapAudioLanguage(language);
+  if (mappedLanguage) {
+    endpoint.searchParams.set("language", mappedLanguage);
+  }
+  return endpoint;
+}
+
+function normalizeTranscript(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function describeMicrophoneDevices(devices: MediaDeviceInfo[]): AudioInputDevice[] {
+  const microphoneDevices = devices.filter((device) => device.kind === "audioinput");
+  return microphoneDevices.map((device, index) => {
+    const label = device.label?.trim();
+    return {
+      deviceId: device.deviceId,
+      label: label && label.length > 0 ? label : `Microphone ${index + 1}`,
+      isDefault: device.deviceId === "default" || /default/i.test(device.label ?? ""),
+    };
+  });
+}
+
+function summarizeTranscriptFreshness(captureState: CaptureRuntimeState, freshnessMs: number | null): string {
+  if (captureState === "idle") {
+    return "Idle";
+  }
+  if (captureState === "connecting" || captureState === "starting") {
+    return "Connecting";
+  }
+  if (freshnessMs == null) {
+    return "Waiting for first finalized transcript";
+  }
+  if (freshnessMs < 4_000) {
+    return "Fresh";
+  }
+  if (freshnessMs < TRANSCRIPT_STALE_WARNING_MS) {
+    return `${Math.round(freshnessMs / 1_000)}s since last finalized line`;
+  }
+  return `Stale (${Math.round(freshnessMs / 1_000)}s)`;
 }
 
 function stopMediaStream(stream: MediaStream | null) {
@@ -210,12 +268,17 @@ export function resolvePendingMicrophoneTranscript(interimTranscript: string, la
 export function useLiveTranscription({
   onMicrophoneFinalTranscript,
   onNativeCaptureSegment,
+  preferredMicrophoneDeviceId = "",
 }: UseLiveTranscriptionOptions) {
+  const [audioInputDevices, setAudioInputDevices] = useState<AudioInputDevice[]>([]);
   const [captureState, setCaptureState] = useState<CaptureRuntimeState>("idle");
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [captureHealth, setCaptureHealth] = useState<CaptureHealthPayload | null>(null);
   const [captureSourceLabel, setCaptureSourceLabel] = useState<string | null>(null);
+  const [lastTranscriptFinalizedAt, setLastTranscriptFinalizedAt] = useState<string | null>(null);
+  const [microphoneSelectionWarning, setMicrophoneSelectionWarning] = useState<string | null>(null);
   const [partialTranscript, setPartialTranscript] = useState("");
+  const [selectedMicrophoneDeviceId, setSelectedMicrophoneDeviceIdState] = useState("");
   const [screenShareState, setScreenShareState] = useState<ScreenShareState>("inactive");
   const [screenShareError, setScreenShareError] = useState<string | null>(null);
   const [screenShareOwnedByCapture] = useState(false);
@@ -237,6 +300,78 @@ export function useLiveTranscription({
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
   const screenContextCacheRef = useRef<ScreenContextInput | null>(null);
+  const browserCaptureOptionsRef = useRef<StartCaptureOptions | null>(null);
+  const listeningStartedAtRef = useRef<number | null>(null);
+  const lastTranscriptFinalizedAtRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const selectedMicrophoneDeviceIdRef = useRef("");
+
+  const clearReconnectTimer = useEffectEvent(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  });
+
+  const updateSelectedMicrophoneDevice = useEffectEvent((deviceId: string) => {
+    selectedMicrophoneDeviceIdRef.current = deviceId;
+    setSelectedMicrophoneDeviceIdState(deviceId);
+  });
+
+  const recordFinalizedTranscript = useEffectEvent(() => {
+    const now = Date.now();
+    lastTranscriptFinalizedAtRef.current = now;
+    setLastTranscriptFinalizedAt(new Date(now).toISOString());
+    if (activeModeRef.current === "microphone") {
+      setCaptureHealth(null);
+      if (captureStateRef.current === "degraded") {
+        captureStateRef.current = "listening";
+        setCaptureState("listening");
+      }
+    }
+  });
+
+  const refreshAudioInputDevices = useEffectEvent(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setAudioInputDevices([]);
+      return;
+    }
+
+    try {
+      const devices = describeMicrophoneDevices(await navigator.mediaDevices.enumerateDevices());
+      setAudioInputDevices(devices);
+
+      const preferredDeviceId = preferredMicrophoneDeviceId.trim();
+      const currentDeviceId = selectedMicrophoneDeviceIdRef.current.trim();
+      const nextSelectedDeviceId =
+        devices.find((device) => device.deviceId === currentDeviceId)?.deviceId ??
+        devices.find((device) => device.deviceId === preferredDeviceId)?.deviceId ??
+        devices.find((device) => device.isDefault)?.deviceId ??
+        devices[0]?.deviceId ??
+        "";
+
+      updateSelectedMicrophoneDevice(nextSelectedDeviceId);
+
+      if (preferredDeviceId && !devices.some((device) => device.deviceId === preferredDeviceId)) {
+        setMicrophoneSelectionWarning(
+          "The saved preferred microphone is unavailable on this machine. Pick another input before the meeting starts."
+        );
+      } else if (!preferredDeviceId && nextSelectedDeviceId) {
+        setMicrophoneSelectionWarning(
+          "No preferred microphone is saved yet. Pick the input you want TPMCluely to reuse for future meetings."
+        );
+      } else if (devices.length === 0) {
+        setMicrophoneSelectionWarning(
+          "No microphone inputs are visible yet. TPMCluely will request the default input when you start listening."
+        );
+      } else {
+        setMicrophoneSelectionWarning(null);
+      }
+    } catch {
+      setAudioInputDevices([]);
+    }
+  });
 
   const applyNativeCaptureState = useEffectEvent((payload: CaptureStatePayload) => {
     const nextState = normalizeCaptureState(payload.runtimeState);
@@ -254,6 +389,9 @@ export function useLiveTranscription({
       setCaptureError(null);
       setCaptureHealth(null);
       setCaptureSourceLabel(null);
+      setLastTranscriptFinalizedAt(null);
+      lastTranscriptFinalizedAtRef.current = null;
+      listeningStartedAtRef.current = null;
       activeNativeSessionIdRef.current = null;
       return;
     }
@@ -263,7 +401,27 @@ export function useLiveTranscription({
     }
   });
 
+  useEffect(() => {
+    void refreshAudioInputDevices();
+  }, [preferredMicrophoneDeviceId, refreshAudioInputDevices]);
+
+  useEffect(() => {
+    if (!navigator.mediaDevices?.addEventListener) {
+      return undefined;
+    }
+
+    const handleDeviceChange = () => {
+      void refreshAudioInputDevices();
+    };
+
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
+    };
+  }, [refreshAudioInputDevices]);
+
   const handleMicrophoneFinalTranscript = useEffectEvent(async (text: string, speakerLabel: string) => {
+    recordFinalizedTranscript();
     await onMicrophoneFinalTranscript({
       text,
       speakerLabel,
@@ -365,6 +523,7 @@ export function useLiveTranscription({
       setCaptureState("stopping");
     }
 
+    clearReconnectTimer();
     await flushPendingBrowserTranscript();
 
     if (keepAliveRef.current !== null) {
@@ -394,13 +553,58 @@ export function useLiveTranscription({
     captureStateRef.current = "idle";
     setCaptureState("idle");
     setCaptureError(null);
+    setCaptureHealth(null);
     setCaptureSourceLabel(null);
+    setLastTranscriptFinalizedAt(null);
     lastFinalTranscriptRef.current = "";
+    lastTranscriptFinalizedAtRef.current = null;
+    listeningStartedAtRef.current = null;
     pendingInterimTranscriptRef.current = "";
+    browserCaptureOptionsRef.current = null;
+    reconnectAttemptRef.current = 0;
+  });
+
+  const scheduleBrowserReconnect = useEffectEvent((reason: string) => {
+    const options = browserCaptureOptionsRef.current;
+    if (activeModeRef.current !== "microphone" || !options) {
+      return false;
+    }
+
+    const nextAttempt = reconnectAttemptRef.current + 1;
+    const delayMs = MICROPHONE_RECONNECT_DELAYS_MS[nextAttempt - 1];
+    if (!delayMs) {
+      return false;
+    }
+
+    reconnectAttemptRef.current = nextAttempt;
+    clearReconnectTimer();
+    captureStateRef.current = "degraded";
+    setCaptureState("degraded");
+    setCaptureError(
+      `${reason} Reconnecting in ${Math.max(1, Math.round(delayMs / 1_000))}s (${nextAttempt}/${MICROPHONE_RECONNECT_DELAYS_MS.length}).`
+    );
+    setCaptureHealth({
+      sessionId: options.sessionId ?? null,
+      severity: "warning",
+      droppedFrames: 0,
+      queueDepth: 0,
+      reconnectAttempt: nextAttempt,
+      message: "Live transcription dropped. TPMCluely is reconnecting the microphone stream.",
+    });
+
+    reconnectTimerRef.current = window.setTimeout(() => {
+      const reconnectOptions = browserCaptureOptionsRef.current;
+      if (!reconnectOptions || activeModeRef.current !== "microphone") {
+        return;
+      }
+      void startBrowserMicrophoneCapture(reconnectOptions);
+    }, delayMs);
+
+    return true;
   });
 
   const startBrowserMicrophoneCapture = useEffectEvent(
-    async ({ apiKey, language, speakerLabel = "Meeting" }: StartCaptureOptions) => {
+    async ({ apiKey, deviceId, language, speakerLabel = "Meeting", sessionId }: StartCaptureOptions) => {
       if (!navigator.mediaDevices?.getUserMedia) {
         setCaptureError("Audio capture is not available in this runtime.");
         setCaptureState("unsupported");
@@ -424,26 +628,46 @@ export function useLiveTranscription({
       }
 
       try {
+        clearReconnectTimer();
+        browserCaptureOptionsRef.current = {
+          apiKey,
+          deviceId,
+          language,
+          mode: "microphone",
+          sessionId,
+          speakerLabel,
+        };
         microphoneSpeakerLabelRef.current = speakerLabel;
         lastFinalTranscriptRef.current = "";
         pendingInterimTranscriptRef.current = "";
+        lastTranscriptFinalizedAtRef.current = null;
+        setLastTranscriptFinalizedAt(null);
         setCaptureError(null);
+        setCaptureHealth(null);
         setCaptureState("connecting");
         captureStateRef.current = "connecting";
+        listeningStartedAtRef.current = Date.now();
+
+        const selectedDeviceId = deviceId?.trim() || selectedMicrophoneDeviceIdRef.current.trim();
+        const audioConstraints: MediaTrackConstraints = {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
+        if (selectedDeviceId) {
+          audioConstraints.deviceId = { exact: selectedDeviceId };
+        }
 
         const mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
+          audio: audioConstraints,
         });
 
         if (mediaStream.getAudioTracks().length === 0) {
           throw new Error("The selected microphone stream did not provide any audio tracks.");
         }
         audioStreamRef.current = mediaStream;
+        await refreshAudioInputDevices();
 
         const audioContext = new AudioContextCtor();
         audioContextRef.current = audioContext;
@@ -451,22 +675,24 @@ export function useLiveTranscription({
           await audioContext.resume().catch(() => undefined);
         }
 
-        const endpoint = new URL("wss://api.deepgram.com/v1/listen");
-        endpoint.searchParams.set("encoding", "linear16");
-        endpoint.searchParams.set("channels", "1");
-        endpoint.searchParams.set("sample_rate", String(Math.round(audioContext.sampleRate)));
-        endpoint.searchParams.set("punctuate", "true");
-        endpoint.searchParams.set("smart_format", "true");
-        endpoint.searchParams.set("interim_results", "true");
-        endpoint.searchParams.set("model", "nova-3");
-        const mappedLanguage = mapAudioLanguage(language);
-        if (mappedLanguage) {
-          endpoint.searchParams.set("language", mappedLanguage);
-        }
-
+        const endpoint = deepgramListenEndpoint(language, audioContext.sampleRate);
         const websocket = new WebSocket(endpoint, ["token", apiKey]);
         websocket.binaryType = "arraybuffer";
         websocketRef.current = websocket;
+
+        const audioTrack = mediaStream.getAudioTracks()[0];
+        audioTrack.onended = () => {
+          if (captureStateRef.current === "stopping" || activeModeRef.current !== "microphone") {
+            return;
+          }
+          void stopMediaStream(mediaStream);
+          audioStreamRef.current = null;
+          if (!scheduleBrowserReconnect("The microphone stream ended unexpectedly.")) {
+            setCaptureError("The microphone stream ended unexpectedly. Start listening again.");
+            setCaptureState("error");
+            captureStateRef.current = "error";
+          }
+        };
 
         websocket.onmessage = (event) => {
           if (typeof event.data !== "string") {
@@ -496,7 +722,7 @@ export function useLiveTranscription({
           if (payload.is_final) {
             pendingInterimTranscriptRef.current = "";
             setPartialTranscript("");
-            if (transcript !== lastFinalTranscriptRef.current) {
+            if (normalizeTranscript(transcript) !== normalizeTranscript(lastFinalTranscriptRef.current)) {
               lastFinalTranscriptRef.current = transcript;
               void handleMicrophoneFinalTranscript(transcript, speakerLabel);
             }
@@ -508,12 +734,13 @@ export function useLiveTranscription({
         };
 
         websocket.onerror = () => {
-          setCaptureError("Deepgram live transcription connection failed.");
-          setCaptureState("error");
-          captureStateRef.current = "error";
+          if (captureStateRef.current !== "stopping") {
+            setCaptureError("Deepgram live transcription connection dropped.");
+          }
         };
 
         websocket.onclose = () => {
+          websocketRef.current = null;
           if (keepAliveRef.current !== null) {
             window.clearInterval(keepAliveRef.current);
             keepAliveRef.current = null;
@@ -530,10 +757,16 @@ export function useLiveTranscription({
             void audioContextRef.current.close().catch(() => undefined);
             audioContextRef.current = null;
           }
-          if (captureStateRef.current === "listening" || captureStateRef.current === "connecting") {
-            setCaptureError("Live transcription disconnected. You can start it again.");
-            setCaptureState("error");
-            captureStateRef.current = "error";
+          if (
+            captureStateRef.current === "listening" ||
+            captureStateRef.current === "connecting" ||
+            captureStateRef.current === "degraded"
+          ) {
+            if (!scheduleBrowserReconnect("Live transcription disconnected.")) {
+              setCaptureError("Live transcription disconnected. You can start it again.");
+              setCaptureState("error");
+              captureStateRef.current = "error";
+            }
           }
         };
 
@@ -559,6 +792,7 @@ export function useLiveTranscription({
           sourceNodeRef.current = sourceNode;
           processorNodeRef.current = processorNode;
           silenceNodeRef.current = silenceNode;
+          reconnectAttemptRef.current = 0;
 
           keepAliveRef.current = window.setInterval(() => {
             if (websocket.readyState === WebSocket.OPEN) {
@@ -569,15 +803,20 @@ export function useLiveTranscription({
           setCaptureState("listening");
           captureStateRef.current = "listening";
           setCaptureError(null);
-          setCaptureSourceLabel("Microphone");
+          setCaptureHealth(null);
+          setCaptureSourceLabel(audioTrack.label?.trim() || "Microphone");
         };
       } catch (error) {
+        const reconnectOptions = browserCaptureOptionsRef.current;
         await stopBrowserMicrophoneCapture();
+        browserCaptureOptionsRef.current = reconnectOptions;
         const message =
           error instanceof Error ? error.message : "Live transcription could not start with the current microphone setup.";
-        setCaptureError(message);
-        setCaptureState("error");
-        captureStateRef.current = "error";
+        if (!scheduleBrowserReconnect(message)) {
+          setCaptureError(message);
+          setCaptureState("error");
+          captureStateRef.current = "error";
+        }
       }
     }
   );
@@ -791,6 +1030,7 @@ export function useLiveTranscription({
       listen<CaptureSegmentEventPayload>("capture:segment", (event) => {
         if (!disposed) {
           setPartialTranscript("");
+          recordFinalizedTranscript();
           onNativeCaptureSegment(event.payload);
         }
       }),
@@ -822,7 +1062,44 @@ export function useLiveTranscription({
         unlistenFn();
       }
     };
-  }, [applyNativeCaptureState, onNativeCaptureSegment]);
+  }, [applyNativeCaptureState, onNativeCaptureSegment, recordFinalizedTranscript]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      if (!["connecting", "listening", "degraded", "starting"].includes(captureStateRef.current)) {
+        return;
+      }
+
+      const baseTimestamp = lastTranscriptFinalizedAtRef.current ?? listeningStartedAtRef.current;
+      if (!baseTimestamp || activeModeRef.current !== "microphone") {
+        return;
+      }
+
+      const freshnessMs = Date.now() - baseTimestamp;
+      const waitingForFirstTranscript = lastTranscriptFinalizedAtRef.current == null;
+      if (
+        (waitingForFirstTranscript && freshnessMs >= FIRST_TRANSCRIPT_WARNING_MS) ||
+        freshnessMs >= TRANSCRIPT_STALE_WARNING_MS
+      ) {
+        setCaptureHealth({
+          sessionId: browserCaptureOptionsRef.current?.sessionId ?? null,
+          severity: "warning",
+          droppedFrames: 0,
+          queueDepth: 0,
+          reconnectAttempt: reconnectAttemptRef.current,
+          message: waitingForFirstTranscript
+            ? "Listening, but the first finalized transcript has not landed yet."
+            : "Transcript has gone stale. Check the selected microphone or restart listening.",
+        });
+      } else if (captureStateRef.current === "listening") {
+        setCaptureHealth(null);
+      }
+    }, 1_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -832,20 +1109,34 @@ export function useLiveTranscription({
   }, [stopCapture, stopScreenShare]);
 
   return {
+    audioInputDevices,
     captureError,
     captureHealth,
     captureSourceLabel,
     captureState,
+    lastTranscriptFinalizedAt,
     isCapturing: ["starting", "connecting", "listening", "degraded", "stopping"].includes(captureState),
     listAvailableSystemAudioSources,
+    microphoneSelectionWarning,
     partialTranscript,
+    refreshAudioInputDevices,
     screenShareError,
     screenShareOwnedByCapture,
     screenShareState,
+    selectedMicrophoneDeviceId,
+    setSelectedMicrophoneDeviceId: updateSelectedMicrophoneDevice,
     startCapture,
     startScreenShare,
     stopCapture,
     stopScreenShare,
     captureScreenContext,
+    transcriptFreshnessLabel: summarizeTranscriptFreshness(
+      captureState,
+      lastTranscriptFinalizedAt
+        ? Math.max(0, Date.now() - Date.parse(lastTranscriptFinalizedAt))
+        : listeningStartedAtRef.current
+          ? Math.max(0, Date.now() - listeningStartedAtRef.current)
+          : null
+    ),
   };
 }

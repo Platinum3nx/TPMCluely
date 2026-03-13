@@ -1,3 +1,4 @@
+use std::env;
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
@@ -49,6 +50,22 @@ fn should_retry(status: StatusCode) -> bool {
     )
 }
 
+const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+fn gemini_base_url() -> String {
+    env::var("TPMCLUELY_GEMINI_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_GEMINI_BASE_URL.to_string())
+}
+
+fn gemini_generate_content_endpoint(api_key: &str) -> String {
+    format!(
+        "{}/models/{DEFAULT_MODEL}:generateContent?key={api_key}",
+        gemini_base_url().trim_end_matches('/')
+    )
+}
+
 async fn request_with_retry(
     client: &Client,
     api_key: &str,
@@ -56,9 +73,7 @@ async fn request_with_retry(
     user_parts: &[LlmPart],
     response_mime_type: Option<&str>,
 ) -> Result<String, LlmProviderError> {
-    let endpoint = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{DEFAULT_MODEL}:generateContent?key={api_key}"
-    );
+    let endpoint = gemini_generate_content_endpoint(api_key);
 
     let mut last_error = None;
     for attempt in 0..3 {
@@ -211,7 +226,80 @@ pub async fn generate_json(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_request_payload, LlmPart};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread;
+
+    use super::{build_request_payload, generate_text, LlmPart};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let mut header_end = None;
+        let mut content_length = 0usize;
+
+        loop {
+            let read = stream.read(&mut chunk).expect("request should read");
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+
+            if header_end.is_none() {
+                if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                    header_end = Some(index + 4);
+                    let headers = String::from_utf8_lossy(&buffer[..index + 4]);
+                    for line in headers.lines() {
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("Content-Length") {
+                                content_length = value.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(index) = header_end {
+                if buffer.len() >= index + content_length {
+                    break;
+                }
+            }
+        }
+
+        String::from_utf8(buffer).expect("request should be utf8")
+    }
+
+    fn spawn_http_json_server(
+        response_body: &'static str,
+    ) -> (String, Arc<Mutex<Option<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let request = Arc::new(Mutex::new(None));
+        let request_clone = Arc::clone(&request);
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection should arrive");
+            let captured_request = read_http_request(&mut stream);
+            *request_clone.lock().expect("request lock should hold") = Some(captured_request);
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
+        });
+
+        (format!("http://{address}/v1beta"), request, handle)
+    }
 
     #[test]
     fn builds_multimodal_payload_with_inline_image_parts() {
@@ -255,4 +343,41 @@ mod tests {
             "application/json"
         );
     }
+
+    #[tokio::test]
+    async fn generate_text_uses_base_url_override_against_stub_server() {
+        let _guard = env_lock().lock().expect("env lock should hold");
+        let (base_url, request, handle) = spawn_http_json_server(
+            r#"{"candidates":[{"content":{"parts":[{"text":"Stub answer"}]}}]}"#,
+        );
+        unsafe {
+            std::env::set_var("TPMCLUELY_GEMINI_BASE_URL", &base_url);
+        }
+
+        let result = generate_text("test-key", "system prompt", "What happened?")
+            .await
+            .expect("stub request should succeed");
+
+        unsafe {
+            std::env::remove_var("TPMCLUELY_GEMINI_BASE_URL");
+        }
+        handle.join().expect("server should finish");
+
+        let captured_request = request
+            .lock()
+            .expect("request lock should hold")
+            .clone()
+            .expect("request should be captured");
+        assert_eq!(result, "Stub answer");
+        assert!(captured_request.starts_with(
+            "POST /v1beta/models/gemini-2.5-flash:generateContent?key=test-key HTTP/1.1"
+        ));
+        assert!(captured_request.contains("\"systemInstruction\""));
+        assert!(captured_request.contains("\"What happened?\""));
+    }
+}
+
+pub async fn check_connectivity(api_key: &str) -> Result<(), LlmProviderError> {
+    let _ = generate_text(api_key, "You are a connectivity probe.", "Reply with OK.").await?;
+    Ok(())
 }

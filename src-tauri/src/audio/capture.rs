@@ -13,9 +13,11 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::app::commands::{
-    derive_session_update, map_session, map_transcript, SessionRecordPayload, TranscriptSegmentPayload,
+    derive_session_update, map_session, map_transcript, SessionRecordPayload,
+    TranscriptSegmentPayload,
 };
 use crate::db::AppDatabase;
+use crate::providers::stt::deepgram_listen_endpoint;
 use crate::secrets::AppSecretStore;
 
 use super::buffering::{
@@ -256,7 +258,10 @@ impl CaptureService {
             return Ok(SystemAudioSourceListPayload {
                 sources: Vec::new(),
                 permission_status: "restricted".to_string(),
-                message: Some("Native system-audio capture is only available in the macOS desktop runtime.".to_string()),
+                message: Some(
+                    "Native system-audio capture is only available in the macOS desktop runtime."
+                        .to_string(),
+                ),
             });
         }
 
@@ -274,8 +279,12 @@ impl CaptureService {
 
         let mut sources = native_list_sources("com.cluely.desktop")?;
         sources.sort_by(|left, right| match (left.kind, right.kind) {
-            (SystemAudioSourceKind::Window, SystemAudioSourceKind::Display) => std::cmp::Ordering::Less,
-            (SystemAudioSourceKind::Display, SystemAudioSourceKind::Window) => std::cmp::Ordering::Greater,
+            (SystemAudioSourceKind::Window, SystemAudioSourceKind::Display) => {
+                std::cmp::Ordering::Less
+            }
+            (SystemAudioSourceKind::Display, SystemAudioSourceKind::Window) => {
+                std::cmp::Ordering::Greater
+            }
             _ => left.source_label.cmp(&right.source_label),
         });
 
@@ -301,7 +310,9 @@ impl CaptureService {
                 &app,
                 CaptureStatePayload {
                     runtime_state: CaptureRuntimeState::Unsupported,
-                    message: Some("Native system audio capture is unavailable in this runtime.".to_string()),
+                    message: Some(
+                        "Native system audio capture is unavailable in this runtime.".to_string(),
+                    ),
                     ..CaptureStatePayload::idle()
                 },
             );
@@ -426,12 +437,12 @@ impl CaptureService {
             .lock()
             .expect("capture service mutex poisoned")
             .active = Some(ActiveCapture {
-                session_id: input.session_id,
-                _callback_context: callback_context,
-                control_tx,
-                task_handle,
-                native_handle,
-            });
+            session_id: input.session_id,
+            _callback_context: callback_context,
+            control_tx,
+            task_handle,
+            native_handle,
+        });
 
         Ok(payload)
     }
@@ -444,7 +455,13 @@ impl CaptureService {
         let active = {
             let mut inner = self.inner.lock().expect("capture service mutex poisoned");
             if session_id
-                .map(|candidate| inner.active.as_ref().map(|active| active.session_id.as_str()) != Some(candidate))
+                .map(|candidate| {
+                    inner
+                        .active
+                        .as_ref()
+                        .map(|active| active.session_id.as_str())
+                        != Some(candidate)
+                })
                 .unwrap_or(false)
             {
                 return Ok(inner.state.clone());
@@ -792,8 +809,9 @@ async fn handle_deepgram_text(
     utterance: &mut FinalizedUtteranceBuilder,
     text: String,
 ) -> Result<(), AudioError> {
-    let payload: DeepgramMessage = serde_json::from_str(&text)
-        .map_err(|error| AudioError::Provider(format!("Failed to parse Deepgram response: {error}")))?;
+    let payload: DeepgramMessage = serde_json::from_str(&text).map_err(|error| {
+        AudioError::Provider(format!("Failed to parse Deepgram response: {error}"))
+    })?;
 
     match payload {
         DeepgramMessage::Results {
@@ -843,7 +861,12 @@ fn persist_finalized_utterance(
     session_id: &str,
     utterance: FinalizedUtterance,
 ) -> Result<(), AudioError> {
-    let dedupe = dedupe_key("capture", utterance.start_ms, utterance.end_ms, &utterance.text);
+    let dedupe = dedupe_key(
+        "capture",
+        utterance.start_ms,
+        utterance.end_ms,
+        &utterance.text,
+    );
     let segment = database
         .append_transcript_segment_with_metadata(
             session_id,
@@ -872,7 +895,9 @@ fn persist_finalized_utterance(
     let session = database
         .get_session(session_id)
         .map_err(|error| AudioError::Database(error.to_string()))?
-        .ok_or_else(|| AudioError::Database("Session disappeared while persisting capture output.".to_string()))?;
+        .ok_or_else(|| {
+            AudioError::Database("Session disappeared while persisting capture output.".to_string())
+        })?;
 
     let _ = app.emit(
         EVENT_CAPTURE_SEGMENT,
@@ -889,16 +914,12 @@ fn persist_finalized_utterance(
 async fn connect_to_deepgram(
     api_key: &str,
     audio_language: &str,
-) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, AudioError>
-{
-    let mut endpoint = "wss://api.deepgram.com/v1/listen?encoding=linear16&channels=1&sample_rate=16000&punctuate=true&smart_format=true&interim_results=true&model=nova-3&endpointing=300&utterance_end_ms=1000".to_string();
-    if let Some(language) = map_audio_language(audio_language) {
-        endpoint.push_str("&language=");
-        endpoint.push_str(language);
-    }
-
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    AudioError,
+> {
     let request = Request::builder()
-        .uri(endpoint)
+        .uri(deepgram_listen_endpoint(audio_language))
         .header("Authorization", format!("Token {api_key}"))
         .body(())
         .map_err(|error| AudioError::Provider(error.to_string()))?;
@@ -907,16 +928,6 @@ async fn connect_to_deepgram(
         .await
         .map(|(socket, _)| socket)
         .map_err(|error| AudioError::Provider(error.to_string()))
-}
-
-fn map_audio_language(language: &str) -> Option<&str> {
-    match language {
-        "" | "auto" => None,
-        "en" => Some("en-US"),
-        "es" => Some("es"),
-        "fr" => Some("fr"),
-        other => Some(other),
-    }
 }
 
 fn saturating_decrement(value: &AtomicUsize) {
@@ -1004,7 +1015,9 @@ impl<'de> Deserialize<'de> for DeepgramMessage {
                     None
                 },
             }),
-            RawMessage::Typed { message_type } if message_type == "UtteranceEnd" => Ok(Self::UtteranceEnd),
+            RawMessage::Typed { message_type } if message_type == "UtteranceEnd" => {
+                Ok(Self::UtteranceEnd)
+            }
             _ => Ok(Self::Other),
         }
     }
@@ -1027,7 +1040,10 @@ extern "C" {
     fn tpm_get_screen_recording_permission_status() -> c_int;
     fn tpm_request_screen_recording_permission() -> c_int;
     fn tpm_get_microphone_permission_status() -> c_int;
-    fn tpm_list_system_audio_sources(excluded_bundle_id: *const c_char, error_out: *mut *mut c_char) -> *mut c_char;
+    fn tpm_list_system_audio_sources(
+        excluded_bundle_id: *const c_char,
+        error_out: *mut *mut c_char,
+    ) -> *mut c_char;
     fn tpm_start_system_audio_capture(
         source_kind: *const c_char,
         source_id: u32,
@@ -1228,8 +1244,9 @@ extern "C" fn native_audio_callback(
                     dropped_frames: dropped,
                     queue_depth,
                     reconnect_attempt: context.reconnect_attempt.load(Ordering::SeqCst) as u32,
-                    message: "Audio capture backlog is full. TPMCluely dropped the newest audio frame."
-                        .to_string(),
+                    message:
+                        "Audio capture backlog is full. TPMCluely dropped the newest audio frame."
+                            .to_string(),
                 },
             );
 
@@ -1243,7 +1260,10 @@ extern "C" fn native_audio_callback(
                 if elapsed >= Duration::from_secs(5) && !overflow.restarted {
                     overflow.restarted = true;
                     let _ = context.control_tx.send(ControlMessage::RestartDeepgram);
-                } else if elapsed >= Duration::from_secs(10) && overflow.restarted && !overflow.failed {
+                } else if elapsed >= Duration::from_secs(10)
+                    && overflow.restarted
+                    && !overflow.failed
+                {
                     overflow.failed = true;
                     let _ = context.control_tx.send(ControlMessage::NativeError(
                         "Audio capture remained overloaded after a reconnect. Switch TPMCluely to microphone capture."
@@ -1255,7 +1275,11 @@ extern "C" fn native_audio_callback(
     }
 }
 
-extern "C" fn native_event_callback(event_type: c_int, message: *const c_char, user_data: *mut c_void) {
+extern "C" fn native_event_callback(
+    event_type: c_int,
+    message: *const c_char,
+    user_data: *mut c_void,
+) {
     if user_data.is_null() {
         return;
     }
@@ -1268,13 +1292,19 @@ extern "C" fn native_event_callback(event_type: c_int, message: *const c_char, u
 
     match event_type {
         2 => {
-            let _ = context.control_tx.send(ControlMessage::NativeStopped(message));
+            let _ = context
+                .control_tx
+                .send(ControlMessage::NativeStopped(message));
         }
         3 => {
-            let _ = context.control_tx.send(ControlMessage::NativeError(message));
+            let _ = context
+                .control_tx
+                .send(ControlMessage::NativeError(message));
         }
         4 => {
-            let _ = context.control_tx.send(ControlMessage::NativeError(message));
+            let _ = context
+                .control_tx
+                .send(ControlMessage::NativeError(message));
         }
         _ => {}
     }
@@ -1282,7 +1312,10 @@ extern "C" fn native_event_callback(event_type: c_int, message: *const c_char, u
 
 #[cfg(test)]
 mod tests {
-    use super::{screen_recording_permission_status, CaptureRuntimeState, CaptureStatePayload, SystemAudioSourceKind};
+    use super::{
+        screen_recording_permission_status, CaptureRuntimeState, CaptureStatePayload,
+        SystemAudioSourceKind,
+    };
 
     #[test]
     fn idle_capture_state_defaults_to_manual() {
@@ -1294,13 +1327,16 @@ mod tests {
     #[test]
     fn permission_snapshot_is_valid_enum_value() {
         let status = screen_recording_permission_status();
-        assert!(matches!(status, "unknown" | "granted" | "denied" | "restricted"));
+        assert!(matches!(
+            status,
+            "unknown" | "granted" | "denied" | "restricted"
+        ));
     }
 
     #[test]
     fn source_kind_serializes_in_snake_case() {
-        let serialized =
-            serde_json::to_string(&SystemAudioSourceKind::Window).expect("source kind should serialize");
+        let serialized = serde_json::to_string(&SystemAudioSourceKind::Window)
+            .expect("source kind should serialize");
         assert_eq!(serialized, "\"window\"");
     }
 }

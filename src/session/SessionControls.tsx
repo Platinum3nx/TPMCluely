@@ -1,137 +1,251 @@
 import { useState } from "react";
-import type { CaptureMode, ScreenShareState, SessionDetail } from "../lib/types";
+import { captureModeLabel } from "../lib/preflight";
+import type {
+  AudioInputDevice,
+  CaptureHealthPayload,
+  CaptureMode,
+  PreflightCheck,
+  ScreenShareState,
+  SessionDetail,
+} from "../lib/types";
 
 interface SessionControlsProps {
   activeSession: SessionDetail | null;
+  audioInputDevices: AudioInputDevice[];
+  canStartSelectedMode: boolean;
   captureError: string | null;
+  captureHealth: CaptureHealthPayload | null;
   captureMode: CaptureMode;
   captureSourceLabel: string | null;
   captureState: string;
+  lastTranscriptFinalizedAt: string | null;
+  microphoneSelectionWarning: string | null;
   overlayOpen: boolean;
   overlayShortcut: string;
+  preflightBlockingChecks: PreflightCheck[];
+  preflightCheckedAt: string | null;
+  preflightLoading: boolean;
+  preflightSummary: string;
   screenContextEnabled: boolean;
   screenShareError: string | null;
   screenShareOwnedByCapture: boolean;
   screenShareState: ScreenShareState;
-  onStartSession: (title: string) => Promise<void>;
-  onPauseSession: (sessionId: string) => Promise<void>;
-  onResumeSession: (sessionId: string) => Promise<void>;
+  selectedMicrophoneDeviceId: string;
+  transcriptFreshnessLabel: string;
   onCompleteSession: (sessionId: string) => Promise<void>;
+  onPauseSession: (sessionId: string) => Promise<void>;
+  onRefreshPreflight: () => Promise<void>;
+  onResumeSession: (sessionId: string) => Promise<void>;
+  onSelectMicrophoneDevice: (deviceId: string) => Promise<void>;
   onSetCaptureMode: (mode: CaptureMode) => void;
   onStartLiveCapture: () => Promise<void>;
   onStartScreenShare: () => Promise<boolean>;
+  onStartSession: (title: string) => Promise<void>;
   onStopLiveCapture: () => Promise<void>;
   onStopScreenShare: () => Promise<void>;
   onToggleOverlay: () => Promise<void>;
 }
 
+function screenShareLabel(screenShareState: ScreenShareState): string {
+  if (screenShareState === "active") {
+    return "Shared";
+  }
+  if (screenShareState === "requesting") {
+    return "Requesting";
+  }
+  if (screenShareState === "error") {
+    return "Needs attention";
+  }
+  return "Off";
+}
+
 export function SessionControls({
   activeSession,
+  audioInputDevices,
+  canStartSelectedMode,
   captureError,
+  captureHealth,
   captureMode,
   captureSourceLabel,
   captureState,
+  lastTranscriptFinalizedAt,
+  microphoneSelectionWarning,
   overlayOpen,
   overlayShortcut,
+  preflightBlockingChecks,
+  preflightCheckedAt,
+  preflightLoading,
+  preflightSummary,
   screenContextEnabled,
   screenShareError,
   screenShareOwnedByCapture,
   screenShareState,
-  onStartSession,
-  onPauseSession,
-  onResumeSession,
+  selectedMicrophoneDeviceId,
+  transcriptFreshnessLabel,
   onCompleteSession,
+  onPauseSession,
+  onRefreshPreflight,
+  onResumeSession,
+  onSelectMicrophoneDevice,
   onSetCaptureMode,
   onStartLiveCapture,
   onStartScreenShare,
+  onStartSession,
   onStopLiveCapture,
   onStopScreenShare,
   onToggleOverlay,
 }: SessionControlsProps) {
   const [title, setTitle] = useState("Sprint planning sync");
   const status = activeSession?.session.status ?? "idle";
+  const selectedMicrophoneLabel =
+    audioInputDevices.find((device) => device.deviceId === selectedMicrophoneDeviceId)?.label ?? "Default microphone";
 
-  if (!activeSession) {
-    return (
-      <article className="card">
-        <p className="card-title">Start a Session</p>
-        <p className="card-detail">
-          Sessions drive the live overlay. Start one here and the app will be ready for live transcript capture,
-          Ask TPMCluely answers, and automatic ticket creation when the meeting ends.
-        </p>
+  return (
+    <article className="card">
+      <div className="section-header">
+        <div>
+          <p className="card-title">{activeSession ? "Session Controls" : "Start a Meeting"}</p>
+          <p className="card-detail">
+            TPMCluely runs a preflight before listening, answers in-meeting questions from the transcript, and ends in
+            review-first ticket drafts for Linear.
+          </p>
+        </div>
+        <button type="button" className="secondary-button" disabled={preflightLoading} onClick={() => void onRefreshPreflight()}>
+          {preflightLoading ? "Checking..." : "Run preflight"}
+        </button>
+      </div>
+
+      {!activeSession ? (
         <div className="field-row">
           <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Session title" />
           <button type="button" onClick={() => void onStartSession(title)} disabled={title.trim().length === 0}>
             Start Meeting
           </button>
         </div>
-      </article>
-    );
-  }
-
-  return (
-    <article className="card">
-      <p className="card-title">Session Controls</p>
-      <div className="readiness-row">
-        <span>Status</span>
-        <strong>{status}</strong>
-      </div>
-      <div className="readiness-row">
-        <span>Started</span>
-        <strong>{new Date(activeSession.session.startedAt ?? activeSession.session.updatedAt).toLocaleTimeString()}</strong>
-      </div>
-      <div className="readiness-row">
-        <span>Live transcript</span>
-        <strong>{captureState}</strong>
-      </div>
-      {captureSourceLabel ? (
-        <div className="readiness-row">
-          <span>Audio source</span>
-          <strong>{captureSourceLabel}</strong>
-        </div>
       ) : null}
-      <div className="readiness-row">
-        <span>Screen context</span>
-        <strong>{screenShareState}</strong>
-      </div>
+
       <div className="field">
         <span>Capture mode</span>
         <select value={captureMode} onChange={(event) => onSetCaptureMode(event.target.value as CaptureMode)}>
-          <option value="system_audio">System audio + Deepgram</option>
           <option value="microphone">Microphone + Deepgram</option>
+          <option value="system_audio">System audio (advanced)</option>
           <option value="manual">Manual only</option>
         </select>
       </div>
+
+      {captureMode === "microphone" ? (
+        <label className="field">
+          <span>Microphone input</span>
+          <select
+            value={selectedMicrophoneDeviceId}
+            onChange={(event) => void onSelectMicrophoneDevice(event.target.value)}
+            disabled={audioInputDevices.length === 0}
+          >
+            {audioInputDevices.length === 0 ? <option value="">No microphone detected yet</option> : null}
+            {audioInputDevices.map((device) => (
+              <option key={device.deviceId} value={device.deviceId}>
+                {device.label}
+                {device.isDefault ? " (Default)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      <div className="health-strip">
+        <div className="health-pill">
+          <span>Mode</span>
+          <strong>{captureModeLabel(captureMode)}</strong>
+        </div>
+        <div className="health-pill">
+          <span>Listening</span>
+          <strong>{captureState}</strong>
+        </div>
+        <div className="health-pill">
+          <span>Transcript freshness</span>
+          <strong>{transcriptFreshnessLabel}</strong>
+        </div>
+        <div className="health-pill">
+          <span>Screen context</span>
+          <strong>{screenShareLabel(screenShareState)}</strong>
+        </div>
+        <div className="health-pill">
+          <span>Input / source</span>
+          <strong>{captureSourceLabel ?? (captureMode === "microphone" ? selectedMicrophoneLabel : "Not selected")}</strong>
+        </div>
+        <div className="health-pill">
+          <span>Last finalized line</span>
+          <strong>{lastTranscriptFinalizedAt ? new Date(lastTranscriptFinalizedAt).toLocaleTimeString() : "Waiting"}</strong>
+        </div>
+      </div>
+
+      {activeSession ? (
+        <>
+          <div className="readiness-row">
+            <span>Status</span>
+            <strong>{status}</strong>
+          </div>
+          <div className="readiness-row">
+            <span>Started</span>
+            <strong>{new Date(activeSession.session.startedAt ?? activeSession.session.updatedAt).toLocaleTimeString()}</strong>
+          </div>
+        </>
+      ) : null}
+
+      <div className="preflight-summary">
+        <div>
+          <p className="muted-label">Selected mode readiness</p>
+          <strong>{canStartSelectedMode ? "Ready" : "Blocked"}</strong>
+          <p className="card-detail">{preflightSummary}</p>
+        </div>
+        {preflightCheckedAt ? <span className="section-meta">Checked {new Date(preflightCheckedAt).toLocaleTimeString()}</span> : null}
+      </div>
+
+      {preflightBlockingChecks.length > 0 ? (
+        <div className="inline-alert">
+          <strong>Fix these before starting {captureModeLabel(captureMode).toLowerCase()} capture</strong>
+          <div className="check-list">
+            {preflightBlockingChecks.map((check) => (
+              <div key={check.key} className="check-list-item">
+                <span>{check.title}</span>
+                <strong>{check.message}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       <div className="toolbar-row">
-        {captureState === "listening" || captureState === "connecting" || captureState === "stopping" ? (
+        {captureState === "listening" || captureState === "connecting" || captureState === "stopping" || captureState === "degraded" ? (
           <button type="button" onClick={() => void onStopLiveCapture()}>
             Stop Listening
           </button>
         ) : (
-          <button type="button" onClick={() => void onStartLiveCapture()}>
+          <button type="button" disabled={!canStartSelectedMode && captureMode !== "manual"} onClick={() => void onStartLiveCapture()}>
             Start Listening
           </button>
         )}
         <button type="button" className="secondary-button" onClick={() => void onToggleOverlay()}>
           {overlayOpen ? "Close Overlay" : "Open Overlay"}
         </button>
-        {status === "active" ? (
+        {activeSession && status === "active" ? (
           <button type="button" onClick={() => void onPauseSession(activeSession.session.id)}>
             Pause
           </button>
         ) : null}
-        {status === "paused" ? (
+        {activeSession && status === "paused" ? (
           <button type="button" onClick={() => void onResumeSession(activeSession.session.id)}>
             Resume
           </button>
         ) : null}
-        {status !== "completed" ? (
+        {activeSession && status !== "completed" ? (
           <button type="button" onClick={() => void onCompleteSession(activeSession.session.id)}>
             End Session
           </button>
         ) : null}
       </div>
-      {screenContextEnabled && !screenShareOwnedByCapture ? (
+
+      {screenContextEnabled && !screenShareOwnedByCapture && activeSession ? (
         <div className="toolbar-row">
           {screenShareState === "active" ? (
             <button type="button" className="secondary-button" onClick={() => void onStopScreenShare()}>
@@ -144,7 +258,21 @@ export function SessionControls({
           )}
         </div>
       ) : null}
+
       <p className="card-detail">Overlay shortcut: {overlayShortcut}</p>
+
+      {captureHealth ? (
+        <div className="inline-alert inline-alert-soft">
+          <strong>Capture health</strong>
+          <p>{captureHealth.message}</p>
+        </div>
+      ) : null}
+      {microphoneSelectionWarning && captureMode === "microphone" ? (
+        <div className="inline-alert inline-alert-soft">
+          <strong>Microphone selection</strong>
+          <p>{microphoneSelectionWarning}</p>
+        </div>
+      ) : null}
       {captureError ? (
         <div className="inline-alert inline-alert-soft">
           <strong>Live transcription needs attention</strong>

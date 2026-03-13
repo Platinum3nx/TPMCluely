@@ -16,22 +16,25 @@ import {
   listMockSessions,
   listMockSystemAudioSources,
   markMockGeneratedTicketPushed,
+  pauseMockSession,
   pushMockGeneratedTicket,
   pushMockGeneratedTickets,
   regenerateMockSessionTickets,
-  pauseMockSession,
   replaceMockGeneratedTickets,
   resumeMockSession,
   runMockDynamicAction,
+  runMockPreflightChecks,
   saveMockKnowledgeFile,
   saveMockPrompt,
   saveMockSecret,
   saveMockSetting,
   searchMockSessions,
+  setMockGeneratedTicketReviewState,
   setMockOverlayOpen,
-  startMockSystemAudioCapture,
   startMockSession,
+  startMockSystemAudioCapture,
   stopMockSystemAudioCapture,
+  updateMockGeneratedTicketDraft,
 } from "./mock-backend";
 import type {
   AppendTranscriptInput,
@@ -41,39 +44,69 @@ import type {
   ExportedSessionPayload,
   KnowledgeFileRecord,
   MarkGeneratedTicketPushedInput,
-  PushGeneratedTicketInput,
+  PreflightReport,
   PromptRecord,
+  PushGeneratedTicketInput,
   RunDynamicActionInput,
   RuntimeSnapshot,
-  SaveKnowledgeFileInput,
   SaveGeneratedTicketsInput,
+  SaveKnowledgeFileInput,
   SavePromptInput,
   SaveSecretInput,
   SaveSettingInput,
   SearchSessionResult,
+  SecretKey,
   SessionDetail,
   SessionRecord,
+  SetGeneratedTicketReviewStateInput,
   SettingRecord,
-  SecretKey,
-  StartSystemAudioCaptureInput,
   StartSessionInput,
+  StartSystemAudioCaptureInput,
   SystemAudioSourceListPayload,
+  UpdateGeneratedTicketDraftInput,
 } from "./types";
 
 function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
+function isBrowserMockEnabled(): boolean {
+  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+  return env?.VITE_ENABLE_BROWSER_MOCK === "true";
+}
+
+function assertSupportedRuntime(): "tauri" | "browser-mock" {
+  if (isTauriRuntime()) {
+    return "tauri";
+  }
+
+  if (isBrowserMockEnabled()) {
+    return "browser-mock";
+  }
+
+  throw new Error(
+    "TPMCluely requires the native Tauri desktop runtime. Use VITE_ENABLE_BROWSER_MOCK=true only for local UI development and tests."
+  );
+}
+
 export async function bootstrapApp(): Promise<BootstrapPayload> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return bootstrapMockApp();
   }
 
   return invoke<BootstrapPayload>("bootstrap_app");
 }
 
+export async function runPreflightChecks(): Promise<PreflightReport> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return runMockPreflightChecks();
+  }
+
+  return invoke<PreflightReport>("run_preflight_checks");
+}
+
 export async function saveSetting(input: SaveSettingInput): Promise<SettingRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return saveMockSetting(input);
   }
 
@@ -81,7 +114,7 @@ export async function saveSetting(input: SaveSettingInput): Promise<SettingRecor
 }
 
 export async function saveSecret(input: SaveSecretInput): Promise<void> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     await saveMockSecret(input);
     return;
   }
@@ -90,7 +123,7 @@ export async function saveSecret(input: SaveSecretInput): Promise<void> {
 }
 
 export async function getSecretValue(key: SecretKey): Promise<string | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return getMockSecretValue(key);
   }
 
@@ -98,7 +131,7 @@ export async function getSecretValue(key: SecretKey): Promise<string | null> {
 }
 
 export async function listSessions(): Promise<SessionRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return listMockSessions();
   }
 
@@ -106,7 +139,7 @@ export async function listSessions(): Promise<SessionRecord[]> {
 }
 
 export async function getSessionDetail(sessionId: string): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return getMockSessionDetail(sessionId);
   }
 
@@ -114,7 +147,7 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
 }
 
 export async function listSystemAudioSources(): Promise<SystemAudioSourceListPayload> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return listMockSystemAudioSources();
   }
 
@@ -122,7 +155,7 @@ export async function listSystemAudioSources(): Promise<SystemAudioSourceListPay
 }
 
 export async function getCaptureStatus(sessionId: string): Promise<CaptureStatePayload> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return getMockCaptureStatus();
   }
 
@@ -130,7 +163,7 @@ export async function getCaptureStatus(sessionId: string): Promise<CaptureStateP
 }
 
 export async function startSession(input: StartSessionInput): Promise<SessionDetail> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return startMockSession(input);
   }
 
@@ -140,7 +173,7 @@ export async function startSession(input: StartSessionInput): Promise<SessionDet
 export async function startSystemAudioCapture(
   input: StartSystemAudioCaptureInput
 ): Promise<CaptureStatePayload> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return startMockSystemAudioCapture(input);
   }
 
@@ -148,7 +181,7 @@ export async function startSystemAudioCapture(
 }
 
 export async function pauseSession(sessionId: string): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return pauseMockSession(sessionId);
   }
 
@@ -156,7 +189,7 @@ export async function pauseSession(sessionId: string): Promise<SessionDetail | n
 }
 
 export async function resumeSession(sessionId: string): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return resumeMockSession(sessionId);
   }
 
@@ -164,7 +197,7 @@ export async function resumeSession(sessionId: string): Promise<SessionDetail | 
 }
 
 export async function stopSystemAudioCapture(sessionId: string): Promise<CaptureStatePayload> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return stopMockSystemAudioCapture(sessionId);
   }
 
@@ -172,7 +205,7 @@ export async function stopSystemAudioCapture(sessionId: string): Promise<Capture
 }
 
 export async function completeSession(sessionId: string): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return completeMockSession(sessionId);
   }
 
@@ -180,7 +213,7 @@ export async function completeSession(sessionId: string): Promise<SessionDetail 
 }
 
 export async function appendTranscriptSegment(input: AppendTranscriptInput): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return appendMockTranscriptSegment(input);
   }
 
@@ -188,7 +221,7 @@ export async function appendTranscriptSegment(input: AppendTranscriptInput): Pro
 }
 
 export async function runDynamicAction(input: RunDynamicActionInput): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return runMockDynamicAction(input);
   }
 
@@ -196,7 +229,7 @@ export async function runDynamicAction(input: RunDynamicActionInput): Promise<Se
 }
 
 export async function askAssistant(input: AskSessionInput): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return askMockAssistant(input);
   }
 
@@ -204,17 +237,37 @@ export async function askAssistant(input: AskSessionInput): Promise<SessionDetai
 }
 
 export async function saveGeneratedTickets(input: SaveGeneratedTicketsInput): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return replaceMockGeneratedTickets(input);
   }
 
   return invoke<SessionDetail | null>("save_generated_tickets", { input });
 }
 
+export async function updateGeneratedTicketDraft(
+  input: UpdateGeneratedTicketDraftInput
+): Promise<SessionDetail | null> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return updateMockGeneratedTicketDraft(input);
+  }
+
+  return invoke<SessionDetail | null>("update_generated_ticket_draft", { input });
+}
+
+export async function setGeneratedTicketReviewState(
+  input: SetGeneratedTicketReviewStateInput
+): Promise<SessionDetail | null> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return setMockGeneratedTicketReviewState(input);
+  }
+
+  return invoke<SessionDetail | null>("set_generated_ticket_review_state", { input });
+}
+
 export async function markGeneratedTicketPushed(
   input: MarkGeneratedTicketPushedInput
 ): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return markMockGeneratedTicketPushed(input);
   }
 
@@ -222,7 +275,7 @@ export async function markGeneratedTicketPushed(
 }
 
 export async function generateSessionTickets(sessionId: string): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return regenerateMockSessionTickets(sessionId);
   }
 
@@ -232,7 +285,7 @@ export async function generateSessionTickets(sessionId: string): Promise<Session
 export async function pushGeneratedTicket(
   input: PushGeneratedTicketInput
 ): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return pushMockGeneratedTicket(input);
   }
 
@@ -240,7 +293,7 @@ export async function pushGeneratedTicket(
 }
 
 export async function pushGeneratedTickets(sessionId: string): Promise<SessionDetail | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return pushMockGeneratedTickets(sessionId);
   }
 
@@ -248,7 +301,7 @@ export async function pushGeneratedTickets(sessionId: string): Promise<SessionDe
 }
 
 export async function getRuntimeState(): Promise<RuntimeSnapshot> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return getMockRuntimeState();
   }
 
@@ -256,7 +309,7 @@ export async function getRuntimeState(): Promise<RuntimeSnapshot> {
 }
 
 export async function setOverlayOpen(open: boolean): Promise<RuntimeSnapshot> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return setMockOverlayOpen(open);
   }
 
@@ -264,7 +317,7 @@ export async function setOverlayOpen(open: boolean): Promise<RuntimeSnapshot> {
 }
 
 export async function searchSessions(query: string): Promise<SearchSessionResult[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return searchMockSessions(query);
   }
 
@@ -272,7 +325,7 @@ export async function searchSessions(query: string): Promise<SearchSessionResult
 }
 
 export async function exportSessionMarkdown(sessionId: string): Promise<ExportedSessionPayload | null> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return exportMockSession(sessionId);
   }
 
@@ -280,7 +333,7 @@ export async function exportSessionMarkdown(sessionId: string): Promise<Exported
 }
 
 export async function listPrompts(): Promise<PromptRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return listMockPrompts();
   }
 
@@ -288,7 +341,7 @@ export async function listPrompts(): Promise<PromptRecord[]> {
 }
 
 export async function savePrompt(input: SavePromptInput): Promise<PromptRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return saveMockPrompt(input);
   }
 
@@ -296,7 +349,7 @@ export async function savePrompt(input: SavePromptInput): Promise<PromptRecord[]
 }
 
 export async function deletePrompt(promptId: string): Promise<PromptRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return deleteMockPrompt(promptId);
   }
 
@@ -304,7 +357,7 @@ export async function deletePrompt(promptId: string): Promise<PromptRecord[]> {
 }
 
 export async function listKnowledgeFiles(): Promise<KnowledgeFileRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return listMockKnowledgeFiles();
   }
 
@@ -312,7 +365,7 @@ export async function listKnowledgeFiles(): Promise<KnowledgeFileRecord[]> {
 }
 
 export async function saveKnowledgeFile(input: SaveKnowledgeFileInput): Promise<KnowledgeFileRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return saveMockKnowledgeFile(input);
   }
 
@@ -320,7 +373,7 @@ export async function saveKnowledgeFile(input: SaveKnowledgeFileInput): Promise<
 }
 
 export async function deleteKnowledgeFile(knowledgeFileId: string): Promise<KnowledgeFileRecord[]> {
-  if (!isTauriRuntime()) {
+  if (assertSupportedRuntime() === "browser-mock") {
     return deleteMockKnowledgeFile(knowledgeFileId);
   }
 

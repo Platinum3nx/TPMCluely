@@ -27,7 +27,8 @@
     "active": true,
     "targets": "all",
     "macOS": {
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "12.3"
     }
   }
 }

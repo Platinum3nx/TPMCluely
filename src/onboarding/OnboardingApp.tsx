@@ -2,27 +2,27 @@ import type { BootstrapPayload, PermissionSnapshot, SecretKey } from "../lib/typ
 
 interface OnboardingAppProps {
   bootstrap: BootstrapPayload;
-  secretDrafts: Record<SecretKey, string>;
-  onSecretDraftChange: (key: SecretKey, value: string) => void;
   onSaveSecret: (key: SecretKey) => Promise<void>;
+  onSecretDraftChange: (key: SecretKey, value: string) => void;
   savingSecretKey: SecretKey | null;
+  secretDrafts: Record<SecretKey, string>;
 }
 
-const permissionCopy: Array<{ key: keyof PermissionSnapshot; title: string; detail: string }> = [
+const permissionCopy: Array<{ detail: string; key: keyof PermissionSnapshot; title: string }> = [
   {
     key: "screenRecording",
     title: "Screen Recording",
-    detail: "Required for system audio capture, screenshot context, and best-effort session assistance.",
+    detail: "Required for system audio capture, screenshot context, and optional shared-screen grounding.",
   },
   {
     key: "microphone",
     title: "Microphone",
-    detail: "Optional for future microphone capture paths and voice-driven workflows.",
+    detail: "Required for the recommended mic-first capture path in real meetings.",
   },
   {
     key: "accessibility",
     title: "Accessibility",
-    detail: "Needed only for advanced hotkey and window behavior beyond default Tauri capabilities.",
+    detail: "Used only for advanced hotkey and window behavior beyond the default desktop shell.",
   },
 ];
 
@@ -46,21 +46,25 @@ function statusLabel(value: string): string {
   return "Pending";
 }
 
+function runtimeLabel(mode: BootstrapPayload["diagnostics"]["mode"]): string {
+  return mode === "desktop" ? "Desktop runtime" : "Development runtime";
+}
+
 export function OnboardingApp({
   bootstrap,
-  secretDrafts,
-  onSecretDraftChange,
   onSaveSecret,
+  onSecretDraftChange,
   savingSecretKey,
+  secretDrafts,
 }: OnboardingAppProps) {
   return (
     <section className="panel panel-grid">
       <div className="panel-hero">
-        <p className="eyebrow">First-Run Control</p>
-        <h2>Prepare the desktop shell before we light up live sessions.</h2>
+        <p className="eyebrow">First Run</p>
+        <h2>Prepare the desktop app before the first real meeting.</h2>
         <p className="muted">
-          This onboarding layer is intentionally strict: permissions, provider readiness, Keychain-backed secrets, and
-          system diagnostics must be stable before we move into transcript capture.
+          TPMCluely expects permissions, provider keys, and the local runtime to be stable before anyone relies on
+          in-meeting answers or review-first ticket generation.
         </p>
       </div>
 
@@ -80,11 +84,11 @@ export function OnboardingApp({
         </div>
 
         <article className="card diagnostic-card">
-          <p className="card-title">Diagnostics Snapshot</p>
+          <p className="card-title">Desktop Snapshot</p>
           <div className="diagnostic-grid">
             <div>
               <span className="muted-label">Runtime</span>
-              <strong>{bootstrap.diagnostics.mode}</strong>
+              <strong>{runtimeLabel(bootstrap.diagnostics.mode)}</strong>
             </div>
             <div>
               <span className="muted-label">Build</span>
@@ -95,12 +99,8 @@ export function OnboardingApp({
               <strong>{bootstrap.diagnostics.databaseReady ? "Ready" : "Pending"}</strong>
             </div>
             <div>
-              <span className="muted-label">State Machine</span>
-              <strong>{bootstrap.diagnostics.stateMachineReady ? "Ready" : "Pending"}</strong>
-            </div>
-            <div>
-              <span className="muted-label">Permission Detection</span>
-              <strong>{bootstrap.diagnostics.permissionDetectionReady ? "Partial / Ready" : "Pending"}</strong>
+              <span className="muted-label">Keychain</span>
+              <strong>{bootstrap.diagnostics.keychainAvailable ? "Ready" : "Unavailable"}</strong>
             </div>
             <div>
               <span className="muted-label">Capture Backend</span>
@@ -110,10 +110,6 @@ export function OnboardingApp({
               <span className="muted-label">Native System Audio</span>
               <strong>{bootstrap.captureCapabilities.nativeSystemAudio ? "Available" : "Unavailable"}</strong>
             </div>
-            <div>
-              <span className="muted-label">Screen Recording</span>
-              <strong>{statusLabel(bootstrap.permissions.screenRecording)}</strong>
-            </div>
           </div>
         </article>
       </div>
@@ -122,8 +118,8 @@ export function OnboardingApp({
         <article className="card">
           <p className="card-title">Provider Keys</p>
           <p className="card-detail">
-            Secrets are saved through the backend bridge. In browser mode they are mocked locally so the interface can
-            still be exercised while the Tauri layer is under construction.
+            TPMCluely stores provider secrets through the backend bridge so the desktop app can preflight Gemini,
+            Deepgram, and Linear before the meeting begins.
           </p>
           <div className="form-grid">
             {secretFields.map((field) => (
@@ -138,7 +134,7 @@ export function OnboardingApp({
                   />
                   <button
                     type="button"
-                    onClick={() => onSaveSecret(field.key)}
+                    onClick={() => void onSaveSecret(field.key)}
                     disabled={savingSecretKey === field.key || secretDrafts[field.key].trim().length === 0}
                   >
                     {savingSecretKey === field.key ? "Saving" : "Store"}
@@ -153,15 +149,15 @@ export function OnboardingApp({
           <p className="card-title">Provider Readiness</p>
           <div className="readiness-row">
             <span>Gemini</span>
-            <strong>{bootstrap.providers.llmReady ? "Ready" : "Needs Key"}</strong>
+            <strong>{bootstrap.providers.llmReady ? "Ready" : "Needs key"}</strong>
           </div>
           <div className="readiness-row">
             <span>Deepgram</span>
-            <strong>{bootstrap.providers.sttReady ? "Ready" : "Needs Key"}</strong>
+            <strong>{bootstrap.providers.sttReady ? "Ready" : "Needs key"}</strong>
           </div>
           <div className="readiness-row">
             <span>Linear</span>
-            <strong>{bootstrap.providers.linearReady ? "Ready" : "Needs Key + Team"}</strong>
+            <strong>{bootstrap.providers.linearReady ? "Ready" : "Needs key + team"}</strong>
           </div>
         </article>
       </div>
