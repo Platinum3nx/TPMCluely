@@ -1,329 +1,105 @@
 # TPMCluely
 
-TPMCluely is a Tauri desktop app for an in-meeting engineering copilot workflow:
+TPMCluely is a macOS Tauri desktop app for live meeting assistance. It captures transcript signal during a meeting, answers transcript-grounded questions, runs meeting-specific assistant actions, and turns completed sessions into review-first Linear ticket drafts.
 
-- start a meeting session
-- capture transcript signal live
-- ask transcript-grounded questions with `Ask TPMCluely`
-- generate follow-up questions during the meeting
-- end the meeting
-- automatically generate engineering tickets
-- push those tickets into Linear with idempotent dedupe
+The current product focus is the in-meeting workflow:
 
-The goal of this repo is a fully functional TPMCluely-style product focused on the core meeting loop and ticket generation, not full parity with every legacy Cluely feature.
+- preflight and permissions
+- live transcript capture
+- Ask TPMCluely
+- dynamic meeting actions
+- session review and export
+- local ticket draft generation
+- explicit approval before any Linear push
 
-## Naming Note
+Some internal package names still use the older `Cluely` label. In product and documentation terms, this repo should be treated as `TPMCluely`.
 
-The project name is `TPMCluely`.
+## What Is In This Repo
 
-Some internal package names or UI strings may still contain the legacy `Cluely` label. The current product direction and README naming should be treated as `TPMCluely`.
+This repository contains two related apps:
 
-## What This Repo Contains
-
-This repo has two related apps:
-
-1. `TPMCluely` desktop app
-   - Tauri + React frontend
+1. The TPMCluely desktop app at the repo root
+   - React frontend
+   - Tauri desktop shell
    - Rust backend
-   - local session storage
-   - macOS keychain-backed secret storage
-   - live transcript -> Gemini Q&A -> ticket generation -> Linear push
+   - local persistence for sessions, transcript history, assistant output, and ticket drafts
+2. [`ticket-generator/`](./ticket-generator)
+   - a standalone Next.js reference app for an older ticket-generation workflow
+   - useful for comparison, but not required for the current desktop workflow
 
-2. `ticket-generator/`
-   - a standalone Next.js reference implementation for the older ticket-generation workflow
-   - useful for comparison, but not required for the current desktop app flow
+For the main product flow, use the desktop app at the repo root.
 
-For the main product workflow, use the desktop app at the repo root.
+## Current Product Behavior
 
-## User Manual
+The current desktop app supports:
 
-This section is written for someone who just wants to set up TPMCluely and use it in a real meeting.
-
-### What TPMCluely Does
-
-TPMCluely helps during meetings.
-
-It can:
-
-- listen to the meeting
-- show a live transcript
-- answer questions based on what has already been said
-- suggest follow-up questions
-- create engineering tickets after the meeting
-- push those tickets into Linear
-
-### What You Need Before You Start
-
-You need:
-
-- a Mac
-- this project downloaded on your machine
-- `Gemini API Key`
-- `Deepgram API Key`
-- `Linear API Key`
-- `Linear Team ID`
-
-If someone else on your team already gave you these keys, you can paste them into TPMCluely during setup.
+- `Overview` tab for desktop readiness and runtime health
+- `Onboarding` tab for permissions and provider setup
+- `Session` tab for meeting start, capture mode selection, preflight, overlay control, and live assistance
+- `Dashboard` tab for transcript review, assistant trace review, export, and ticket approval
+- `Settings` tab for capture defaults, ticket behavior, prompt management, and knowledge file management
 
-### First-Time Setup
+Key workflow rules:
 
-1. Open Terminal.
-2. Go to the TPMCluely project folder.
-3. Run:
+- session history, assistant output, and ticket drafts are stored locally
+- provider secrets are stored through the backend, not in the frontend
+- ticket drafts are generated locally first
+- nothing is pushed to Linear automatically
+- a ticket must be approved before it can be pushed
 
-```bash
-npm install
-```
+## Feature Summary
 
-4. Start TPMCluely:
+### Live Meeting Assistance
 
-```bash
-npm run tauri:dev
-```
+- transcript-grounded `Ask TPMCluely`
+- dynamic actions:
+  - `Summarize so far`
+  - `What was decided?`
+  - `Next steps`
+  - `Follow-up questions`
+- pause and resume meeting sessions
+- overlay mode with a configurable global shortcut
 
-5. In the app, open `Onboarding`.
-6. Paste in:
-   `Gemini API Key`
-   `Deepgram API Key`
-   `Linear API Key`
-   `Linear Team ID`
-7. Click `Store` for each one.
-8. Confirm the app shows:
-   `Gemini: Ready`
-   `Deepgram: Ready`
-   `Linear: Ready`
-9. Open `Settings`.
-10. Make sure these are turned on:
-    `Ticket Generation`
-    `Auto Generate Tickets`
-    `Auto Push Linear`
-11. Check the overlay shortcut.
-    Default is `CmdOrCtrl+Shift+K`.
+### Capture Options
 
-### How To Start TPMCluely For A Meeting
+- `Microphone + Deepgram`
+- `System audio (advanced)`
+- `Manual only`
 
-TPMCluely does not automatically detect meetings yet.
+The app runs preflight checks for the selected capture path and may either:
 
-To use it:
+- allow the mode
+- warn that the mode still needs verification
+- block the mode until permissions or setup issues are fixed
 
-1. Start TPMCluely.
-2. Join your Zoom, Google Meet, or other meeting.
-3. Press the TPMCluely shortcut.
-4. The overlay opens.
-5. Pick the transcript source you want:
-   `Microphone + Deepgram`
-   `System audio + Deepgram`
-   `Manual only`
-6. Click `Start Listening`.
+### Screen Context
 
-If you want the safest setup, use `Microphone + Deepgram` unless you already know system audio works well on your machine.
+If `Screen Context` is enabled in Settings, Ask TPMCluely and dynamic actions can use shared screen context when available.
 
-### What To Do During The Meeting
+You can also enable `Persist Screen Artifacts` if you want the exact screenshots sent to Gemini to be stored for debugging and review.
 
-Once TPMCluely is listening:
+### Ticket Workflow
 
-- the transcript should begin to appear
-- the overlay stays available while the meeting continues
-- TPMCluely starts collecting the context it will later use for answers and ticket generation
+- completed sessions can produce local draft tickets
+- drafts can be edited before push
+- drafts can be approved, rejected, or moved back to draft
+- only approved drafts can be pushed to Linear
+- previously pushed issues are not overwritten
+- the Linear integration uses idempotency and dedupe markers so repeat pushes can link existing issues instead of creating duplicates
 
-You can use these main controls:
-
-- `Ask TPMCluely`
-  Use this when someone asks you something and you want TPMCluely to suggest an answer based on the meeting.
-- `Follow-up questions`
-  Use this when you want TPMCluely to suggest smart next questions based on what is still unclear.
-- `Summarize so far`
-  Use this for a short recap of the meeting.
-- `What was decided?`
-  Use this to pull out decisions.
-- `Next steps`
-  Use this to pull out action items.
-- `Pause`
-  Use this if you want to temporarily pause the meeting session.
-- `Hide`
-  Use this to close the overlay without ending the meeting.
-
-### How To Use Ask TPMCluely
-
-When someone in the meeting asks you a question:
-
-1. Open the overlay if it is hidden.
-2. Click into `Ask TPMCluely`.
-3. Type a direct question such as:
-   `What was decided about the rollout?`
-   `Who owns the backend work?`
-   `What should I say about the risk here?`
-4. Read TPMCluely's answer aloud.
-
-Best results come when:
-
-- people are speaking clearly
-- not too many people talk over each other
-- TPMCluely has already collected at least a little transcript
-
-### How Ticket Generation Works
-
-When you end the meeting:
-
-1. TPMCluely finalizes the transcript.
-2. It creates session notes.
-3. It uses Gemini to generate engineering tickets from the meeting.
-4. If Linear is configured, it pushes those tickets into Linear.
-
-Ticket count is based on the meeting itself.
-
-That means:
-
-- one small discussion may create one ticket
-- a larger planning meeting may create several tickets
-- a vague meeting may create none
-
-### How To Review Results After The Meeting
-
-After you click `End Meeting`:
-
-1. Open `Dashboard`.
-2. Select the meeting session you want to review.
-3. Check:
-   `Summary`
-   `Decisions`
-   `Action Items`
-   `Transcript`
-   `Generated Tickets`
-4. If Linear push worked, use the Linear links shown on the tickets.
-
-You can also click `Export Markdown` to save a written version of the meeting.
-
-### What Each Screen Is For
-
-- `Onboarding`
-  Add keys and check readiness.
-- `Session`
-  Main control area for meetings and transcript capture.
-- `Dashboard`
-  Review old meetings, notes, transcript, and tickets.
-- `Settings`
-  Change shortcut and meeting behavior.
-
-### Best Practices
-
-- Start TPMCluely before the meeting gets important.
-- Use `Microphone + Deepgram` if you want the safest live transcript path.
-- Ask short, direct questions in `Ask TPMCluely`.
-- End the meeting cleanly so ticket generation can run.
-- Do one short test meeting before using TPMCluely in something important.
+## Requirements
 
-### Simple Troubleshooting
+For local desktop development and real usage on macOS, install:
 
-- If no transcript appears:
-  Check your Deepgram key, permissions, and capture mode.
-- If TPMCluely gives weak answers:
-  Wait for more transcript and ask a more specific question.
-- If tickets do not show up in Linear:
-  Check the Linear API key, team ID, and auto-push setting.
-- If the shortcut does not open TPMCluely:
-  Check the shortcut in `Settings` and make sure no other app is already using it.
-
-## Core Workflow
-
-The intended workflow is:
-
-1. Start TPMCluely.
-2. Join a meeting on your machine.
-3. Press the overlay shortcut to open TPMCluely.
-4. Choose a transcript source:
-   - `System audio + Deepgram`
-   - `Microphone + Deepgram`
-   - `Manual only`
-5. Click `Start Listening` in the overlay.
-6. Let the meeting proceed.
-7. Click `Ask TPMCluely` when the user needs a transcript-grounded answer to read aloud.
-8. Click `Follow-up questions` when you want Gemini to suggest deeper questions based on unresolved discussion.
-9. End the session.
-10. Review generated notes and tickets in the dashboard.
-11. If Linear is configured, tickets are automatically pushed to Linear once per idempotency key.
-
-## How It Works
-
-### High-Level Architecture
-
-- React frontend:
-  - meeting UI
-  - overlay mode
-  - capture controls
-  - live transcript display
-  - dashboard and ticket review
-
-- Rust backend:
-  - SQLite persistence for sessions, transcripts, messages, and generated tickets
-  - Gemini calls for meeting answers and ticket generation
-  - Linear GraphQL calls for issue creation
-  - keychain-backed secret storage
-
-- Deepgram:
-  - used for live transcription
-  - streamed from the frontend capture layer
-
-### Session Lifecycle
-
-When you open the overlay and click `Start Listening`:
-
-- a session record is created
-- the live meeting UI becomes active
-- the overlay becomes the primary live control surface
-- transcript segments are appended as they arrive
-- rolling summary and derived notes are updated as transcript signal grows
-
-When you ask a question:
-
-- the app sends Gemini:
-  - rolling summary
-  - recent transcript snippets
-  - relevant transcript matches
-  - recent meeting Q&A history
-- Gemini returns a concise answer grounded in the transcript
-
-When you run a dynamic action:
-
-- `Summarize so far` gives a concise spoken summary
-- `What was decided?` extracts decisions
-- `Next steps` extracts action items
-- `Follow-up questions` generates grounded follow-up questions for the meeting
-
-When you end a session:
-
-- transcript capture stops
-- final derived notes are saved
-- Gemini generates engineering tickets based on the meeting content
-- generated tickets are normalized and deduped
-- if Linear auto-push is enabled, tickets are pushed into Linear
-
-### Ticket Generation Rules
-
-Ticket count is dynamic.
-
-That means:
-
-- a short meeting discussing one clear work item may produce one ticket
-- a broader meeting may produce several tickets
-- a vague meeting may produce zero tickets
-
-The app is intentionally not hardcoded to a fixed ticket range.
-
-## Prerequisites
-
-For local desktop development on macOS, you should have:
-
+- macOS
 - Node.js 20+
 - npm
 - Rust toolchain
 - Xcode Command Line Tools
 
-If `npm run tauri:dev` fails because of missing native tooling, install Rust and the macOS developer toolchain first.
+If `npm run tauri:dev` fails because of missing native dependencies, install Rust and the macOS developer tools first.
 
-## Setup
-
-### 1. Install Dependencies
+## Installation
 
 From the repo root:
 
@@ -331,187 +107,64 @@ From the repo root:
 npm install
 ```
 
-### 2. Configure API Keys
+## Provider Setup
 
-The desktop app uses its own secret store.
+The desktop app stores secrets through the Tauri backend and OS keychain-backed storage.
 
-Desktop keys are not read from `ticket-generator/.env.local`.
+Do not configure the desktop app by editing `ticket-generator/.env.local`.
 
-For the TPMCluely desktop app, store these keys through the app's `Onboarding` screen:
+Open the app and go to `Onboarding`, then store:
 
 - `Gemini API Key`
 - `Deepgram API Key`
-- `Linear API Key`
-- `Linear Team ID`
+- `Linear API Key` if you want Linear push
+- `Linear Team ID` if you want Linear push
 
-These are saved through the Tauri backend into the app's keychain-backed secret store.
+Expected readiness states:
 
-Important:
+- `Gemini: Ready`
+- `Deepgram: Ready`
+- `Linear: Ready` when both the API key and team ID are configured
 
-- `ticket-generator/.env.local` is only used by the standalone Next.js app in `ticket-generator/`
-- the desktop app should be configured through the desktop UI, not by editing `.env.local`
+Notes:
 
-### 3. Optional Settings Review
-
-Open the `Settings` screen and verify:
-
-- `Ticket Generation` is on
-- `Auto Generate Tickets` is on
-- `Auto Push Linear` is on
-- `Always On Top` is set the way you want
-- `Overlay Shortcut` matches your preferred trigger
+- Gemini is used for assistant responses and ticket generation
+- Deepgram is used for live transcription
+- Linear is optional if you only want local draft tickets and local review
 
 ## Running The App
 
-### Desktop App
+### Desktop Runtime
 
-Run the actual TPMCluely desktop app:
+Run the real desktop app:
 
 ```bash
 npm run tauri:dev
 ```
 
-This is the command you should use for real desktop usage and validation.
-
-### Browser Mock
-
-Run the frontend without the desktop runtime:
-
-```bash
-npm run dev
-```
-
-Use this only for UI development or browser-safe testing.
-
-It will not give you the full desktop behavior.
+Use this for real feature validation, native permissions, overlay behavior, and live meeting testing.
 
 ### Production Build
+
+Build the desktop app:
 
 ```bash
 npm run tauri:build
 ```
 
-## Recommended Setup
+### Browser Mock Runtime
 
-For the most reliable setup:
-
-1. Launch the app with:
+Run the frontend in browser-mock mode:
 
 ```bash
-npm run tauri:dev
+VITE_ENABLE_BROWSER_MOCK=true npm run dev
 ```
 
-2. Go to `Onboarding` and confirm all providers are `Ready`.
-3. Go to `Settings` and confirm ticket automation toggles are enabled.
-4. Go to `Session`.
-5. Join the meeting you want TPMCluely to assist with.
-6. Choose `Microphone + Deepgram` unless you have already verified `System audio + Deepgram` on your exact machine and meeting app.
-7. Press the overlay shortcut.
-8. Click `Start Listening`.
-9. Run the meeting.
-10. Use `Ask TPMCluely` and `Follow-up questions` during the discussion.
-11. End the session.
-12. Open `Dashboard` and show the resulting tickets and Linear links.
+Use this for UI development and browser-safe experimentation only.
 
-## Capture Modes
+Without `VITE_ENABLE_BROWSER_MOCK=true`, the app expects the native Tauri runtime and will fail in a plain browser tab.
 
-### `Microphone + Deepgram`
-
-Safest option for most single-machine usage.
-
-Use this if:
-
-- the meeting is playing over speakers
-- you are okay with microphone pickup
-- you want the most predictable capture path
-
-### `System audio + Deepgram`
-
-Best when it works, but more OS- and app-dependent.
-
-Use this only if you have already verified:
-
-- the meeting app exposes system audio to screen/audio capture
-- macOS permissions are behaving correctly
-
-### `Manual only`
-
-Fallback mode.
-
-Use this if live capture fails and you still want to keep working:
-
-- Ask TPMCluely
-- follow-up generation
-- ticket generation
-
-## Main Screens
-
-### Onboarding
-
-Use this screen to:
-
-- check provider readiness
-- check the diagnostics snapshot
-- store provider keys
-
-### Session
-
-This is the main live meeting experience.
-
-It includes:
-
-- session lifecycle controls
-- capture mode selection
-- live transcript controls
-- overlay toggle
-- `Ask TPMCluely`
-- dynamic actions
-- transcript feed
-- assistant feed
-
-### Dashboard
-
-Use this after a session ends.
-
-It shows:
-
-- session notes
-- transcript history
-- generated tickets
-- Linear links if ticket push succeeded
-
-### Settings
-
-Use this to configure:
-
-- theme
-- output language
-- audio language
-- overlay shortcut
-- session widget / always-on-top behavior
-- ticket automation toggles
-
-## Typical Meeting Flow
-
-Here is a representative TPMCluely workflow:
-
-1. Start TPMCluely.
-2. Join a meeting called something like `Q2 engineering planning` or `Auth rollout review`.
-3. Press the overlay shortcut and click `Start Listening`.
-4. Let the team discuss a couple of features.
-5. When someone asks the user a question, click `Ask TPMCluely`.
-6. Ask something like:
-   - `What should I say about rollout risk?`
-   - `What was decided about the metrics dashboard?`
-   - `Who owns the backend work?`
-7. Read Gemini's response aloud.
-8. Click `Follow-up questions` once or twice to show proactive assistance.
-9. End the meeting.
-10. Open the dashboard.
-11. Show the generated tickets.
-12. Show the Linear issue links.
-
-## Testing
+## Verification Commands
 
 From the repo root:
 
@@ -536,115 +189,420 @@ npm run test:e2e
 ### Rust tests
 
 ```bash
-cd src-tauri
-cargo test
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-## Troubleshooting
+### Full desktop verification
 
-### The transcript does not appear
+```bash
+npm run verify:desktop
+```
 
-Check:
+## Daily Workflow
 
-- Deepgram key is stored in the desktop app
-- microphone or system audio permissions are granted
-- you selected the right capture mode
-- you clicked `Start Listening`
+### 1. First-Time Setup
 
-Fallback:
+1. Start the app with `npm run tauri:dev`.
+2. Open `Onboarding`.
+3. Confirm permissions are in a usable state:
+   - `Screen Recording`
+   - `Microphone`
+   - `Accessibility`
+4. Store provider keys.
+5. Confirm the provider readiness cards are ready for the integrations you plan to use.
+6. Open `Settings` and review capture and ticket defaults before your first real meeting.
 
-- switch to `Manual only`
-- add transcript lines manually
+### 2. Start A Meeting
 
-### `Ask TPMCluely` gives weak answers
+Open `Session` and do the following:
 
-Usually this means:
+1. Run preflight.
+2. Choose the capture mode:
+   - `Microphone + Deepgram` for the safest live path
+   - `System audio (advanced)` when you have already verified macOS capture behavior
+   - `Manual only` when you do not want live audio capture
+3. If using microphone mode, choose the preferred microphone input.
+4. Start the meeting session.
+5. Press the overlay shortcut if you want to work from the live overlay.
 
-- there is not enough transcript yet
-- the audio quality is poor
-- too many people are talking over one another
+Default overlay shortcut:
 
-Fix:
+```text
+CmdOrCtrl+Shift+K
+```
 
-- let more transcript accumulate
-- ask a more specific question
-- use manual transcript lines for important moments
+### 3. During The Meeting
 
-### Tickets did not show up in Linear
+From the `Session` tab or overlay, you can:
 
-Check:
+- ask a live question with `Ask TPMCluely`
+- run `Summarize so far`
+- run `What was decided?`
+- run `Next steps`
+- run `Follow-up questions`
+- pause the meeting
+- stop or restart listening
+- share your screen for additional context when screen context is enabled
+- hide the overlay without ending the meeting
 
-- `Linear API Key` is stored
-- `Linear Team ID` is stored
-- `Auto Push Linear` is enabled
-- the Linear token has permission to create issues in that team
+TPMCluely is designed to stay grounded in the current transcript. Results are best when:
 
-The dashboard may still show locally generated tickets even if the Linear push fails.
+- audio is clear
+- speakers are not talking over one another constantly
+- enough transcript has accumulated before you ask a question
+- you share screen context when the answer depends on what is visible on-screen
 
-### Overlay shortcut does not trigger
+### 4. End The Meeting
 
-Check:
+When you click `End Meeting`, TPMCluely:
 
-- the shortcut value in `Settings`
-- whether another app is already using the same global shortcut
+- finalizes the session
+- stores the resulting notes locally
+- may generate draft tickets automatically if both of these settings are enabled:
+  - `Ticket Generation`
+  - `Auto Generate Drafts`
 
-You can always open the overlay using the in-app button.
+If automatic generation is disabled, you can generate drafts manually from the dashboard after the session ends.
 
-## Data and Secrets
+### 5. Review The Session
+
+Open `Dashboard`, select the session, and review:
+
+- session notes:
+  - summary
+  - decisions
+  - action items
+  - follow-up draft
+- transcript
+- assistant trace
+- generated ticket drafts
+- Linear issue links when push has succeeded
+
+You can also click `Export Markdown` to export the session as a Markdown summary that includes:
+
+- status
+- start and end times
+- summary
+- decisions
+- action items
+- transcript
+
+## Main Screens
+
+### Overview
+
+The `Overview` tab is a quick readiness view for:
+
+- database readiness
+- keychain availability
+- state-machine readiness
+- search and export readiness
+- permission status
+- native system-audio availability
+
+### Onboarding
+
+Use `Onboarding` to:
+
+- review permission state
+- inspect the desktop snapshot
+- store Gemini, Deepgram, and Linear credentials
+- confirm provider readiness
+
+### Session
+
+Use `Session` for the live meeting workflow:
+
+- start a meeting
+- choose the capture mode
+- choose a microphone device
+- run preflight
+- start and stop listening
+- pause and resume the meeting
+- share screen context
+- ask transcript-grounded questions
+- run dynamic assistant actions
+- watch the transcript and assistant feed update live
+
+### Dashboard
+
+Use `Dashboard` after or during a session to:
+
+- search sessions
+- inspect transcript evidence
+- rename speaker labels
+- review assistant output
+- export Markdown
+- generate ticket drafts
+- edit ticket drafts
+- approve or reject ticket drafts
+- push approved drafts to Linear
+
+### Settings
+
+Use `Settings` to control:
+
+- theme
+- output language
+- audio language
+- overlay shortcut
+- ticket push mode
+- preferred microphone behavior
+- capture and review toggles
+
+Current Settings features include:
+
+- `Stealth Mode`
+- `Session Widget`
+- `Always On Top`
+- `Rolling Summary`
+- `Screen Context`
+- `Persist Screen Artifacts`
+- `Ticket Generation`
+- `Auto Generate Drafts`
+
+The `Settings` screen also includes:
+
+- `Prompt Library` for custom prompt templates
+- `Knowledge Library` for local reference files
+
+## Prompt And Knowledge Libraries
+
+### Prompt Library
+
+Prompt Library lets you:
+
+- create and edit custom prompt templates
+- mark one as active
+- mark one as the default
+
+New sessions snapshot the active prompt so the meeting keeps a stable prompt context even if the library changes later.
+
+### Knowledge Library
+
+Knowledge Library stores local text-based reference files inside the desktop app.
+
+The current file picker accepts:
+
+- `.txt`
+- `.md`
+- `.json`
+- `.csv`
+- `.log`
+
+This is useful for keeping local notes, runbooks, or specs available in the app's settings area.
+
+## Capture Modes
+
+### `Microphone + Deepgram`
+
+Recommended for most real meetings.
+
+Use this when:
+
+- you want the most predictable setup
+- microphone permissions are available
+- you have a working input device selected
+
+### `System audio (advanced)`
+
+Use this only after verifying it on your exact machine and meeting stack.
+
+This mode depends more heavily on:
+
+- macOS Screen Recording permission
+- native system-audio support
+- the behavior of the meeting app you are using
+
+### `Manual only`
+
+Use this when:
+
+- audio capture is unavailable
+- you want to keep a session without live listening
+- you want to add transcript signal manually and still use the review workflow
+
+## Ticket Review Workflow
+
+The current ticket flow is intentionally review-first.
+
+What happens today:
+
+1. TPMCluely generates local draft tickets.
+2. You review the drafts in `Dashboard`.
+3. You edit the title, description, type, or acceptance criteria if needed.
+4. You approve the drafts that should leave the desktop app.
+5. You push approved drafts to Linear explicitly.
+
+Important:
+
+- TPMCluely does not auto-push drafts to Linear
+- unapproved drafts cannot be pushed
+- rejected drafts stay local
+- pushed drafts keep their linked Linear issue information
+- a retry may link an existing issue instead of creating a duplicate when the dedupe markers match
+
+Settings that affect this flow:
+
+- `Ticket Generation`
+- `Auto Generate Drafts`
+- `Ticket push mode`
+
+`Ticket push mode` currently supports:
+
+- `Review before push`
+- `Manual only`
+
+## Screen Context And Stealth Mode
+
+### Screen Context
+
+When `Screen Context` is enabled:
+
+- Ask TPMCluely can use the shared screen when available
+- dynamic actions can use the shared screen when available
+- the assistant feed records whether screen context was used
+
+### Persist Screen Artifacts
+
+When `Persist Screen Artifacts` is enabled, the app stores the screenshots that were sent with assistant requests. This is useful for debugging and auditability.
+
+### Stealth Mode
+
+`Stealth Mode` is available from Settings for users who want the overlay hidden from screen capture, screen sharing, and recording tools while keeping it visible locally.
+
+## Data And Secrets
 
 ### Secrets
 
-Desktop secrets are stored in the app's keychain-backed secret store.
+Desktop secrets are stored through the backend using the local OS keychain-backed secret store.
 
 That includes:
 
-- Gemini key
-- Deepgram key
+- Gemini API key
+- Deepgram API key
 - Linear API key
 - Linear team ID
 
-### Local Session Data
+### Local Data
 
-Meeting data is stored locally in the desktop app database, including:
+The desktop app stores meeting data locally, including:
 
 - sessions
 - transcript segments
 - assistant messages
 - generated tickets
+- settings
+- prompt records
+- knowledge file metadata
+
+## Architecture At A Glance
+
+- React renders the desktop UI
+- Tauri provides the desktop shell and command bridge
+- Rust handles persistence, providers, export, and session orchestration
+- SQLite stores local session and ticket data
+- Gemini powers assistant responses and ticket generation
+- Deepgram powers live speech-to-text
+- Linear is used only when you explicitly push approved tickets
+
+## Troubleshooting
+
+### `npm run dev` does not work in a normal browser
+
+Use:
+
+```bash
+VITE_ENABLE_BROWSER_MOCK=true npm run dev
+```
+
+The app requires the native Tauri runtime unless browser mock mode is explicitly enabled.
+
+### No transcript appears
+
+Check:
+
+- your Deepgram key is stored
+- microphone or Screen Recording permissions are available
+- the selected capture mode passed preflight
+- you actually started listening
+- the selected microphone or system source is the one you expect
+
+Fallback:
+
+- switch to `Microphone + Deepgram`
+- switch to `Manual only`
+
+### Assistant answers are weak
+
+Usually this means:
+
+- the transcript is still too thin
+- the audio quality is poor
+- multiple people are talking at once
+- the question depends on screen context that has not been shared
+
+Try:
+
+- waiting for more transcript
+- asking a more specific question
+- sharing the screen when relevant
+- using a custom prompt for future sessions
+
+### System audio mode is blocked or unreliable
+
+Check:
+
+- `Screen Recording` permission
+- whether native system audio is available on your machine
+- whether the meeting app exposes the needed audio path
+
+If it is still unreliable, use `Microphone + Deepgram`.
+
+### Tickets did not reach Linear
+
+Check:
+
+- the draft was approved first
+- `Linear API Key` is stored
+- `Linear Team ID` is stored
+- the Linear token can create issues in that team
+- you explicitly pushed the approved draft from the dashboard
+
+Remember: drafts remain local until you approve and push them.
+
+### Overlay shortcut does not trigger
+
+Check:
+
+- the configured shortcut in `Settings`
+- whether another app already uses the same global shortcut
+
+You can still use the `Session` tab directly even if the global shortcut is unavailable.
 
 ## `ticket-generator/` Notes
 
-The `ticket-generator/` directory still exists as a reference implementation for the older standalone ticket-generation flow.
+The standalone app in [`ticket-generator/`](./ticket-generator) is still part of the repository, but it is not the runtime configuration source for the desktop app.
 
-Use it only if you explicitly want to run that separate app.
+In particular:
 
-Its `.env.local` is not the runtime config source for the Tauri desktop app.
+- `ticket-generator/.env.local` is for the standalone Next.js app only
+- the desktop app should be configured through `Onboarding`
+- if you want the older standalone workflow, read [`ticket-generator/README.md`](./ticket-generator/README.md)
 
-## Current Product Scope
+## Recommended Dry Run Checklist
 
-TPMCluely is currently focused on the main in-meeting workflow:
+Before relying on TPMCluely in a real meeting:
 
-- live meeting assistance
-- transcript-grounded Q&A
-- follow-up question generation
-- post-meeting ticket generation
-
-It is intentionally not focused on out-of-meeting features like:
-
-- Google Calendar pre-briefs
-- pre-call summaries
-- extra out-of-scope workflow surfaces
-
-## Recommended Readiness Checklist
-
-Before relying on the app for a live meeting:
-
-1. Confirm all four provider secrets are present.
-2. Run a 3-5 minute dry run with the same meeting app.
-3. Verify:
-   - transcript appears live
-   - `Ask TPMCluely` returns usable answers
-   - `Follow-up questions` works
-   - ending the session generates tickets
-   - tickets land in Linear
-4. If system audio is inconsistent, switch to `Microphone + Deepgram`.
+1. Confirm Gemini and Deepgram are ready.
+2. Confirm Linear is ready if you plan to push tickets.
+3. Run preflight in the `Session` tab.
+4. Test the exact capture mode you plan to use.
+5. Verify the overlay shortcut works.
+6. Run a short rehearsal meeting and confirm:
+   - transcript appears
+   - Ask TPMCluely responds
+   - dynamic actions work
+   - ending the session preserves notes
+   - ticket drafts appear
+   - approved drafts can be pushed to Linear when desired
