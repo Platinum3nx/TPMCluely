@@ -31,6 +31,7 @@ const secretFields: Array<{ key: SecretKey; label: string; placeholder: string }
   { key: "deepgram_api_key", label: "Deepgram API Key", placeholder: "dgr..." },
   { key: "linear_api_key", label: "Linear API Key", placeholder: "lin_api..." },
   { key: "linear_team_id", label: "Linear Team ID", placeholder: "team_..." },
+  { key: "github_pat", label: "GitHub PAT", placeholder: "ghp_..." },
 ];
 
 function statusLabel(value: string): string {
@@ -158,6 +159,10 @@ export function OnboardingApp({
           <div className="readiness-row">
             <span>Linear</span>
             <strong>{bootstrap.providers.linearReady ? "Ready" : "Needs key + team"}</strong>
+          </div>
+          <div className="readiness-row">
+            <span>GitHub</span>
+            <strong>{bootstrap.secrets.githubConfigured ? "Ready" : "Needs PAT"}</strong>
           </div>
         </article>
       </div>

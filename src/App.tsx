@@ -81,6 +81,7 @@ const initialSecrets: Record<SecretKey, string> = {
   deepgram_api_key: "",
   linear_api_key: "",
   linear_team_id: "",
+  github_pat: "",
 };
 
 interface WindowFrame {

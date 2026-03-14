@@ -517,3 +517,11 @@ export async function deleteKnowledgeFile(knowledgeFileId: string): Promise<Know
 
   return invoke<KnowledgeFileRecord[]>("delete_knowledge_file", { knowledgeFileId });
 }
+
+export async function syncGithubRepo(ownerRepo: string, branch: string): Promise<number> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return Promise.resolve(0);
+  }
+
+  return invoke<number>("sync_github_repo", { ownerRepo, branch });
+}

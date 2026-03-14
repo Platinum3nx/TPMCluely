@@ -18,6 +18,7 @@ export interface SecretSnapshot {
   geminiConfigured: boolean;
   deepgramConfigured: boolean;
   linearConfigured: boolean;
+  githubConfigured: boolean;
 }
 
 export interface ProviderSnapshot {
@@ -79,7 +80,7 @@ export interface BootstrapPayload {
   knowledgeFiles: KnowledgeFileRecord[];
 }
 
-export type SecretKey = "gemini_api_key" | "deepgram_api_key" | "linear_api_key" | "linear_team_id";
+export type SecretKey = "gemini_api_key" | "deepgram_api_key" | "linear_api_key" | "linear_team_id" | "github_pat";
 
 export interface SaveSecretInput {
   key: SecretKey;
