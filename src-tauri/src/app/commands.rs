@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::time::Instant;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use chrono::Utc;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::app::state::AppState;
@@ -30,7 +32,9 @@ use crate::providers::linear::{
     find_issues_by_marker, LinearIssue, LinearIssueMatch, LinearIssueRequest,
 };
 use crate::providers::llm::{
-    check_connectivity as check_llm_connectivity, generate_text, generate_text_multimodal, LlmPart,
+    check_connectivity as check_llm_connectivity, generate_text_multimodal_with_options,
+    generate_text_with_options,
+    stream_text_multimodal_with_options, LlmGenerationOptions, LlmPart,
 };
 use crate::providers::stt::check_connectivity as check_stt_connectivity;
 use crate::providers::ProviderSnapshot;
@@ -38,6 +42,7 @@ use crate::screenshot::ScreenshotStore;
 use crate::secrets::SecretPresence;
 use crate::session::manager::SessionRuntimeSnapshot;
 use crate::session::state_machine::SessionStatus;
+use crate::search::RetrievedContextChunk;
 use crate::tickets::generate_tickets;
 use crate::transcript::{
     format_transcript_document, select_relevant_transcript_snippets, truncate_context_middle,
@@ -47,6 +52,12 @@ use crate::window::WindowRuntimeSnapshot;
 const MEETING_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use the transcript as the primary source of truth. If a shared screen image is provided, use it only when it materially helps answer the current question. Never invent facts. If transcript and screen context disagree, say so explicitly. Cite transcript snippets using labels like [S14]. If you used the shared screen, cite it as [Screen]. Keep spoken answers concise enough for the user to read aloud in a meeting.";
 const ACTION_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use the transcript as the primary source of truth. If a shared screen image is provided, use it only when it materially helps answer the current question. Be specific, concise, and grounded. If evidence is weak or missing, say that clearly instead of guessing. Cite transcript snippets using labels like [S14]. If you used the shared screen, cite it as [Screen].";
 const MAX_ASSISTANT_TRANSCRIPT_CHARS: usize = 18_000;
+const ASK_MAX_OUTPUT_TOKENS: u32 = 160;
+const ASSISTANT_STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+pub const EVENT_ASSISTANT_STARTED: &str = "assistant:started";
+pub const EVENT_ASSISTANT_CHUNK: &str = "assistant:chunk";
+pub const EVENT_ASSISTANT_COMPLETED: &str = "assistant:completed";
+pub const EVENT_ASSISTANT_FAILED: &str = "assistant:failed";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +100,7 @@ pub struct DiagnosticsSnapshot {
     pub state_machine_ready: bool,
     pub window_controller_ready: bool,
     pub search_ready: bool,
+    pub semantic_search_ready: bool,
     pub prompt_library_ready: bool,
     pub knowledge_library_ready: bool,
     pub export_ready: bool,
@@ -170,7 +182,7 @@ pub struct ChatMessagePayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct MessageAttachmentPayload {
     pub kind: String,
     pub artifact_id: Option<String>,
@@ -183,12 +195,15 @@ pub struct MessageAttachmentPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct MessageMetadataPayload {
     pub response_mode: Option<String>,
     pub provider_name: Option<String>,
     pub provider_error: Option<String>,
     pub latency_ms: Option<u64>,
+    pub streamed: bool,
+    pub first_chunk_latency_ms: Option<u64>,
+    pub screen_capture_wait_ms: Option<u64>,
     pub used_screen_context: bool,
     pub citations: Vec<String>,
 }
@@ -240,7 +255,10 @@ pub struct SearchResultPayload {
     pub updated_at: String,
     pub snippet: String,
     pub matched_field: String,
-    pub transcript_sequence_no: Option<i64>,
+    pub match_label: String,
+    pub retrieval_mode: String,
+    pub transcript_sequence_start: Option<i64>,
+    pub transcript_sequence_end: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -337,6 +355,17 @@ pub struct AskSessionInput {
     pub session_id: String,
     pub prompt: String,
     pub screen_context: Option<ScreenContextInput>,
+    pub screen_capture_wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskSessionStreamInput {
+    pub request_id: String,
+    pub session_id: String,
+    pub prompt: String,
+    pub screen_context: Option<ScreenContextInput>,
+    pub screen_capture_wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -345,6 +374,47 @@ pub struct RunDynamicActionInput {
     pub session_id: String,
     pub action: String,
     pub screen_context: Option<ScreenContextInput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskAssistantStreamStartPayload {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantStartedPayload {
+    pub request_id: String,
+    pub session_id: String,
+    pub prompt: String,
+    pub started_at: String,
+    pub requested_screen_context: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantChunkPayload {
+    pub request_id: String,
+    pub session_id: String,
+    pub delta: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantCompletedPayload {
+    pub request_id: String,
+    pub session_id: String,
+    pub detail: Option<SessionDetailPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantFailedPayload {
+    pub request_id: String,
+    pub session_id: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,6 +748,13 @@ fn assistant_response_for_prompt(prompt: &str, derived: &SessionDerivedUpdate) -
     assistant_response_for_action("summary", derived)
 }
 
+fn ask_generation_options() -> LlmGenerationOptions {
+    LlmGenerationOptions {
+        response_mime_type: None,
+        max_output_tokens: Some(ASK_MAX_OUTPUT_TOKENS),
+    }
+}
+
 fn load_settings_map(state: &AppState) -> Result<HashMap<String, String>, String> {
     state
         .database()
@@ -693,13 +770,22 @@ fn setting_enabled(settings: &HashMap<String, String>, key: &str, default: bool)
         .unwrap_or(default)
 }
 
-fn format_recent_messages(messages: &[MessageRow]) -> String {
-    let recent = messages
+fn format_recent_messages(messages: &[MessageRow], current_prompt: &str) -> String {
+    let mut recent = messages
         .iter()
         .filter(|message| message.role == "user" || message.role == "assistant")
-        .rev()
-        .take(6)
         .collect::<Vec<_>>();
+
+    while matches!(
+        recent.last(),
+        Some(message)
+            if message.role == "user"
+                && message.content.trim().eq_ignore_ascii_case(current_prompt.trim())
+    ) {
+        recent.pop();
+    }
+
+    let recent = recent.into_iter().rev().take(2).collect::<Vec<_>>();
 
     if recent.is_empty() {
         return "No prior Ask TPMCluely conversation yet.".to_string();
@@ -708,19 +794,7 @@ fn format_recent_messages(messages: &[MessageRow]) -> String {
     recent
         .into_iter()
         .rev()
-        .map(|message| match &message.context_snapshot {
-            Some(snapshot) if !snapshot.trim().is_empty() => format!(
-                "{}: {}\nCONTEXT: {}",
-                message.role.to_uppercase(),
-                message.content.trim(),
-                snapshot.trim()
-            ),
-            _ => format!(
-                "{}: {}",
-                message.role.to_uppercase(),
-                message.content.trim()
-            ),
-        })
+        .map(|message| format!("{}: {}", message.role.to_uppercase(), message.content.trim()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -739,19 +813,50 @@ fn format_screen_context_note(screen_context: Option<&ScreenContextInput>) -> St
     }
 }
 
-fn build_question_prompt(
+fn format_context_chunk(chunk: RetrievedContextChunk) -> String {
+    if chunk.sequence_start == chunk.sequence_end {
+        format!("[S{}] {}", chunk.sequence_start, chunk.text.trim())
+    } else {
+        format!(
+            "[S{}-S{}] {}",
+            chunk.sequence_start,
+            chunk.sequence_end,
+            chunk.text.trim()
+        )
+    }
+}
+
+async fn load_question_snippets(
+    state: &AppState,
+    session_id: &str,
     prompt: &str,
     transcripts: &[TranscriptRow],
+) -> Vec<String> {
+    match state
+        .search_runtime()
+        .retrieve_session_context(session_id, prompt, 6)
+        .await
+    {
+        Ok(Some(chunks)) if !chunks.is_empty() => {
+            chunks.into_iter().map(format_context_chunk).collect()
+        }
+        _ => select_relevant_transcript_snippets(transcripts, prompt),
+    }
+}
+
+fn build_question_prompt(
+    prompt: &str,
+    snippet_lines: &[String],
     messages: &[MessageRow],
     derived: &SessionDerivedUpdate,
     screen_context: Option<&ScreenContextInput>,
     prompt_snapshot: Option<&str>,
     output_language: &str,
 ) -> String {
-    let snippets = select_relevant_transcript_snippets(transcripts, prompt).join("\n");
-    let recent_messages = format_recent_messages(messages);
+    let snippets = snippet_lines.join("\n");
+    let recent_messages = format_recent_messages(messages, prompt);
     format!(
-        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\nShared screen context:\n{}\n\nUser question:\n{}\n\nAnswer primarily from the transcript. Use the shared screen only if it materially improves the answer. If the transcript does not contain the answer, say that clearly. If transcript and screen disagree, call that out. Cite the transcript snippets you relied on using their [S#] labels. If you used the screen, cite [Screen]. Keep the answer concise enough to read aloud in a meeting.",
+        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\nShared screen context:\n{}\n\nQuestion to answer aloud:\n{}\n\nAnswer in 2-4 spoken sentences. Answer primarily from the transcript. Use the shared screen only if it materially improves the answer. If the transcript does not contain the answer, say that clearly. If transcript and screen disagree, call that out. Cite only the transcript snippets you actually relied on using their [S#] or [S#-S#] labels. Cite [Screen] only if the image materially informed the answer.",
         derived
             .rolling_summary
             .as_deref()
@@ -837,33 +942,42 @@ fn insufficient_transcript_message() -> String {
 }
 
 fn extract_citations(content: &str) -> Vec<String> {
+    static CITATION_REGEX: OnceLock<Regex> = OnceLock::new();
+    let regex = CITATION_REGEX.get_or_init(|| {
+        Regex::new(r"\[(Screen|S\d+(?:-S?\d+)?)\]").expect("citation regex should compile")
+    });
+
     let mut citations = Vec::new();
     let mut seen = HashSet::new();
-
-    if content.contains("[Screen]") && seen.insert("[Screen]".to_string()) {
-        citations.push("[Screen]".to_string());
-    }
-
-    let bytes = content.as_bytes();
-    let mut index = 0;
-    while index + 3 < bytes.len() {
-        if bytes[index] == b'[' && bytes[index + 1] == b'S' {
-            let mut cursor = index + 2;
-            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-                cursor += 1;
-            }
-            if cursor > index + 2 && cursor < bytes.len() && bytes[cursor] == b']' {
-                let citation = content[index..=cursor].to_string();
-                if seen.insert(citation.clone()) {
-                    citations.push(citation);
-                }
-                index = cursor;
-            }
+    for matched in regex.find_iter(content) {
+        let citation = matched.as_str().to_string();
+        if seen.insert(citation.clone()) {
+            citations.push(citation);
         }
-        index += 1;
     }
 
+    citations.sort_by_key(|citation| citation_sort_key(citation));
     citations
+}
+
+fn citation_sort_key(citation: &str) -> (u8, i64, i64) {
+    if citation == "[Screen]" {
+        return (0, 0, 0);
+    }
+
+    let normalized = citation.trim_matches(['[', ']']);
+    let range = normalized.strip_prefix('S').unwrap_or(normalized);
+    let mut parts = range.split('-');
+    let start = parts
+        .next()
+        .and_then(|value| value.trim_start_matches('S').parse::<i64>().ok())
+        .unwrap_or_default();
+    let end = parts
+        .next()
+        .and_then(|value| value.trim_start_matches('S').parse::<i64>().ok())
+        .unwrap_or(start);
+
+    (1, start, end)
 }
 
 fn build_message_metadata(
@@ -871,6 +985,9 @@ fn build_message_metadata(
     provider_name: Option<&str>,
     provider_error: Option<String>,
     latency_ms: Option<u64>,
+    streamed: bool,
+    first_chunk_latency_ms: Option<u64>,
+    screen_capture_wait_ms: Option<u64>,
     used_screen_context: bool,
     content: &str,
 ) -> MessageMetadataPayload {
@@ -879,6 +996,9 @@ fn build_message_metadata(
         provider_name: provider_name.map(str::to_string),
         provider_error,
         latency_ms,
+        streamed,
+        first_chunk_latency_ms,
+        screen_capture_wait_ms,
         used_screen_context,
         citations: extract_citations(content),
     }
@@ -894,6 +1014,7 @@ async fn generate_grounded_response(
     prompt: String,
     screen_context: Option<&ScreenContextInput>,
     fallback_response: String,
+    options: &LlmGenerationOptions,
 ) -> (String, MessageMetadataPayload) {
     let started_at = Instant::now();
     let requested_screen_context = screen_context.is_some();
@@ -905,6 +1026,9 @@ async fn generate_grounded_response(
             Some("Gemini API key is not configured.".to_string()),
             Some(0),
             false,
+            None,
+            None,
+            false,
             &fallback_response,
         );
         return (fallback_response, metadata);
@@ -912,14 +1036,15 @@ async fn generate_grounded_response(
 
     let generation_result = match screen_context {
         Some(context) => {
-            generate_text_multimodal(
+            generate_text_multimodal_with_options(
                 &gemini_api_key,
                 system_prompt,
                 &multimodal_user_parts(prompt, Some(context)),
+                options,
             )
             .await
         }
-        None => generate_text(&gemini_api_key, system_prompt, &prompt).await,
+        None => generate_text_with_options(&gemini_api_key, system_prompt, &prompt, options).await,
     };
     let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
@@ -931,6 +1056,9 @@ async fn generate_grounded_response(
                 Some("Gemini"),
                 None,
                 Some(latency_ms),
+                false,
+                None,
+                None,
                 requested_screen_context && response.contains("[Screen]"),
                 &response,
             );
@@ -943,6 +1071,9 @@ async fn generate_grounded_response(
                 Some("Gemini returned an empty response.".to_string()),
                 Some(latency_ms),
                 false,
+                None,
+                None,
+                false,
                 &fallback_response,
             );
             (fallback_response, metadata)
@@ -953,6 +1084,145 @@ async fn generate_grounded_response(
                 Some("Gemini"),
                 Some(error.to_string()),
                 Some(latency_ms),
+                false,
+                None,
+                None,
+                false,
+                &fallback_response,
+            );
+            (fallback_response, metadata)
+        }
+    }
+}
+
+async fn generate_streamed_ask_response(
+    app: &AppHandle,
+    request_id: &str,
+    session_id: &str,
+    gemini_api_key: Option<String>,
+    prompt: String,
+    screen_context: Option<&ScreenContextInput>,
+    fallback_response: String,
+    screen_capture_wait_ms: Option<u64>,
+) -> (String, MessageMetadataPayload) {
+    let started_at = Instant::now();
+    let requested_screen_context = screen_context.is_some();
+
+    let Some(gemini_api_key) = gemini_api_key else {
+        let metadata = build_message_metadata(
+            "transcript_fallback",
+            Some("Gemini"),
+            Some("Gemini API key is not configured.".to_string()),
+            Some(0),
+            false,
+            None,
+            screen_capture_wait_ms,
+            false,
+            &fallback_response,
+        );
+        return (fallback_response, metadata);
+    };
+
+    let mut pending_delta = String::new();
+    let mut streamed_content = String::new();
+    let mut first_chunk_latency_ms = None;
+    let mut last_emit_at = started_at;
+
+    let generation_result = stream_text_multimodal_with_options(
+        &gemini_api_key,
+        MEETING_ASSISTANT_SYSTEM_PROMPT,
+        &multimodal_user_parts(prompt, screen_context),
+        &ask_generation_options(),
+        |delta| {
+            if delta.is_empty() {
+                return;
+            }
+            if first_chunk_latency_ms.is_none() {
+                first_chunk_latency_ms = Some(
+                    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                );
+            }
+            streamed_content.push_str(delta);
+            pending_delta.push_str(delta);
+            let has_boundary = pending_delta.contains('\n')
+                || pending_delta.ends_with('.')
+                || pending_delta.ends_with('!')
+                || pending_delta.ends_with('?');
+            if has_boundary || last_emit_at.elapsed() >= ASSISTANT_STREAM_FLUSH_INTERVAL {
+                let _ = app.emit(
+                    EVENT_ASSISTANT_CHUNK,
+                    &AssistantChunkPayload {
+                        request_id: request_id.to_string(),
+                        session_id: session_id.to_string(),
+                        delta: pending_delta.clone(),
+                        content: streamed_content.clone(),
+                    },
+                );
+                pending_delta.clear();
+                last_emit_at = Instant::now();
+            }
+        },
+    )
+    .await;
+
+    if !pending_delta.is_empty() {
+        let _ = app.emit(
+            EVENT_ASSISTANT_CHUNK,
+            &AssistantChunkPayload {
+                request_id: request_id.to_string(),
+                session_id: session_id.to_string(),
+                delta: pending_delta.clone(),
+                content: streamed_content.clone(),
+            },
+        );
+    }
+
+    let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+
+    match generation_result {
+        Ok(reply) if !reply.trim().is_empty() => {
+            let response = reply.trim().to_string();
+            let metadata = build_message_metadata(
+                "gemini",
+                Some("Gemini"),
+                None,
+                Some(latency_ms),
+                true,
+                first_chunk_latency_ms,
+                screen_capture_wait_ms,
+                requested_screen_context && response.contains("[Screen]"),
+                &response,
+            );
+            (response, metadata)
+        }
+        Ok(_) => {
+            let metadata = build_message_metadata(
+                "transcript_fallback",
+                Some("Gemini"),
+                Some("Gemini returned an empty response.".to_string()),
+                Some(latency_ms),
+                first_chunk_latency_ms.is_some(),
+                first_chunk_latency_ms,
+                screen_capture_wait_ms,
+                false,
+                &fallback_response,
+            );
+            (fallback_response, metadata)
+        }
+        Err(error) => {
+            let provider_error = if first_chunk_latency_ms.is_some() {
+                Some("Gemini stream interrupted.".to_string())
+            } else {
+                Some(error.to_string())
+            };
+            let metadata = build_message_metadata(
+                "transcript_fallback",
+                Some("Gemini"),
+                provider_error,
+                Some(latency_ms),
+                first_chunk_latency_ms.is_some(),
+                first_chunk_latency_ms,
+                screen_capture_wait_ms,
                 false,
                 &fallback_response,
             );
@@ -1361,6 +1631,39 @@ fn maybe_store_screen_artifact(
     )])
 }
 
+fn append_assistant_message_with_metadata(
+    state: &AppState,
+    session_id: &str,
+    content: &str,
+    context_snapshot: Option<&str>,
+    screen_context: Option<&ScreenContextInput>,
+    metadata: &MessageMetadataPayload,
+) -> Result<(), String> {
+    let assistant_message_id = Uuid::new_v4().to_string();
+    let assistant_attachments =
+        maybe_store_screen_artifact(state, session_id, &assistant_message_id, screen_context)?;
+    let assistant_attachments_json = if assistant_attachments.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&assistant_attachments).map_err(|error| error.to_string())?)
+    };
+    let assistant_metadata_json = metadata_json(metadata)?;
+    state
+        .database()
+        .append_message_with_metadata(
+            session_id,
+            "assistant",
+            content,
+            context_snapshot,
+            assistant_attachments_json.as_deref(),
+            Some(&assistant_metadata_json),
+            Some(&assistant_message_id),
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 struct LinearConfig {
     api_key: String,
     team_id: String,
@@ -1751,6 +2054,10 @@ fn load_deepgram_api_key(state: &AppState) -> Result<Option<String>, String> {
     load_nonempty_secret(state, "deepgram_api_key")
 }
 
+fn enqueue_search_reindex(state: &AppState, session_id: &str) {
+    let _ = state.search_runtime().enqueue_session_reindex(session_id);
+}
+
 fn load_active_prompt_id(settings: &[SettingRecord]) -> Option<&str> {
     settings
         .iter()
@@ -1785,7 +2092,10 @@ fn map_search_result(row: SearchResultRow) -> SearchResultPayload {
         updated_at: row.updated_at,
         snippet: row.snippet,
         matched_field: row.matched_field,
-        transcript_sequence_no: row.transcript_sequence_no,
+        match_label: row.match_label,
+        retrieval_mode: row.retrieval_mode,
+        transcript_sequence_start: row.transcript_sequence_start,
+        transcript_sequence_end: row.transcript_sequence_end,
     }
 }
 
@@ -1876,6 +2186,7 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
             state_machine_ready: state.session_manager().is_ready(),
             window_controller_ready: state.window_controller().is_ready(),
             search_ready: database_ready,
+            semantic_search_ready: database_ready && secrets.gemini_configured,
             prompt_library_ready: database_ready,
             knowledge_library_ready: database_ready,
             export_ready: database_ready,
@@ -1978,7 +2289,13 @@ pub fn save_secret(state: State<'_, AppState>, input: SaveSecretInput) -> Result
     state
         .secret_store()
         .save_secret(&input.key, &input.value)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    if input.key == "gemini_api_key" {
+        let _ = state.search_runtime().enqueue_all_sessions();
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2201,6 +2518,7 @@ pub async fn complete_session(
     database
         .update_session_derived(&session_id, &derived)
         .map_err(|error| error.to_string())?;
+    enqueue_search_reindex(&state, &session_id);
     database
         .append_message(
             &session_id,
@@ -2279,6 +2597,7 @@ pub fn append_transcript_segment(
     database
         .update_session_derived(&input.session_id, &derived)
         .map_err(|error| error.to_string())?;
+    enqueue_search_reindex(state.inner(), &input.session_id);
 
     load_session_detail(&state, &input.session_id)
 }
@@ -2305,6 +2624,7 @@ pub fn rename_session_speaker(
     database
         .update_session_derived(&input.session_id, &derived)
         .map_err(|error| error.to_string())?;
+    enqueue_search_reindex(state.inner(), &input.session_id);
 
     load_session_detail(&state, &input.session_id)
 }
@@ -2336,6 +2656,9 @@ pub async fn run_dynamic_action(
             None,
             Some(0),
             false,
+            None,
+            None,
+            false,
             &response,
         );
         (response, metadata)
@@ -2354,6 +2677,7 @@ pub async fn run_dynamic_action(
             prompt,
             screen_context,
             fallback_response,
+            &LlmGenerationOptions::default(),
         )
         .await
     };
@@ -2361,30 +2685,14 @@ pub async fn run_dynamic_action(
     database
         .update_session_derived(&input.session_id, &derived)
         .map_err(|error| error.to_string())?;
-    let assistant_message_id = Uuid::new_v4().to_string();
-    let assistant_attachments = maybe_store_screen_artifact(
+    append_assistant_message_with_metadata(
         &state,
         &input.session_id,
-        &assistant_message_id,
+        &response,
+        screen_context.map(screen_context_snapshot).as_deref(),
         screen_context,
+        &metadata,
     )?;
-    let assistant_attachments_json = if assistant_attachments.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&assistant_attachments).map_err(|error| error.to_string())?)
-    };
-    let assistant_metadata_json = metadata_json(&metadata)?;
-    database
-        .append_message_with_metadata(
-            &input.session_id,
-            "assistant",
-            &response,
-            screen_context.map(screen_context_snapshot).as_deref(),
-            assistant_attachments_json.as_deref(),
-            Some(&assistant_metadata_json),
-            Some(&assistant_message_id),
-        )
-        .map_err(|error| error.to_string())?;
 
     load_session_detail(&state, &input.session_id)
 }
@@ -2419,7 +2727,7 @@ pub async fn ask_assistant(
     let fallback_response = assistant_response_for_prompt(&input.prompt, &derived);
     let (output_language, prompt_snapshot) =
         load_session_prompt_context(&state, &input.session_id)?;
-    let (response, metadata) = if transcripts.is_empty() {
+    let (response, mut metadata) = if transcripts.is_empty() {
         let response = insufficient_transcript_message();
         let metadata = build_message_metadata(
             "insufficient_transcript",
@@ -2427,13 +2735,18 @@ pub async fn ask_assistant(
             None,
             Some(0),
             false,
+            None,
+            input.screen_capture_wait_ms,
+            false,
             &response,
         );
         (response, metadata)
     } else {
+        let snippets =
+            load_question_snippets(&state, &input.session_id, &input.prompt, &transcripts).await;
         let prompt = build_question_prompt(
             &input.prompt,
-            &transcripts,
+            &snippets,
             &messages,
             &derived,
             input.screen_context.as_ref(),
@@ -2446,38 +2759,165 @@ pub async fn ask_assistant(
             prompt,
             input.screen_context.as_ref(),
             fallback_response,
+            &ask_generation_options(),
         )
         .await
     };
-    let assistant_message_id = Uuid::new_v4().to_string();
-    let assistant_attachments = maybe_store_screen_artifact(
+    metadata.screen_capture_wait_ms = input.screen_capture_wait_ms;
+    append_assistant_message_with_metadata(
         &state,
         &input.session_id,
-        &assistant_message_id,
+        &response,
+        user_context_snapshot.as_deref(),
         input.screen_context.as_ref(),
+        &metadata,
     )?;
-    let assistant_attachments_json = if assistant_attachments.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&assistant_attachments).map_err(|error| error.to_string())?)
-    };
-    let assistant_metadata_json = metadata_json(&metadata)?;
-    database
-        .append_message_with_metadata(
-            &input.session_id,
-            "assistant",
-            &response,
-            user_context_snapshot.as_deref(),
-            assistant_attachments_json.as_deref(),
-            Some(&assistant_metadata_json),
-            Some(&assistant_message_id),
-        )
-        .map_err(|error| error.to_string())?;
     database
         .update_session_derived(&input.session_id, &derived)
         .map_err(|error| error.to_string())?;
 
     load_session_detail(&state, &input.session_id)
+}
+
+#[tauri::command]
+pub fn start_ask_assistant_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AskSessionStreamInput,
+) -> Result<AskAssistantStreamStartPayload, String> {
+    let state = state.inner().clone();
+    let request_id = input.request_id.clone();
+    let response_request_id = request_id.clone();
+    let user_context_snapshot = input.screen_context.as_ref().map(screen_context_snapshot);
+    state
+        .database()
+        .append_message_with_metadata(
+            &input.session_id,
+            "user",
+            &input.prompt,
+            user_context_snapshot.as_deref(),
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let _ = app.emit(
+        EVENT_ASSISTANT_STARTED,
+        &AssistantStartedPayload {
+            request_id: request_id.clone(),
+            session_id: input.session_id.clone(),
+            prompt: input.prompt.clone(),
+            started_at: Utc::now().to_rfc3339(),
+            requested_screen_context: input.screen_context.is_some(),
+        },
+    );
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let request_id = request_id.clone();
+        let session_id = input.session_id.clone();
+
+        let outcome = async {
+            let database = state.database();
+            let transcripts = database
+                .list_transcript_segments(&input.session_id)
+                .map_err(|error| error.to_string())?;
+            let derived = derive_session_update(&transcripts);
+            let messages = database
+                .list_messages(&input.session_id)
+                .map_err(|error| error.to_string())?;
+            let fallback_response = assistant_response_for_prompt(&input.prompt, &derived);
+            let (output_language, prompt_snapshot) =
+                load_session_prompt_context(&state, &input.session_id)?;
+
+            let (response, metadata) = if transcripts.is_empty() {
+                let response = insufficient_transcript_message();
+                let metadata = build_message_metadata(
+                    "insufficient_transcript",
+                    Some("Transcript"),
+                    None,
+                    Some(0),
+                    false,
+                    None,
+                    input.screen_capture_wait_ms,
+                    false,
+                    &response,
+                );
+                (response, metadata)
+            } else {
+                let snippets = load_question_snippets(
+                    &state,
+                    &input.session_id,
+                    &input.prompt,
+                    &transcripts,
+                )
+                .await;
+                let prompt = build_question_prompt(
+                    &input.prompt,
+                    &snippets,
+                    &messages,
+                    &derived,
+                    input.screen_context.as_ref(),
+                    prompt_snapshot.as_deref(),
+                    &output_language,
+                );
+                generate_streamed_ask_response(
+                    &app_handle,
+                    &request_id,
+                    &input.session_id,
+                    load_gemini_api_key(&state)?,
+                    prompt,
+                    input.screen_context.as_ref(),
+                    fallback_response,
+                    input.screen_capture_wait_ms,
+                )
+                .await
+            };
+
+            append_assistant_message_with_metadata(
+                &state,
+                &input.session_id,
+                &response,
+                user_context_snapshot.as_deref(),
+                input.screen_context.as_ref(),
+                &metadata,
+            )?;
+            database
+                .update_session_derived(&input.session_id, &derived)
+                .map_err(|error| error.to_string())?;
+
+            load_session_detail(&state, &input.session_id)
+        }
+        .await;
+
+        match outcome {
+            Ok(detail) => {
+                let _ = app_handle.emit(
+                    EVENT_ASSISTANT_COMPLETED,
+                    &AssistantCompletedPayload {
+                        request_id,
+                        session_id,
+                        detail,
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = app_handle.emit(
+                    EVENT_ASSISTANT_FAILED,
+                    &AssistantFailedPayload {
+                        request_id,
+                        session_id,
+                        error,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(AskAssistantStreamStartPayload {
+        request_id: response_request_id,
+    })
 }
 
 #[tauri::command]
@@ -2604,14 +3044,15 @@ pub fn set_stealth_mode(
 }
 
 #[tauri::command]
-pub fn search_sessions(
+pub async fn search_sessions(
     state: State<'_, AppState>,
     query: String,
+    mode: Option<String>,
 ) -> Result<Vec<SearchResultPayload>, String> {
     state
-        .database()
-        .search_sessions(&query, 25)
-        .map_err(|error| error.to_string())
+        .search_runtime()
+        .search_sessions(&query, mode.as_deref().unwrap_or("lexical"), 25)
+        .await
         .map(|rows| rows.into_iter().map(map_search_result).collect())
 }
 
@@ -2747,41 +3188,21 @@ pub fn delete_knowledge_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_preflight_report, build_question_prompt, extract_citations,
+        ask_generation_options, build_preflight_report, build_question_prompt, extract_citations,
         format_screen_context_note, generate_grounded_response, map_message,
         parse_session_status, MessageAttachmentPayload, PreflightInputs,
         ScreenContextInput,
     };
     use crate::audio::CaptureCapabilities;
-    use crate::db::{MessageRow, SessionDerivedUpdate, TranscriptRow};
+    use crate::db::{MessageRow, SessionDerivedUpdate};
     use crate::permissions::PermissionSnapshot;
     use crate::session::state_machine::SessionStatus;
-
-    fn sample_transcript(sequence_no: i64, text: &str) -> TranscriptRow {
-        TranscriptRow {
-            id: format!("seg-{sequence_no}"),
-            session_id: "session-1".to_string(),
-            sequence_no,
-            speaker_id: Some("manual:engineer".to_string()),
-            speaker_label: Some("Engineer".to_string()),
-            speaker_confidence: None,
-            start_ms: None,
-            end_ms: None,
-            text: text.to_string(),
-            is_final: true,
-            source: "capture".to_string(),
-            created_at: "2026-03-12T15:00:00Z".to_string(),
-        }
-    }
 
     #[test]
     fn question_prompt_mentions_screen_context_and_citations() {
         let prompt = build_question_prompt(
             "What should I say about the auth error?",
-            &[sample_transcript(
-                1,
-                "We need to fix the auth timeout before rollout.",
-            )],
+            &["[S1] Engineer: We need to fix the auth timeout before rollout.".to_string()],
             &[MessageRow {
                 id: "msg-1".to_string(),
                 session_id: "session-1".to_string(),
@@ -2813,6 +3234,7 @@ mod tests {
         assert!(prompt.contains("Shared code editor"));
         assert!(prompt.contains("[Screen]"));
         assert!(prompt.contains("[S#]"));
+        assert!(prompt.contains("[S#-S#]"));
         assert!(prompt.contains("Favor concise, risk-aware answers."));
     }
 
@@ -2874,6 +3296,7 @@ mod tests {
             "prompt".to_string(),
             None,
             "Transcript-backed fallback [S4]".to_string(),
+            &ask_generation_options(),
         )
         .await;
 

@@ -287,6 +287,52 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           transcript_text
         );
 
+        CREATE TABLE IF NOT EXISTS search_chunks (
+          id                    TEXT PRIMARY KEY,
+          session_id            TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          knowledge_file_id     TEXT REFERENCES knowledge_files(id) ON DELETE CASCADE,
+          source_kind           TEXT NOT NULL,
+          chunk_index           INTEGER NOT NULL,
+          sequence_start        INTEGER,
+          sequence_end          INTEGER,
+          text                  TEXT NOT NULL,
+          text_hash             TEXT NOT NULL,
+          token_estimate        INTEGER NOT NULL DEFAULT 0,
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_search_chunks_session_source_chunk
+          ON search_chunks(session_id, source_kind, chunk_index);
+
+        CREATE TABLE IF NOT EXISTS search_embeddings (
+          chunk_id              TEXT PRIMARY KEY,
+          provider              TEXT NOT NULL,
+          model                 TEXT NOT NULL,
+          dimensions            INTEGER,
+          vector_blob           BLOB,
+          embedding_version     TEXT NOT NULL,
+          status                TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'failed')),
+          embedded_at           TEXT,
+          last_error            TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_search_embeddings_status
+          ON search_embeddings(status);
+
+        CREATE TABLE IF NOT EXISTS search_index_jobs (
+          session_id            TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+          status                TEXT NOT NULL CHECK (status IN ('queued', 'running', 'failed', 'completed')),
+          attempts              INTEGER NOT NULL DEFAULT 0,
+          last_error            TEXT,
+          next_run_at           TEXT,
+          queued_at             TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_search_index_jobs_status_next_run
+          ON search_index_jobs(status, next_run_at, updated_at);
+
         INSERT OR IGNORE INTO settings (key, value) VALUES
           ('theme', 'system'),
           ('session_widget_enabled', 'true'),
@@ -430,5 +476,22 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!(settings_count >= 10);
+    }
+
+    #[test]
+    fn creates_semantic_search_tables() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should succeed");
+
+        for table in ["search_chunks", "search_embeddings", "search_index_jobs"] {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("semantic search table query should work");
+            assert_eq!(count, 1, "{table} should exist after migration");
+        }
     }
 }

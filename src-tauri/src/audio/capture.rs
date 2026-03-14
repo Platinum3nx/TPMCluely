@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use crate::app::state::AppState;
 use crate::app::commands::{
     derive_session_update, map_session, map_transcript, SessionRecordPayload,
     TranscriptSegmentPayload,
@@ -905,6 +906,8 @@ fn persist_finalized_utterances(
     database
         .update_session_derived(session_id, &derived)
         .map_err(|error| AudioError::Database(error.to_string()))?;
+    let managed_state = app.state::<AppState>();
+    let _ = managed_state.search_runtime().enqueue_session_reindex(session_id);
 
     let session = database
         .get_session(session_id)

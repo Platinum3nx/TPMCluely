@@ -1,6 +1,11 @@
 import type {
   AppendTranscriptInput,
   AskSessionInput,
+  AskSessionStreamInput,
+  AssistantChunkEvent,
+  AssistantCompletedEvent,
+  AssistantFailedEvent,
+  AssistantStartedEvent,
   BrowserCaptureSessionUpdateInput,
   BootstrapPayload,
   CaptureCapabilities,
@@ -24,6 +29,7 @@ import type {
   SaveKnowledgeFileInput,
   SessionDetail,
   SessionRecord,
+  SearchMode,
   SearchSessionResult,
   ScreenContextInput,
   SaveGeneratedTicketsInput,
@@ -86,6 +92,24 @@ const mockCaptureCapabilities: CaptureCapabilities = {
   screenRecordingRequired: true,
   microphoneFallback: true,
 };
+const MOCK_ASK_STREAM_CHUNK_DELAY_MS = 40;
+const semanticSynonyms: Record<string, string[]> = {
+  action: ["follow-up", "next", "task"],
+  bug: ["issue", "defect", "incident"],
+  latency: ["slow", "performance"],
+  owner: ["driver", "responsible"],
+  permission: ["access", "approval"],
+  rollout: ["launch", "ship", "deploy"],
+  rollback: ["revert", "backout"],
+  summary: ["recap", "overview"],
+};
+
+interface MockAskStreamHandlers {
+  onChunk?: (event: AssistantChunkEvent) => void;
+  onCompleted?: (event: AssistantCompletedEvent) => void;
+  onFailed?: (event: AssistantFailedEvent) => void;
+  onStarted?: (event: AssistantStartedEvent) => void;
+}
 
 type SecretMap = Partial<Record<SecretKey, string>>;
 
@@ -724,7 +748,11 @@ function buildMockMetadata(
   responseMode: MessageMetadata["responseMode"],
   content: string,
   options?: {
+    firstChunkLatencyMs?: number | null;
+    latencyMs?: number | null;
     providerError?: string | null;
+    screenCaptureWaitMs?: number | null;
+    streamed?: boolean;
     usedScreenContext?: boolean;
   }
 ): MessageMetadata {
@@ -732,10 +760,50 @@ function buildMockMetadata(
     responseMode,
     providerName: "Browser mock",
     providerError: options?.providerError ?? null,
-    latencyMs: 0,
+    latencyMs: options?.latencyMs ?? 0,
+    streamed: options?.streamed ?? false,
+    firstChunkLatencyMs: options?.firstChunkLatencyMs ?? null,
+    screenCaptureWaitMs: options?.screenCaptureWaitMs ?? null,
     usedScreenContext: options?.usedScreenContext ?? false,
     citations: content.includes("[Screen]") ? ["[Screen]"] : [],
   };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function buildMockAskResponse(detail: SessionDetail, prompt: string): DerivedSessionArtifacts["finalSummary"] {
+  const derived = deriveSummary(detail);
+  const lowercase = prompt.toLowerCase();
+
+  if (lowercase.includes("decid")) {
+    return derived.decisionsMd;
+  }
+  if (lowercase.includes("next") || lowercase.includes("action")) {
+    return derived.actionItemsMd;
+  }
+  if (lowercase.includes("follow")) {
+    return derived.followUpEmailMd;
+  }
+
+  return derived.finalSummary;
+}
+
+function splitMockAskResponse(content: string): string[] {
+  const words = content.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 4) {
+    return [content];
+  }
+
+  const chunkSize = Math.max(3, Math.ceil(words.length / 3));
+  const chunks: string[] = [];
+  for (let index = 0; index < words.length; index += chunkSize) {
+    chunks.push(`${words.slice(index, index + chunkSize).join(" ")}${index + chunkSize < words.length ? " " : ""}`);
+  }
+  return chunks;
 }
 
 function ticketHasReviewHistory(ticket: GeneratedTicket): boolean {
@@ -845,9 +913,11 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
       llmProvider: "Gemini",
       sttProvider: "Deepgram",
       ticketProvider: "Gemini + Linear",
+      embeddingProvider: "Gemini Embeddings",
       llmReady: Boolean(secrets.gemini_api_key),
       sttReady: Boolean(secrets.deepgram_api_key),
       linearReady: Boolean(secrets.linear_api_key && secrets.linear_team_id),
+      embeddingReady: Boolean(secrets.gemini_api_key),
     },
     diagnostics: {
       mode: "browser-mock",
@@ -857,6 +927,7 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
       stateMachineReady: true,
       windowControllerReady: true,
       searchReady: true,
+      semanticSearchReady: Boolean(secrets.gemini_api_key),
       promptLibraryReady: true,
       knowledgeLibraryReady: true,
       exportReady: true,
@@ -1046,7 +1117,49 @@ export async function setMockOverlayOpen(open: boolean): Promise<RuntimeSnapshot
   return next;
 }
 
-export async function searchMockSessions(query: string): Promise<SearchSessionResult[]> {
+function semanticMatch(text: string, query: string): boolean {
+  const normalizedText = text.toLowerCase();
+  const terms = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((term) => term.length >= 4);
+  if (terms.length === 0) {
+    return false;
+  }
+
+  const matched = terms.filter((term) => {
+    if (normalizedText.includes(term)) {
+      return true;
+    }
+
+    return (semanticSynonyms[term] ?? []).some((alias) => normalizedText.includes(alias));
+  });
+
+  return matched.length >= Math.max(1, Math.ceil(terms.length / 2));
+}
+
+function matchLabelForField(field: string, retrievalMode: SearchMode): string {
+  const prefix = retrievalMode === "hybrid" ? "Hybrid" : "Phrase";
+  switch (field) {
+    case "title":
+      return retrievalMode === "hybrid" ? "Hybrid title match" : "Title phrase";
+    case "final_summary":
+      return `${prefix} final summary match`;
+    case "decisions":
+      return `${prefix} decisions match`;
+    case "action_items":
+      return `${prefix} action items match`;
+    case "notes":
+      return `${prefix} notes match`;
+    default:
+      return retrievalMode === "hybrid" ? "Hybrid transcript match" : "Transcript phrase";
+  }
+}
+
+export async function searchMockSessions(
+  query: string,
+  mode: SearchMode = "lexical"
+): Promise<SearchSessionResult[]> {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) {
     return [];
@@ -1055,23 +1168,34 @@ export async function searchMockSessions(query: string): Promise<SearchSessionRe
   const details = readSessions().map((session) => getSessionDetail(session.id)).filter(Boolean) as SessionDetail[];
   return details
     .map((detail) => {
-      const transcriptMatch = detail.transcripts.find((segment) =>
-        transcriptLine(segment.speakerLabel, segment.text).toLowerCase().includes(normalizedQuery)
-      );
+      const transcriptMatch = detail.transcripts.find((segment) => {
+        const line = transcriptLine(segment.speakerLabel, segment.text).toLowerCase();
+        return mode === "hybrid" ? semanticMatch(line, normalizedQuery) : line.includes(normalizedQuery);
+      });
       const matchedField =
-        detail.session.finalSummary?.toLowerCase().includes(normalizedQuery)
+        (mode === "hybrid"
+          ? semanticMatch(detail.session.title, normalizedQuery)
+          : detail.session.title.toLowerCase().includes(normalizedQuery))
+          ? "title"
+          : (mode === "hybrid"
+              ? semanticMatch(detail.session.finalSummary ?? "", normalizedQuery)
+              : detail.session.finalSummary?.toLowerCase().includes(normalizedQuery))
           ? "final_summary"
-          : detail.session.decisionsMd?.toLowerCase().includes(normalizedQuery)
+          : (mode === "hybrid"
+              ? semanticMatch(detail.session.decisionsMd ?? "", normalizedQuery)
+              : detail.session.decisionsMd?.toLowerCase().includes(normalizedQuery))
             ? "decisions"
-            : detail.session.actionItemsMd?.toLowerCase().includes(normalizedQuery)
+            : (mode === "hybrid"
+                ? semanticMatch(detail.session.actionItemsMd ?? "", normalizedQuery)
+                : detail.session.actionItemsMd?.toLowerCase().includes(normalizedQuery))
               ? "action_items"
-              : detail.session.notesMd?.toLowerCase().includes(normalizedQuery)
+              : (mode === "hybrid"
+                  ? semanticMatch(detail.session.notesMd ?? "", normalizedQuery)
+                  : detail.session.notesMd?.toLowerCase().includes(normalizedQuery))
                 ? "notes"
                 : transcriptMatch
                   ? "transcript"
-                  : detail.session.title.toLowerCase().includes(normalizedQuery)
-                    ? "title"
-                    : null;
+                  : null;
       if (!matchedField) {
         return null;
       }
@@ -1091,7 +1215,10 @@ export async function searchMockSessions(query: string): Promise<SearchSessionRe
         updatedAt: detail.session.updatedAt,
         snippet: snippetSource.replace(/\s+/g, " ").slice(0, 220),
         matchedField,
-        transcriptSequenceNo: transcriptMatch?.sequenceNo ?? null,
+        matchLabel: matchLabelForField(matchedField, mode),
+        retrievalMode: mode,
+        transcriptSequenceStart: transcriptMatch?.sequenceNo ?? null,
+        transcriptSequenceEnd: transcriptMatch?.sequenceNo ?? null,
       } satisfies SearchSessionResult;
     })
     .filter((result): result is SearchSessionResult => result !== null)
@@ -1835,16 +1962,7 @@ export async function askMockAssistant(input: AskSessionInput): Promise<SessionD
   }
 
   const derived = deriveSummary(detail);
-  const prompt = input.prompt.toLowerCase();
-
-  let response = derived.finalSummary;
-  if (prompt.includes("decid")) {
-    response = derived.decisionsMd;
-  } else if (prompt.includes("next") || prompt.includes("action")) {
-    response = derived.actionItemsMd;
-  } else if (prompt.includes("follow")) {
-    response = derived.followUpEmailMd;
-  }
+  const response = buildMockAskResponse(detail, input.prompt);
 
   appendAssistantMessage(input.sessionId, "user", input.prompt, {
     contextSnapshot: buildContextSnapshot(input.screenContext),
@@ -1853,6 +1971,7 @@ export async function askMockAssistant(input: AskSessionInput): Promise<SessionD
     attachments: buildScreenAttachment(input.screenContext),
     contextSnapshot: buildContextSnapshot(input.screenContext),
     metadata: buildMockMetadata("transcript_fallback", response, {
+      screenCaptureWaitMs: input.screenCaptureWaitMs ?? null,
       usedScreenContext: Boolean(input.screenContext),
     }),
   });
@@ -1863,4 +1982,90 @@ export async function askMockAssistant(input: AskSessionInput): Promise<SessionD
   });
 
   return getSessionDetail(input.sessionId);
+}
+
+export async function streamMockAssistant(
+  input: AskSessionStreamInput,
+  handlers: MockAskStreamHandlers = {}
+): Promise<SessionDetail | null> {
+  const detail = getSessionDetail(input.sessionId);
+  if (!detail) {
+    return null;
+  }
+
+  if (input.prompt.includes("__mock_stream_fail__")) {
+    const error = "Mock Ask stream failed.";
+    handlers.onStarted?.({
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      prompt: input.prompt,
+      startedAt: nowIso(),
+      requestedScreenContext: Boolean(input.screenContext),
+    });
+    await delay(MOCK_ASK_STREAM_CHUNK_DELAY_MS);
+    handlers.onFailed?.({
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      error,
+    });
+    throw new Error(error);
+  }
+
+  const derived = deriveSummary(detail);
+  const response = buildMockAskResponse(detail, input.prompt);
+  const chunks = splitMockAskResponse(response);
+  const startedAt = nowIso();
+
+  appendAssistantMessage(input.sessionId, "user", input.prompt, {
+    contextSnapshot: buildContextSnapshot(input.screenContext),
+  });
+
+  handlers.onStarted?.({
+    requestId: input.requestId,
+    sessionId: input.sessionId,
+    prompt: input.prompt,
+    startedAt,
+    requestedScreenContext: Boolean(input.screenContext),
+  });
+
+  let streamedContent = "";
+  for (const [index, chunk] of chunks.entries()) {
+    await delay(MOCK_ASK_STREAM_CHUNK_DELAY_MS);
+    streamedContent += chunk;
+    handlers.onChunk?.({
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      delta: chunk,
+      content: streamedContent,
+    });
+    if (index === 0) {
+      continue;
+    }
+  }
+
+  appendAssistantMessage(input.sessionId, "assistant", response, {
+    attachments: buildScreenAttachment(input.screenContext),
+    contextSnapshot: buildContextSnapshot(input.screenContext),
+    metadata: buildMockMetadata("transcript_fallback", response, {
+      firstChunkLatencyMs: MOCK_ASK_STREAM_CHUNK_DELAY_MS,
+      latencyMs: MOCK_ASK_STREAM_CHUNK_DELAY_MS * chunks.length,
+      screenCaptureWaitMs: input.screenCaptureWaitMs ?? null,
+      streamed: true,
+      usedScreenContext: Boolean(input.screenContext),
+    }),
+  });
+  updateSessionRecord({
+    ...detail.session,
+    updatedAt: nowIso(),
+    ...derived,
+  });
+
+  const finalDetail = getSessionDetail(input.sessionId);
+  handlers.onCompleted?.({
+    requestId: input.requestId,
+    sessionId: input.sessionId,
+    detail: finalDetail,
+  });
+
+  return finalDetail;
 }

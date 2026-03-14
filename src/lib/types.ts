@@ -24,9 +24,11 @@ export interface ProviderSnapshot {
   llmProvider: string;
   sttProvider: string;
   ticketProvider: string;
+  embeddingProvider: string;
   llmReady: boolean;
   sttReady: boolean;
   linearReady: boolean;
+  embeddingReady: boolean;
 }
 
 export interface DiagnosticsSnapshot {
@@ -37,6 +39,7 @@ export interface DiagnosticsSnapshot {
   stateMachineReady: boolean;
   windowControllerReady: boolean;
   searchReady: boolean;
+  semanticSearchReady: boolean;
   promptLibraryReady: boolean;
   knowledgeLibraryReady: boolean;
   exportReady: boolean;
@@ -177,6 +180,9 @@ export interface MessageMetadata {
   providerName?: string | null;
   providerError?: string | null;
   latencyMs?: number | null;
+  streamed?: boolean;
+  firstChunkLatencyMs?: number | null;
+  screenCaptureWaitMs?: number | null;
   usedScreenContext?: boolean;
   citations?: string[];
 }
@@ -207,8 +213,13 @@ export interface SearchSessionResult {
   updatedAt: string;
   snippet: string;
   matchedField: string;
-  transcriptSequenceNo: number | null;
+  matchLabel: string;
+  retrievalMode: "lexical" | "hybrid";
+  transcriptSequenceStart: number | null;
+  transcriptSequenceEnd: number | null;
 }
+
+export type SearchMode = "lexical" | "hybrid";
 
 export interface StartSessionInput {
   title: string;
@@ -238,6 +249,51 @@ export interface AskSessionInput {
   sessionId: string;
   prompt: string;
   screenContext?: ScreenContextInput | null;
+  screenCaptureWaitMs?: number | null;
+}
+
+export interface AskSessionStreamInput extends AskSessionInput {
+  requestId: string;
+}
+
+export interface AskAssistantStreamStartPayload {
+  requestId: string;
+}
+
+export interface AssistantStartedEvent {
+  requestId: string;
+  sessionId: string;
+  prompt: string;
+  startedAt: string;
+  requestedScreenContext: boolean;
+}
+
+export interface AssistantChunkEvent {
+  requestId: string;
+  sessionId: string;
+  delta: string;
+  content: string;
+}
+
+export interface AssistantCompletedEvent {
+  requestId: string;
+  sessionId: string;
+  detail: SessionDetail | null;
+}
+
+export interface AssistantFailedEvent {
+  requestId: string;
+  sessionId: string;
+  error: string;
+}
+
+export interface StreamingAssistantDraft {
+  requestId: string;
+  sessionId: string;
+  prompt: string;
+  content: string;
+  startedAt: string;
+  requestedScreenContext: boolean;
 }
 
 export type DynamicActionKey = "summary" | "decisions" | "next_steps" | "follow_up";

@@ -145,7 +145,10 @@ pub struct SearchResultRow {
     pub updated_at: String,
     pub snippet: String,
     pub matched_field: String,
-    pub transcript_sequence_no: Option<i64>,
+    pub match_label: String,
+    pub retrieval_mode: String,
+    pub transcript_sequence_start: Option<i64>,
+    pub transcript_sequence_end: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -592,13 +595,13 @@ impl AppDatabase {
         })
     }
 
-    fn connect(&self) -> Result<Connection, DatabaseError> {
+    pub(crate) fn connect(&self) -> Result<Connection, DatabaseError> {
         let connection = Connection::open(&self.path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         Ok(connection)
     }
 
-    fn with_connection<T, F>(&self, action: F) -> Result<T, DatabaseError>
+    pub(crate) fn with_connection<T, F>(&self, action: F) -> Result<T, DatabaseError>
     where
         F: FnOnce(&Connection) -> Result<T, rusqlite::Error>,
     {
@@ -1903,6 +1906,7 @@ impl AppDatabase {
                     s.status,
                     s.updated_at,
                     CASE
+                        WHEN lower(COALESCE(s.title, '')) LIKE ?2 THEN COALESCE(s.title, '')
                         WHEN lower(COALESCE(s.final_summary, '')) LIKE ?2 THEN COALESCE(s.final_summary, '')
                         WHEN lower(COALESCE(s.decisions_md, '')) LIKE ?2 THEN COALESCE(s.decisions_md, '')
                         WHEN lower(COALESCE(s.action_items_md, '')) LIKE ?2 THEN COALESCE(s.action_items_md, '')
@@ -1925,11 +1929,20 @@ impl AppDatabase {
                         ), COALESCE(s.rolling_summary, ''))
                     END,
                     CASE
+                        WHEN lower(COALESCE(s.title, '')) LIKE ?2 THEN 'title'
                         WHEN lower(COALESCE(s.final_summary, '')) LIKE ?2 THEN 'final_summary'
                         WHEN lower(COALESCE(s.decisions_md, '')) LIKE ?2 THEN 'decisions'
                         WHEN lower(COALESCE(s.action_items_md, '')) LIKE ?2 THEN 'action_items'
                         WHEN lower(COALESCE(s.notes_md, '')) LIKE ?2 THEN 'notes'
                         ELSE 'transcript'
+                    END,
+                    CASE
+                        WHEN lower(COALESCE(s.title, '')) LIKE ?2 THEN 'Title phrase'
+                        WHEN lower(COALESCE(s.final_summary, '')) LIKE ?2 THEN 'Final summary phrase'
+                        WHEN lower(COALESCE(s.decisions_md, '')) LIKE ?2 THEN 'Decisions phrase'
+                        WHEN lower(COALESCE(s.action_items_md, '')) LIKE ?2 THEN 'Action items phrase'
+                        WHEN lower(COALESCE(s.notes_md, '')) LIKE ?2 THEN 'Notes phrase'
+                        ELSE 'Transcript phrase'
                     END,
                     (
                         SELECT sequence_no
@@ -1943,7 +1956,20 @@ impl AppDatabase {
                           ) LIKE ?2
                         ORDER BY sequence_no ASC
                         LIMIT 1
-                    ) AS transcript_sequence_no
+                    ) AS transcript_sequence_start,
+                    (
+                        SELECT sequence_no
+                        FROM transcript_segments
+                        WHERE session_id = s.id
+                          AND lower(
+                            CASE
+                                WHEN speaker_label IS NOT NULL AND trim(speaker_label) != '' THEN trim(speaker_label) || ': ' || text
+                                ELSE 'Unattributed: ' || text
+                            END
+                          ) LIKE ?2
+                        ORDER BY sequence_no ASC
+                        LIMIT 1
+                    ) AS transcript_sequence_end
                 FROM session_search ss
                 JOIN sessions s ON s.id = ss.session_id
                 WHERE session_search MATCH ?1
@@ -1960,7 +1986,10 @@ impl AppDatabase {
                     updated_at: row.get(3)?,
                     snippet: compact_snippet(&row.get::<_, String>(4)?, 220),
                     matched_field: row.get(5)?,
-                    transcript_sequence_no: row.get(6)?,
+                    match_label: row.get(6)?,
+                    retrieval_mode: "lexical".to_string(),
+                    transcript_sequence_start: row.get(7)?,
+                    transcript_sequence_end: row.get(8)?,
                 })
             })?;
 

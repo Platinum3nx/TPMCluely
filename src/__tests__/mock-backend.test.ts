@@ -2,13 +2,16 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   appendMockTranscriptSegment,
+  bootstrapMockApp,
   completeMockSession,
   pushMockGeneratedTicket,
   regenerateMockSessionTickets,
   renameMockSessionSpeaker,
   saveMockSecret,
+  searchMockSessions,
   setMockGeneratedTicketReviewState,
   startMockSession,
+  streamMockAssistant,
 } from "../lib/mock-backend";
 
 describe("mock ticket pipeline", () => {
@@ -111,5 +114,78 @@ describe("mock ticket pipeline", () => {
     expect(renamed?.speakers[0]?.displayLabel).toBe("Alice");
     expect(renamed?.transcripts.every((segment) => segment.speakerLabel === "Alice")).toBe(true);
     expect(renamed?.session.actionItemsMd).toContain("Alice:");
+  });
+
+  it("streams Ask responses before persisting the final assistant message", async () => {
+    const session = await startMockSession({ title: "Latency rehearsal" });
+    const events: string[] = [];
+
+    const detail = await streamMockAssistant(
+      {
+        requestId: "ask-test",
+        sessionId: session.session.id,
+        prompt: "What should I say about rollout risk?",
+        screenCaptureWaitMs: 212,
+        screenContext: {
+          mimeType: "image/jpeg",
+          dataBase64: "abc123",
+          capturedAt: "2026-03-13T09:00:00Z",
+          width: 1280,
+          height: 720,
+          sourceLabel: "Mock shared screen",
+          staleMs: 0,
+        },
+      },
+      {
+        onStarted: () => events.push("started"),
+        onChunk: () => events.push("chunk"),
+        onCompleted: () => events.push("completed"),
+      }
+    );
+
+    expect(events[0]).toBe("started");
+    expect(events).toContain("chunk");
+    expect(events[events.length - 1]).toBe("completed");
+    const lastAssistantMessage = detail?.messages.filter((message) => message.role === "assistant").slice(-1)[0];
+    expect(lastAssistantMessage?.metadata?.streamed).toBe(true);
+    expect(lastAssistantMessage?.metadata?.firstChunkLatencyMs).toBeGreaterThan(0);
+    expect(lastAssistantMessage?.metadata?.screenCaptureWaitMs).toBe(212);
+    expect(lastAssistantMessage?.attachments[0]?.kind).toBe("screenshot");
+  });
+
+  it("surfaces embedding readiness in the mock bootstrap payload", async () => {
+    const initial = await bootstrapMockApp();
+    expect(initial.providers.embeddingProvider).toBe("Gemini Embeddings");
+    expect(initial.providers.embeddingReady).toBe(false);
+    expect(initial.diagnostics.semanticSearchReady).toBe(false);
+
+    await saveMockSecret({ key: "gemini_api_key", value: "gemini-key" });
+
+    const ready = await bootstrapMockApp();
+    expect(ready.providers.embeddingReady).toBe(true);
+    expect(ready.diagnostics.semanticSearchReady).toBe(true);
+  });
+
+  it("returns hybrid transcript matches for synonym queries in mock search", async () => {
+    const session = await startMockSession({ title: "Release planning" });
+    await appendMockTranscriptSegment({
+      sessionId: session.session.id,
+      speakerLabel: "Engineer",
+      text: "We should deploy after QA signs off on the release candidate.",
+      source: "manual",
+    });
+
+    const lexicalResults = await searchMockSessions("rollout", "lexical");
+    expect(lexicalResults).toEqual([]);
+
+    const hybridResults = await searchMockSessions("rollout", "hybrid");
+    expect(hybridResults).toHaveLength(1);
+    expect(hybridResults[0]).toMatchObject({
+      sessionId: session.session.id,
+      retrievalMode: "hybrid",
+      transcriptSequenceStart: 1,
+      transcriptSequenceEnd: 1,
+    });
+    expect(hybridResults[0]?.matchLabel).toContain("Hybrid");
   });
 });
