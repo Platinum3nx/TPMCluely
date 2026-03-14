@@ -22,6 +22,7 @@ function buildDetail(overrides?: Partial<SessionDetail>): SessionDetail {
       actionItemsMd: "- action",
       followUpEmailMd: "email",
       notesMd: "notes",
+      repoContext: null,
       ticketGenerationState: "failed",
       ticketGenerationError: "Gemini response was invalid.",
       ticketGeneratedAt: null,

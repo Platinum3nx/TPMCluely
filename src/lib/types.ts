@@ -66,6 +66,21 @@ export interface RuntimeSnapshot {
   window: WindowRuntimeSnapshot;
 }
 
+export interface RepoSyncStatus {
+  ownerRepo: string | null;
+  branch: string;
+  liveSearchEnabled: boolean;
+  status: string;
+  lastSyncedCommit: string | null;
+  lastSyncedAt: string | null;
+  currentCommit: string | null;
+  changedFileCount: number;
+  indexedFileCount: number;
+  indexedChunkCount: number;
+  lastError: string | null;
+  syncSource: string | null;
+}
+
 export interface BootstrapPayload {
   appName: string;
   appVersion: string;
@@ -78,6 +93,7 @@ export interface BootstrapPayload {
   runtime: RuntimeSnapshot;
   prompts: PromptRecord[];
   knowledgeFiles: KnowledgeFileRecord[];
+  repoStatus: RepoSyncStatus;
 }
 
 export type SecretKey = "gemini_api_key" | "deepgram_api_key" | "linear_api_key" | "linear_team_id" | "github_pat";
@@ -120,9 +136,20 @@ export interface SessionRecord {
   actionItemsMd: string | null;
   followUpEmailMd: string | null;
   notesMd: string | null;
+  repoContext: RepoContext | null;
   ticketGenerationState: TicketGenerationState;
   ticketGenerationError: string | null;
   ticketGeneratedAt: string | null;
+}
+
+export interface RepoContext {
+  ownerRepo: string;
+  owner: string;
+  repoName: string;
+  branch: string;
+  snapshotCommit: string | null;
+  snapshotSyncedAt: string | null;
+  liveSearchEnabled: boolean;
 }
 
 export type TranscriptSource = "manual" | "capture";
@@ -176,6 +203,35 @@ export interface MessageAttachment {
 
 export type AssistantResponseMode = "gemini" | "transcript_fallback" | "insufficient_transcript";
 
+export interface RepoSearchStatus {
+  attempted: boolean;
+  used: boolean;
+  mode?: string | null;
+  reason?: string | null;
+  repo?: string | null;
+  branch?: string | null;
+  snapshotCommit?: string | null;
+  resolvedCommit?: string | null;
+  latencyMs?: number | null;
+  resultCount?: number;
+  freshness?: string | null;
+}
+
+export interface RepoCitation {
+  label: string;
+  repo: string;
+  branch: string;
+  commit: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  symbolName?: string | null;
+  source: string;
+  score: number;
+  snippet: string;
+  url: string;
+}
+
 export interface MessageMetadata {
   responseMode?: AssistantResponseMode | null;
   providerName?: string | null;
@@ -186,6 +242,8 @@ export interface MessageMetadata {
   screenCaptureWaitMs?: number | null;
   usedScreenContext?: boolean;
   citations?: string[];
+  repoSearch?: RepoSearchStatus | null;
+  repoCitations?: RepoCitation[];
 }
 
 export interface ChatMessage {

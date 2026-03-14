@@ -33,6 +33,13 @@ function formatLatency(latencyMs?: number | null): string | null {
   return `${(latencyMs / 1_000).toFixed(1)} s`;
 }
 
+function formatRepoCitationLabel(path: string, startLine: number, endLine: number): string {
+  if (startLine === endLine) {
+    return `${path}:${startLine}`;
+  }
+  return `${path}:${startLine}-${endLine}`;
+}
+
 export function AssistantFeed({
   draft = null,
   emptyDetail = "Run an action or ask a question to create the first response.",
@@ -65,6 +72,11 @@ export function AssistantFeed({
                   message.metadata?.usedScreenContext ? "Screen used" : null,
                   message.metadata?.providerName ?? null,
                   formatLatency(message.metadata?.latencyMs),
+                  message.metadata?.repoSearch?.used ? `Repo ${message.metadata.repoSearch.mode ?? "search"}` : null,
+                  message.metadata?.repoSearch?.attempted && !message.metadata?.repoSearch?.used
+                    ? "Repo skipped"
+                    : null,
+                  message.metadata?.repoSearch?.freshness ? `Freshness ${message.metadata.repoSearch.freshness}` : null,
                   ...(message.metadata?.citations ?? []),
                 ].filter((value): value is string => Boolean(value))
               )
@@ -94,8 +106,27 @@ export function AssistantFeed({
                   </div>
                 ) : null}
                 <p>{message.content}</p>
+                {message.metadata?.repoCitations?.length ? (
+                  <div className="message-chip-row">
+                    {message.metadata.repoCitations.map((citation) => (
+                      <a
+                        key={`${message.id}-${citation.label}-${citation.path}-${citation.startLine}`}
+                        className="message-chip"
+                        href={citation.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={citation.snippet}
+                      >
+                        {citation.label} {formatRepoCitationLabel(citation.path, citation.startLine, citation.endLine)}
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
                 {message.metadata?.providerError ? (
                   <p className="message-meta-note">Provider note: {message.metadata.providerError}</p>
+                ) : null}
+                {message.metadata?.repoSearch?.reason ? (
+                  <p className="message-meta-note">Repo search: {message.metadata.repoSearch.reason}</p>
                 ) : null}
               </div>
             );

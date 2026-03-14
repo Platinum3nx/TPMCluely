@@ -21,6 +21,7 @@ const sessionFixture: SessionRecord = {
   actionItemsMd: null,
   followUpEmailMd: null,
   notesMd: null,
+  repoContext: null,
   ticketGenerationState: "not_started",
   ticketGenerationError: null,
   ticketGeneratedAt: null,

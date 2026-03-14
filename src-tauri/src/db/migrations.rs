@@ -117,6 +117,130 @@ fn add_column_if_missing(
     Ok(())
 }
 
+fn ensure_repo_search_tables(connection: &Connection) -> Result<(), DatabaseError> {
+    let repo_chunks_ready = if column_exists(connection, "repo_chunks", "file_id")? {
+        column_exists(connection, "repo_chunks", "indexed_commit")?
+    } else {
+        false
+    };
+
+    if !repo_chunks_ready {
+        connection.execute_batch(
+            "
+            DROP TABLE IF EXISTS repo_embeddings;
+            DROP TABLE IF EXISTS repo_chunks_fts;
+            DROP TABLE IF EXISTS repo_chunks;
+            DROP TABLE IF EXISTS repo_files;
+            DROP TABLE IF EXISTS repo_sync_jobs;
+            DROP TABLE IF EXISTS repo_sync_runs;
+
+            CREATE TABLE IF NOT EXISTS repo_files (
+              id                    TEXT PRIMARY KEY,
+              owner_repo            TEXT NOT NULL,
+              branch                TEXT NOT NULL,
+              indexed_commit        TEXT NOT NULL,
+              path                  TEXT NOT NULL,
+              blob_sha              TEXT NOT NULL,
+              language              TEXT NOT NULL,
+              size_bytes            INTEGER NOT NULL DEFAULT 0,
+              status                TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'failed')),
+              last_error            TEXT,
+              created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_files_lookup
+              ON repo_files(owner_repo, branch, indexed_commit, path);
+
+            CREATE INDEX IF NOT EXISTS idx_repo_files_commit_status
+              ON repo_files(owner_repo, branch, indexed_commit, status);
+
+            CREATE TABLE IF NOT EXISTS repo_chunks (
+              id                    TEXT PRIMARY KEY,
+              file_id               TEXT NOT NULL REFERENCES repo_files(id) ON DELETE CASCADE,
+              owner_repo            TEXT NOT NULL,
+              branch                TEXT NOT NULL,
+              indexed_commit        TEXT NOT NULL,
+              path                  TEXT NOT NULL,
+              chunk_kind            TEXT NOT NULL,
+              symbol_name           TEXT,
+              chunk_index           INTEGER NOT NULL,
+              start_line            INTEGER,
+              end_line              INTEGER,
+              text                  TEXT NOT NULL,
+              text_hash             TEXT NOT NULL DEFAULT '',
+              token_estimate        INTEGER NOT NULL DEFAULT 0,
+              created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_chunks_file_chunk
+              ON repo_chunks(file_id, chunk_index);
+
+            CREATE TABLE IF NOT EXISTS repo_embeddings (
+              chunk_id              TEXT PRIMARY KEY REFERENCES repo_chunks(id) ON DELETE CASCADE,
+              provider              TEXT NOT NULL,
+              model                 TEXT NOT NULL,
+              dimensions            INTEGER,
+              vector_blob           BLOB,
+              embedding_version     TEXT NOT NULL,
+              status                TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'failed')),
+              embedded_at           TEXT,
+              last_error            TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_repo_embeddings_status
+              ON repo_embeddings(status);
+
+            CREATE TABLE IF NOT EXISTS repo_sync_jobs (
+              owner_repo            TEXT NOT NULL,
+              branch                TEXT NOT NULL,
+              status                TEXT NOT NULL CHECK (status IN ('queued', 'running', 'failed', 'completed')),
+              attempts              INTEGER NOT NULL DEFAULT 0,
+              last_error            TEXT,
+              next_run_at           TEXT,
+              queued_at             TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY (owner_repo, branch)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_repo_sync_jobs_status_next_run
+              ON repo_sync_jobs(status, next_run_at, updated_at);
+
+            CREATE TABLE IF NOT EXISTS repo_sync_runs (
+              id                    TEXT PRIMARY KEY,
+              owner_repo            TEXT NOT NULL,
+              branch                TEXT NOT NULL,
+              status                TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+              sync_source           TEXT NOT NULL CHECK (sync_source IN ('tree', 'tarball')),
+              target_commit         TEXT,
+              previous_commit       TEXT,
+              changed_file_count    INTEGER NOT NULL DEFAULT 0,
+              indexed_file_count    INTEGER NOT NULL DEFAULT 0,
+              indexed_chunk_count   INTEGER NOT NULL DEFAULT 0,
+              started_at            TEXT NOT NULL,
+              completed_at          TEXT,
+              last_error            TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_repo_sync_runs_lookup
+              ON repo_sync_runs(owner_repo, branch, completed_at, started_at);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS repo_chunks_fts USING fts5(
+              chunk_id UNINDEXED,
+              owner_repo UNINDEXED,
+              branch UNINDEXED,
+              indexed_commit UNINDEXED,
+              path,
+              symbol_name,
+              text
+            );
+            ",
+        )?;
+    }
+
+    Ok(())
+}
+
 pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
     connection.execute_batch(
         "
@@ -153,6 +277,12 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           action_items_md       TEXT,
           follow_up_email_md    TEXT,
           notes_md              TEXT,
+          repo_owner            TEXT,
+          repo_name             TEXT,
+          repo_branch           TEXT,
+          repo_snapshot_commit  TEXT,
+          repo_snapshot_synced_at TEXT,
+          repo_live_search_enabled_snapshot INTEGER NOT NULL DEFAULT 1,
           ticket_generation_state TEXT NOT NULL DEFAULT 'not_started' CHECK (
             ticket_generation_state IN ('not_started', 'succeeded', 'failed')
           ),
@@ -335,16 +465,104 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
 
         CREATE TABLE IF NOT EXISTS repo_chunks (
           id                    TEXT PRIMARY KEY,
-          repo_name             TEXT NOT NULL,
-          file_path             TEXT NOT NULL,
+          file_id               TEXT NOT NULL REFERENCES repo_files(id) ON DELETE CASCADE,
+          owner_repo            TEXT NOT NULL,
+          branch                TEXT NOT NULL,
+          indexed_commit        TEXT NOT NULL,
+          path                  TEXT NOT NULL,
+          chunk_kind            TEXT NOT NULL,
+          symbol_name           TEXT,
           chunk_index           INTEGER NOT NULL,
+          start_line            INTEGER,
+          end_line              INTEGER,
           text                  TEXT NOT NULL,
-          embedding_blob        BLOB,
+          text_hash             TEXT NOT NULL DEFAULT '',
+          token_estimate        INTEGER NOT NULL DEFAULT 0,
           created_at            TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_chunks_repo_file_chunk
-          ON repo_chunks(repo_name, file_path, chunk_index);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_chunks_file_chunk
+          ON repo_chunks(file_id, chunk_index);
+
+        CREATE TABLE IF NOT EXISTS repo_files (
+          id                    TEXT PRIMARY KEY,
+          owner_repo            TEXT NOT NULL,
+          branch                TEXT NOT NULL,
+          indexed_commit        TEXT NOT NULL,
+          path                  TEXT NOT NULL,
+          blob_sha              TEXT NOT NULL,
+          language              TEXT NOT NULL,
+          size_bytes            INTEGER NOT NULL DEFAULT 0,
+          status                TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'failed')),
+          last_error            TEXT,
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_files_lookup
+          ON repo_files(owner_repo, branch, indexed_commit, path);
+
+        CREATE INDEX IF NOT EXISTS idx_repo_files_commit_status
+          ON repo_files(owner_repo, branch, indexed_commit, status);
+
+        CREATE TABLE IF NOT EXISTS repo_embeddings (
+          chunk_id              TEXT PRIMARY KEY REFERENCES repo_chunks(id) ON DELETE CASCADE,
+          provider              TEXT NOT NULL,
+          model                 TEXT NOT NULL,
+          dimensions            INTEGER,
+          vector_blob           BLOB,
+          embedding_version     TEXT NOT NULL,
+          status                TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'failed')),
+          embedded_at           TEXT,
+          last_error            TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repo_embeddings_status
+          ON repo_embeddings(status);
+
+        CREATE TABLE IF NOT EXISTS repo_sync_jobs (
+          owner_repo            TEXT NOT NULL,
+          branch                TEXT NOT NULL,
+          status                TEXT NOT NULL CHECK (status IN ('queued', 'running', 'failed', 'completed')),
+          attempts              INTEGER NOT NULL DEFAULT 0,
+          last_error            TEXT,
+          next_run_at           TEXT,
+          queued_at             TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (owner_repo, branch)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repo_sync_jobs_status_next_run
+          ON repo_sync_jobs(status, next_run_at, updated_at);
+
+        CREATE TABLE IF NOT EXISTS repo_sync_runs (
+          id                    TEXT PRIMARY KEY,
+          owner_repo            TEXT NOT NULL,
+          branch                TEXT NOT NULL,
+          status                TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+          sync_source           TEXT NOT NULL CHECK (sync_source IN ('tree', 'tarball')),
+          target_commit         TEXT,
+          previous_commit       TEXT,
+          changed_file_count    INTEGER NOT NULL DEFAULT 0,
+          indexed_file_count    INTEGER NOT NULL DEFAULT 0,
+          indexed_chunk_count   INTEGER NOT NULL DEFAULT 0,
+          started_at            TEXT NOT NULL,
+          completed_at          TEXT,
+          last_error            TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repo_sync_runs_lookup
+          ON repo_sync_runs(owner_repo, branch, completed_at, started_at);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS repo_chunks_fts USING fts5(
+          chunk_id UNINDEXED,
+          owner_repo UNINDEXED,
+          branch UNINDEXED,
+          indexed_commit UNINDEXED,
+          path,
+          symbol_name,
+          text
+        );
 
         INSERT OR IGNORE INTO settings (key, value) VALUES
           ('theme', 'system'),
@@ -364,7 +582,10 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           ('auto_push_linear', 'false'),
           ('ticket_push_mode', 'review_before_push'),
           ('preferred_microphone_device_id', ''),
-          ('overlay_shortcut', 'CmdOrCtrl+Shift+K');
+          ('overlay_shortcut', 'CmdOrCtrl+Shift+K'),
+          ('github_repo', ''),
+          ('github_branch', 'main'),
+          ('repo_live_search_enabled', 'true');
         ",
     )?;
 
@@ -379,6 +600,17 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         "transcript_segments",
         "speaker_confidence",
         "REAL",
+    )?;
+    add_column_if_missing(connection, "sessions", "repo_owner", "TEXT")?;
+    add_column_if_missing(connection, "sessions", "repo_name", "TEXT")?;
+    add_column_if_missing(connection, "sessions", "repo_branch", "TEXT")?;
+    add_column_if_missing(connection, "sessions", "repo_snapshot_commit", "TEXT")?;
+    add_column_if_missing(connection, "sessions", "repo_snapshot_synced_at", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "sessions",
+        "repo_live_search_enabled_snapshot",
+        "INTEGER NOT NULL DEFAULT 1",
     )?;
     add_column_if_missing(
         connection,
@@ -459,6 +691,7 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           ON generated_tickets(session_id, idempotency_key);
         ",
     )?;
+    ensure_repo_search_tables(connection)?;
     backfill_session_speakers(connection)?;
 
     Ok(())

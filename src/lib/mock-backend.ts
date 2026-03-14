@@ -24,6 +24,10 @@ import type {
   PromptRecord,
   PushGeneratedTicketInput,
   RenameSessionSpeakerInput,
+  RepoCitation,
+  RepoContext,
+  RepoSearchStatus,
+  RepoSyncStatus,
   RunDynamicActionInput,
   RuntimeSnapshot,
   SaveKnowledgeFileInput,
@@ -59,6 +63,7 @@ const GENERATED_TICKETS_KEY = "cluely.desktop.generated-tickets";
 const PROMPTS_KEY = "cluely.desktop.prompts";
 const KNOWLEDGE_FILES_KEY = "cluely.desktop.knowledge-files";
 const RUNTIME_KEY = "cluely.desktop.runtime";
+const REPO_STATUS_KEY = "cluely.desktop.repo-status";
 
 const defaultSettings: SettingRecord[] = [
   { key: "theme", value: "system" },
@@ -79,6 +84,9 @@ const defaultSettings: SettingRecord[] = [
   { key: "ticket_push_mode", value: "review_before_push" },
   { key: "preferred_microphone_device_id", value: "" },
   { key: "overlay_shortcut", value: "CmdOrCtrl+Shift+K" },
+  { key: "github_repo", value: "" },
+  { key: "github_branch", value: "main" },
+  { key: "repo_live_search_enabled", value: "true" },
 ];
 
 const defaultPermissions: PermissionSnapshot = {
@@ -126,6 +134,21 @@ interface RuntimeState {
   session: RuntimeSnapshot["session"];
   window: RuntimeSnapshot["window"];
 }
+
+const defaultRepoStatus: RepoSyncStatus = {
+  ownerRepo: null,
+  branch: "main",
+  liveSearchEnabled: true,
+  status: "idle",
+  lastSyncedCommit: null,
+  lastSyncedAt: null,
+  currentCommit: null,
+  changedFileCount: 0,
+  indexedFileCount: 0,
+  indexedChunkCount: 0,
+  lastError: "No GitHub repo is configured.",
+  syncSource: null,
+};
 
 function getSettingValue(key: string, fallback: string): string {
   return readSettings().find((setting) => setting.key === key)?.value ?? fallback;
@@ -226,6 +249,7 @@ function readSessions(): SessionRecord[] {
           actionItemsMd: session.actionItemsMd ?? null,
           followUpEmailMd: session.followUpEmailMd ?? null,
           notesMd: session.notesMd ?? null,
+          repoContext: session.repoContext ?? null,
           ticketGenerationState: session.ticketGenerationState ?? "not_started",
           ticketGenerationError: session.ticketGenerationError ?? null,
           ticketGeneratedAt: session.ticketGeneratedAt ?? null,
@@ -238,6 +262,24 @@ function readSessions(): SessionRecord[] {
 
 function writeSessions(sessions: SessionRecord[]): void {
   window.localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+}
+
+function readRepoStatus(): RepoSyncStatus {
+  const raw = window.localStorage.getItem(REPO_STATUS_KEY);
+  if (!raw) {
+    return defaultRepoStatus;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as RepoSyncStatus;
+    return { ...defaultRepoStatus, ...parsed };
+  } catch {
+    return defaultRepoStatus;
+  }
+}
+
+function writeRepoStatus(status: RepoSyncStatus): void {
+  window.localStorage.setItem(REPO_STATUS_KEY, JSON.stringify(status));
 }
 
 function readTranscripts(): TranscriptSegment[] {
@@ -744,6 +786,78 @@ function buildContextSnapshot(screenContext?: ScreenContextInput | null): string
   return `Screen shared from ${screenContext.sourceLabel} at ${screenContext.capturedAt} (${screenContext.width}x${screenContext.height}, ${screenContext.staleMs}ms stale).`;
 }
 
+function buildMockRepoEvidence(detail: SessionDetail, prompt: string): {
+  repoSearch: RepoSearchStatus;
+  repoCitations: RepoCitation[];
+} {
+  const repoContext = detail.session.repoContext;
+  if (!repoContext) {
+    return {
+      repoSearch: {
+        attempted: false,
+        used: false,
+        reason: "No repo is pinned to this session.",
+      },
+      repoCitations: [],
+    };
+  }
+
+  const wantsCode =
+    /event sourc|arch|repo|code|implementation|function|class|service|handler|pipeline|github/i.test(prompt);
+  if (!wantsCode) {
+    return {
+      repoSearch: {
+        attempted: true,
+        used: false,
+        mode: "snapshot",
+        repo: repoContext.ownerRepo,
+        branch: repoContext.branch,
+        snapshotCommit: repoContext.snapshotCommit,
+        resolvedCommit: repoContext.snapshotCommit,
+        reason: "Repo search found no strong match.",
+        resultCount: 0,
+        freshness: repoContext.snapshotCommit ? "snapshot" : "unsynced",
+      },
+      repoCitations: [],
+    };
+  }
+
+  const commit = repoContext.snapshotCommit ?? "mockhead1";
+  const repoCitations: RepoCitation[] = [
+    {
+      label: "[C1]",
+      repo: repoContext.ownerRepo,
+      branch: repoContext.branch,
+      commit,
+      path: "src/architecture/event-store.ts",
+      startLine: 18,
+      endLine: 46,
+      symbolName: "appendEvents",
+      source: "snapshot",
+      score: 0.82,
+      snippet:
+        "export async function appendEvents(streamId: string, events: DomainEvent[]) { /* persisted event log drives projections */ }",
+      url: `https://github.com/${repoContext.ownerRepo}/blob/${commit}/src/architecture/event-store.ts#L18`,
+    },
+  ];
+
+  return {
+    repoSearch: {
+      attempted: true,
+      used: true,
+      mode: repoContext.liveSearchEnabled ? "hybrid" : "snapshot",
+      repo: repoContext.ownerRepo,
+      branch: repoContext.branch,
+      snapshotCommit: repoContext.snapshotCommit,
+      resolvedCommit: commit,
+      reason: "Mock repo evidence attached.",
+      resultCount: repoCitations.length,
+      freshness: repoContext.liveSearchEnabled ? "live_head" : "snapshot",
+    },
+    repoCitations,
+  };
+}
+
 function buildMockMetadata(
   responseMode: MessageMetadata["responseMode"],
   content: string,
@@ -754,8 +868,14 @@ function buildMockMetadata(
     screenCaptureWaitMs?: number | null;
     streamed?: boolean;
     usedScreenContext?: boolean;
+    repoCitations?: RepoCitation[];
+    repoSearch?: RepoSearchStatus | null;
   }
 ): MessageMetadata {
+  const citations = [
+    ...(content.includes("[Screen]") ? ["[Screen]"] : []),
+    ...((options?.repoCitations ?? []).map((citation) => citation.label)),
+  ];
   return {
     responseMode,
     providerName: "Browser mock",
@@ -765,7 +885,9 @@ function buildMockMetadata(
     firstChunkLatencyMs: options?.firstChunkLatencyMs ?? null,
     screenCaptureWaitMs: options?.screenCaptureWaitMs ?? null,
     usedScreenContext: options?.usedScreenContext ?? false,
-    citations: content.includes("[Screen]") ? ["[Screen]"] : [],
+    citations,
+    repoSearch: options?.repoSearch ?? null,
+    repoCitations: options?.repoCitations ?? [],
   };
 }
 
@@ -898,6 +1020,7 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
   const prompts = await listMockPrompts();
   const knowledgeFiles = readKnowledgeFiles();
   const runtime = readRuntimeState();
+  const repoStatus = readRepoStatus();
 
   return {
     appName: "TPMCluely",
@@ -940,7 +1063,39 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
     runtime,
     prompts,
     knowledgeFiles,
+    repoStatus,
   };
+}
+
+export async function getMockRepoSyncStatus(): Promise<RepoSyncStatus> {
+  return readRepoStatus();
+}
+
+export async function syncMockGithubRepo(ownerRepo: string, branch: string): Promise<RepoSyncStatus> {
+  const commitSeed = Math.abs(
+    `${ownerRepo}:${branch}:${Date.now().toString(36)}`
+      .split("")
+      .reduce((sum, character) => sum + character.charCodeAt(0), 0)
+  )
+    .toString(16)
+    .padStart(8, "0")
+    .slice(0, 8);
+  const status: RepoSyncStatus = {
+    ownerRepo,
+    branch,
+    liveSearchEnabled: getSettingValue("repo_live_search_enabled", "true") === "true",
+    status: "completed",
+    lastSyncedCommit: commitSeed,
+    lastSyncedAt: nowIso(),
+    currentCommit: commitSeed,
+    changedFileCount: 3,
+    indexedFileCount: 6,
+    indexedChunkCount: 24,
+    lastError: null,
+    syncSource: "tree",
+  };
+  writeRepoStatus(status);
+  return status;
 }
 
 export async function runMockPreflightChecks(): Promise<PreflightReport> {
@@ -1315,6 +1470,20 @@ export async function deleteMockKnowledgeFile(fileId: string): Promise<Knowledge
 export async function startMockSession(input: StartSessionInput): Promise<SessionDetail> {
   const now = nowIso();
   const nextStatus = input.initialStatus ?? "active";
+  const repoStatus = readRepoStatus();
+  const githubRepo = getSettingValue("github_repo", "");
+  const githubBranch = getSettingValue("github_branch", "main");
+  const repoContext: RepoContext | null = githubRepo.includes("/")
+    ? {
+        ownerRepo: githubRepo,
+        owner: githubRepo.split("/")[0] ?? "",
+        repoName: githubRepo.split("/")[1] ?? "",
+        branch: githubBranch,
+        snapshotCommit: repoStatus.lastSyncedCommit,
+        snapshotSyncedAt: repoStatus.lastSyncedAt,
+        liveSearchEnabled: getSettingValue("repo_live_search_enabled", "true") === "true",
+      }
+    : null;
   const session: SessionRecord = {
     id: createId("session"),
     title: input.title.trim() || "Untitled session",
@@ -1331,6 +1500,7 @@ export async function startMockSession(input: StartSessionInput): Promise<Sessio
     actionItemsMd: null,
     followUpEmailMd: null,
     notesMd: null,
+    repoContext,
     ticketGenerationState: "not_started",
     ticketGenerationError: null,
     ticketGeneratedAt: null,
@@ -1963,7 +2133,8 @@ export async function askMockAssistant(input: AskSessionInput): Promise<SessionD
   }
 
   const derived = deriveSummary(detail);
-  const response = buildMockAskResponse(detail, input.prompt);
+  const repoEvidence = buildMockRepoEvidence(detail, input.prompt);
+  const response = `${buildMockAskResponse(detail, input.prompt)}${repoEvidence.repoCitations.length > 0 ? " [C1]" : ""}`;
 
   appendAssistantMessage(input.sessionId, "user", input.prompt, {
     contextSnapshot: buildContextSnapshot(input.screenContext),
@@ -1974,6 +2145,8 @@ export async function askMockAssistant(input: AskSessionInput): Promise<SessionD
     metadata: buildMockMetadata("transcript_fallback", response, {
       screenCaptureWaitMs: input.screenCaptureWaitMs ?? null,
       usedScreenContext: Boolean(input.screenContext),
+      repoSearch: repoEvidence.repoSearch,
+      repoCitations: repoEvidence.repoCitations,
     }),
   });
   updateSessionRecord({
@@ -2013,7 +2186,8 @@ export async function streamMockAssistant(
   }
 
   const derived = deriveSummary(detail);
-  const response = buildMockAskResponse(detail, input.prompt);
+  const repoEvidence = buildMockRepoEvidence(detail, input.prompt);
+  const response = `${buildMockAskResponse(detail, input.prompt)}${repoEvidence.repoCitations.length > 0 ? " [C1]" : ""}`;
   const chunks = splitMockAskResponse(response);
   const startedAt = nowIso();
 
@@ -2053,6 +2227,8 @@ export async function streamMockAssistant(
       screenCaptureWaitMs: input.screenCaptureWaitMs ?? null,
       streamed: true,
       usedScreenContext: Boolean(input.screenContext),
+      repoSearch: repoEvidence.repoSearch,
+      repoCitations: repoEvidence.repoCitations,
     }),
   });
   updateSessionRecord({

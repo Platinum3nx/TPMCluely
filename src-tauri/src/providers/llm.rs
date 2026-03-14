@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{stream, StreamExt};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -553,6 +553,42 @@ pub async fn generate_embedding(
     embedding_request_with_retry(&client, api_key, text, task_type).await
 }
 
+pub async fn generate_embeddings_batched(
+    api_key: &str,
+    texts: &[String],
+    task_type: EmbeddingTaskType,
+    max_concurrency: usize,
+) -> Result<Vec<Vec<f32>>, LlmProviderError> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .build()?;
+    let concurrency = max_concurrency.clamp(1, 8);
+    let mut ordered = vec![None; texts.len()];
+
+    let mut requests = stream::iter(texts.iter().cloned().enumerate().map(|(index, text)| {
+        let client = client.clone();
+        let api_key = api_key.to_string();
+        async move {
+            let result = embedding_request_with_retry(&client, &api_key, &text, task_type).await;
+            (index, result)
+        }
+    }))
+    .buffer_unordered(concurrency);
+
+    while let Some((index, result)) = requests.next().await {
+        ordered[index] = Some(result?);
+    }
+
+    Ok(ordered
+        .into_iter()
+        .map(|embedding| embedding.expect("batch embedding slot should be filled"))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -561,8 +597,9 @@ mod tests {
     use std::thread;
 
     use super::{
-        build_request_payload, generate_embedding, generate_text, generate_text_with_options,
-        stream_text_multimodal_with_options, EmbeddingTaskType, LlmGenerationOptions, LlmPart,
+        build_request_payload, generate_embedding, generate_embeddings_batched, generate_text,
+        generate_text_with_options, stream_text_multimodal_with_options, EmbeddingTaskType,
+        LlmGenerationOptions, LlmPart,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -633,6 +670,37 @@ mod tests {
         (format!("http://{address}/v1beta"), request, handle)
     }
 
+    fn spawn_http_json_server_sequence(
+        response_bodies: Vec<&'static str>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_clone = Arc::clone(&requests);
+
+        let handle = thread::spawn(move || {
+            for response_body in response_bodies {
+                let (mut stream, _) = listener.accept().expect("connection should arrive");
+                let captured_request = read_http_request(&mut stream);
+                request_clone
+                    .lock()
+                    .expect("request lock should hold")
+                    .push(captured_request);
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("response should write");
+            }
+        });
+
+        (format!("http://{address}/v1beta"), requests, handle)
+    }
+
     #[test]
     fn builds_multimodal_payload_with_inline_image_parts() {
         let payload = build_request_payload(
@@ -664,6 +732,7 @@ mod tests {
             &LlmGenerationOptions {
                 response_mime_type: Some("application/json".to_string()),
                 max_output_tokens: None,
+                tools: None,
             },
         );
 
@@ -728,6 +797,7 @@ mod tests {
             &LlmGenerationOptions {
                 response_mime_type: None,
                 max_output_tokens: Some(160),
+                tools: None,
             },
         )
         .await
@@ -794,6 +864,7 @@ mod tests {
             &LlmGenerationOptions {
                 response_mime_type: None,
                 max_output_tokens: Some(160),
+                tools: None,
             },
             |delta| streamed.push_str(delta),
         )
@@ -850,6 +921,47 @@ mod tests {
         ));
         assert!(captured_request.contains("\"taskType\":\"RETRIEVAL_QUERY\""));
         assert!(captured_request.contains("\"outputDimensionality\":768"));
+    }
+
+    #[tokio::test]
+    async fn generate_embeddings_batched_preserves_order() {
+        let _guard = env_lock().lock().expect("env lock should hold");
+        let (base_url, requests, handle) = spawn_http_json_server_sequence(vec![
+            r#"{"embedding":{"values":[0.1,0.2,0.3]}}"#,
+            r#"{"embedding":{"values":[0.4,0.5,0.6]}}"#,
+        ]);
+        unsafe {
+            std::env::set_var("TPMCLUELY_GEMINI_BASE_URL", &base_url);
+        }
+
+        let embeddings = generate_embeddings_batched(
+            "test-key",
+            &["first chunk".to_string(), "second chunk".to_string()],
+            EmbeddingTaskType::RetrievalDocument,
+            2,
+        )
+        .await
+        .expect("batch embedding request should succeed");
+
+        unsafe {
+            std::env::remove_var("TPMCLUELY_GEMINI_BASE_URL");
+        }
+        handle.join().expect("server should finish");
+
+        let captured_requests = requests
+            .lock()
+            .expect("request lock should hold")
+            .clone();
+        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embeddings[0], vec![0.1_f32, 0.2_f32, 0.3_f32]);
+        assert_eq!(embeddings[1], vec![0.4_f32, 0.5_f32, 0.6_f32]);
+        assert_eq!(captured_requests.len(), 2);
+        assert!(captured_requests.iter().all(|request| request.starts_with(
+            "POST /v1beta/models/gemini-embedding-001:embedContent?key=test-key HTTP/1.1"
+        )));
+        assert!(captured_requests
+            .iter()
+            .all(|request| request.contains("\"taskType\":\"RETRIEVAL_DOCUMENT\"")));
     }
 }
 

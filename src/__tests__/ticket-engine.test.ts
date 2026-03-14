@@ -19,6 +19,7 @@ const fixture: SessionDetail = {
     actionItemsMd: "- Engineer owns the rate-limit patch.\n- QA validates staging.",
     followUpEmailMd: "Follow-up draft",
     notesMd: "- Auth rollout\n- QA validation",
+    repoContext: null,
     ticketGenerationState: "not_started",
     ticketGenerationError: null,
     ticketGeneratedAt: null,

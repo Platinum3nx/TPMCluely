@@ -122,6 +122,9 @@ export function OnboardingApp({
             TPMCluely stores provider secrets through the backend bridge so the desktop app can preflight Gemini,
             Deepgram, and Linear before the meeting begins.
           </p>
+          <p className="card-detail">
+            GitHub PATs should have repo read access and code-search access for the connected engineering repository.
+          </p>
           <div className="form-grid">
             {secretFields.map((field) => (
               <label className="field" key={field.key}>

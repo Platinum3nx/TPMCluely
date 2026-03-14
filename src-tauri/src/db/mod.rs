@@ -37,6 +37,12 @@ pub struct SessionRow {
     pub action_items_md: Option<String>,
     pub follow_up_email_md: Option<String>,
     pub notes_md: Option<String>,
+    pub repo_owner: Option<String>,
+    pub repo_name: Option<String>,
+    pub repo_branch: Option<String>,
+    pub repo_snapshot_commit: Option<String>,
+    pub repo_snapshot_synced_at: Option<String>,
+    pub repo_live_search_enabled_snapshot: bool,
     pub ticket_generation_state: String,
     pub ticket_generation_error: Option<String>,
     pub ticket_generated_at: Option<String>,
@@ -419,9 +425,15 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         action_items_md: row.get(12)?,
         follow_up_email_md: row.get(13)?,
         notes_md: row.get(14)?,
-        ticket_generation_state: row.get(15)?,
-        ticket_generation_error: row.get(16)?,
-        ticket_generated_at: row.get(17)?,
+        repo_owner: row.get(15)?,
+        repo_name: row.get(16)?,
+        repo_branch: row.get(17)?,
+        repo_snapshot_commit: row.get(18)?,
+        repo_snapshot_synced_at: row.get(19)?,
+        repo_live_search_enabled_snapshot: row.get::<_, i64>(20)? != 0,
+        ticket_generation_state: row.get(21)?,
+        ticket_generation_error: row.get(22)?,
+        ticket_generated_at: row.get(23)?,
     })
 }
 
@@ -539,6 +551,28 @@ fn load_setting_value(
         .map(|value| value.unwrap_or_else(|| fallback.to_string()))
 }
 
+fn load_latest_repo_snapshot(
+    connection: &Connection,
+    owner_repo: &str,
+    branch: &str,
+) -> Result<Option<(String, String)>, rusqlite::Error> {
+    connection
+        .query_row(
+            "
+            SELECT target_commit, completed_at
+            FROM repo_sync_runs
+            WHERE owner_repo = ?1
+              AND branch = ?2
+              AND status = 'completed'
+            ORDER BY completed_at DESC
+            LIMIT 1
+            ",
+            params![owner_repo, branch],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+}
+
 fn build_search_query(query: &str) -> Option<String> {
     let tokens = query
         .split(|character: char| !character.is_alphanumeric())
@@ -653,6 +687,12 @@ impl AppDatabase {
                     action_items_md,
                     follow_up_email_md,
                     notes_md,
+                    repo_owner,
+                    repo_name,
+                    repo_branch,
+                    repo_snapshot_commit,
+                    repo_snapshot_synced_at,
+                    repo_live_search_enabled_snapshot,
                     ticket_generation_state,
                     ticket_generation_error,
                     ticket_generated_at
@@ -688,6 +728,12 @@ impl AppDatabase {
                     action_items_md,
                     follow_up_email_md,
                     notes_md,
+                    repo_owner,
+                    repo_name,
+                    repo_branch,
+                    repo_snapshot_commit,
+                    repo_snapshot_synced_at,
+                    repo_live_search_enabled_snapshot,
                     ticket_generation_state,
                     ticket_generation_error,
                     ticket_generated_at
@@ -715,6 +761,10 @@ impl AppDatabase {
         self.with_connection(|connection| {
             let output_language = load_setting_value(connection, "output_language", "en")?;
             let audio_language = load_setting_value(connection, "audio_language", "auto")?;
+            let github_repo = load_setting_value(connection, "github_repo", "")?;
+            let github_branch = load_setting_value(connection, "github_branch", "main")?;
+            let repo_live_search_enabled =
+                load_setting_value(connection, "repo_live_search_enabled", "true")? == "true";
             let active_prompt_id = connection
                 .query_row(
                     "SELECT value FROM settings WHERE key = 'active_prompt_id'",
@@ -732,6 +782,19 @@ impl AppDatabase {
                     .optional()?,
                 _ => None,
             };
+            let parsed_repo = crate::repo_search::parse_owner_repo(&github_repo);
+            let (repo_owner, repo_name, repo_snapshot_commit, repo_snapshot_synced_at) =
+                if let Some((owner, repo_name)) = parsed_repo {
+                    let snapshot = load_latest_repo_snapshot(connection, &github_repo, &github_branch)?;
+                    (
+                        Some(owner),
+                        Some(repo_name),
+                        snapshot.as_ref().map(|(commit, _)| commit.clone()),
+                        snapshot.map(|(_, synced_at)| synced_at),
+                    )
+                } else {
+                    (None, None, None, None)
+                };
 
             connection.execute(
                 "
@@ -747,8 +810,14 @@ impl AppDatabase {
                     audio_language,
                     active_prompt_id,
                     session_prompt_snapshot,
+                    repo_owner,
+                    repo_name,
+                    repo_branch,
+                    repo_snapshot_commit,
+                    repo_snapshot_synced_at,
+                    repo_live_search_enabled_snapshot,
                     updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?4)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?4)
                 ",
                 params![
                     session_id,
@@ -761,7 +830,17 @@ impl AppDatabase {
                     output_language,
                     audio_language,
                     active_prompt_id,
-                    prompt_snapshot
+                    prompt_snapshot,
+                    repo_owner,
+                    repo_name,
+                    if repo_snapshot_commit.is_some() || !github_branch.trim().is_empty() {
+                        Some(github_branch)
+                    } else {
+                        None
+                    },
+                    repo_snapshot_commit,
+                    repo_snapshot_synced_at,
+                    if repo_live_search_enabled { 1 } else { 0 }
                 ],
             )?;
             refresh_session_search(connection, &session_id)?;
@@ -784,6 +863,12 @@ impl AppDatabase {
                         action_items_md,
                         follow_up_email_md,
                         notes_md,
+                        repo_owner,
+                        repo_name,
+                        repo_branch,
+                        repo_snapshot_commit,
+                        repo_snapshot_synced_at,
+                        repo_live_search_enabled_snapshot,
                         ticket_generation_state,
                         ticket_generation_error,
                         ticket_generated_at

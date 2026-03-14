@@ -46,7 +46,26 @@ export function SessionDetail({
           <span className="message-chip">{sessionDetail.transcripts.length} transcript segments</span>
           <span className="message-chip">{sessionDetail.messages.length} assistant messages</span>
           <span className="message-chip">{sessionDetail.generatedTickets.length} ticket drafts</span>
+          {sessionDetail.session.repoContext ? (
+            <span className="message-chip">
+              Repo: {sessionDetail.session.repoContext.ownerRepo}@{sessionDetail.session.repoContext.branch}
+            </span>
+          ) : null}
+          {sessionDetail.session.repoContext?.snapshotCommit ? (
+            <span className="message-chip">
+              Snapshot: {sessionDetail.session.repoContext.snapshotCommit.slice(0, 7)}
+            </span>
+          ) : null}
         </div>
+        {sessionDetail.session.repoContext ? (
+          <p className="card-detail">
+            {sessionDetail.session.repoContext.liveSearchEnabled ? "Hybrid live repo search enabled." : "Snapshot-only repo search."}
+            {" "}
+            {sessionDetail.session.repoContext.snapshotSyncedAt
+              ? `Pinned from ${new Date(sessionDetail.session.repoContext.snapshotSyncedAt).toLocaleString()}.`
+              : "No synced snapshot was pinned when this meeting started."}
+          </p>
+        ) : null}
         <div className="toolbar-row">
           <button type="button" onClick={() => onExportSession(sessionDetail)}>
             Export Markdown

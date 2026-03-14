@@ -4,13 +4,14 @@ import type {
   BootstrapPayload,
   KnowledgeFileRecord,
   PromptRecord,
+  RepoSyncStatus,
   SaveKnowledgeFileInput,
   SavePromptInput,
   SettingRecord,
   TicketPushMode,
 } from "../lib/types";
-import { syncGithubRepo } from "../lib/tauri";
-import { useState } from "react";
+import { getRepoSyncStatus, syncGithubRepo } from "../lib/tauri";
+import { useEffect, useState } from "react";
 
 interface SettingsProps {
   bootstrap: BootstrapPayload;
@@ -87,8 +88,58 @@ export function Settings({
   const ticketPushMode = getSetting(bootstrap.settings, "ticket_push_mode", "review_before_push") as TicketPushMode;
   const preferredMicrophoneDeviceId = getSetting(bootstrap.settings, "preferred_microphone_device_id", "");
   const githubRepo = getSetting(bootstrap.settings, "github_repo", "");
+  const githubBranch = getSetting(bootstrap.settings, "github_branch", "main");
+  const repoLiveSearchEnabled = getSetting(bootstrap.settings, "repo_live_search_enabled", "true") === "true";
   const [syncingRepo, setSyncingRepo] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
+  const [repoStatus, setRepoStatus] = useState<RepoSyncStatus>(bootstrap.repoStatus);
+
+  useEffect(() => {
+    setRepoStatus(bootstrap.repoStatus);
+  }, [bootstrap.repoStatus]);
+
+  useEffect(() => {
+    if (!["queued", "running"].includes(repoStatus.status)) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await getRepoSyncStatus();
+        if (cancelled) {
+          return;
+        }
+        setRepoStatus(status);
+        if (status.status === "completed") {
+          setSyncMessage(
+            status.lastSyncedCommit
+              ? `Synced ${status.indexedChunkCount} chunks at ${status.lastSyncedCommit.slice(0, 7)}.`
+              : "Repo sync completed."
+          );
+          setSyncingRepo(false);
+        } else if (status.status === "failed") {
+          setSyncMessage(status.lastError ? `Error: ${status.lastError}` : "Error: Repo sync failed.");
+          setSyncingRepo(false);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSyncMessage(`Error: ${String(error)}`);
+          setSyncingRepo(false);
+        }
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 1200);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [repoStatus.status]);
 
   const handleSyncRepo = async () => {
     if (!githubRepo.includes("/")) {
@@ -96,13 +147,13 @@ export function Settings({
       return;
     }
     setSyncingRepo(true);
-    setSyncMessage("Syncing codebase...");
+    setSyncMessage("Queueing codebase sync...");
     try {
-      const chunks = await syncGithubRepo(githubRepo, "main");
-      setSyncMessage(`Synced ${chunks} chunks successfully.`);
+      const status = await syncGithubRepo(githubRepo, githubBranch);
+      setRepoStatus(status);
+      setSyncMessage(status.status === "running" || status.status === "queued" ? "Syncing codebase..." : "Repo sync queued.");
     } catch (error) {
       setSyncMessage(`Error: ${String(error)}`);
-    } finally {
       setSyncingRepo(false);
     }
   };
@@ -182,11 +233,44 @@ export function Settings({
               </button>
             </div>
           </div>
+          <div className="field">
+            <span>Branch</span>
+            <input value={githubBranch} onChange={(event) => void onUpdateSetting("github_branch", event.target.value)} />
+          </div>
+          <button
+            type="button"
+            className={`toggle-card ${repoLiveSearchEnabled ? "toggle-card-on" : ""}`}
+            onClick={() => void onUpdateSetting("repo_live_search_enabled", repoLiveSearchEnabled ? "false" : "true")}
+          >
+            <div>
+              <strong>Live GitHub search</strong>
+              <p>Allow Ask TPMCluely to supplement the pinned snapshot with branch-head evidence when freshness matters.</p>
+            </div>
+            <span>{repoLiveSearchEnabled ? "On" : "Off"}</span>
+          </button>
           {syncMessage && (
             <p className="card-detail" style={{ color: syncMessage.startsWith("Error") ? "var(--color-danger)" : "var(--color-success)" }}>
               {syncMessage}
             </p>
           )}
+          <div className="message-chip-row">
+            <span className="message-chip">Status: {repoStatus.status || "idle"}</span>
+            <span className="message-chip">Branch: {repoStatus.branch || githubBranch}</span>
+            {repoStatus.lastSyncedCommit ? (
+              <span className="message-chip">Last sync: {repoStatus.lastSyncedCommit.slice(0, 7)}</span>
+            ) : null}
+            <span className="message-chip">{repoStatus.indexedChunkCount} chunks indexed</span>
+          </div>
+          <p className="card-detail">
+            {repoStatus.lastSyncedAt
+              ? `Last synced ${new Date(repoStatus.lastSyncedAt).toLocaleString()}${repoStatus.syncSource ? ` via ${repoStatus.syncSource}` : ""}.`
+              : "No snapshot is indexed for this repo yet."}
+          </p>
+          {repoStatus.lastError ? (
+            <p className="card-detail" style={{ color: "var(--color-danger)" }}>
+              Last error: {repoStatus.lastError}
+            </p>
+          ) : null}
           {!bootstrap.secrets.githubConfigured && (
             <p className="card-detail" style={{ color: "var(--color-danger)" }}>
               Please configure your GitHub PAT in the Onboarding screen first.

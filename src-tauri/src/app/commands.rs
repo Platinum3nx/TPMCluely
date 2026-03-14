@@ -38,6 +38,9 @@ use crate::providers::llm::{
 };
 use crate::providers::stt::check_connectivity as check_stt_connectivity;
 use crate::providers::ProviderSnapshot;
+use crate::repo_search::{
+    RepoCitation, RepoContext, RepoSearchRequest, RepoSearchStatus, RepoSyncStatus,
+};
 use crate::screenshot::ScreenshotStore;
 use crate::secrets::SecretPresence;
 use crate::session::manager::SessionRuntimeSnapshot;
@@ -49,7 +52,7 @@ use crate::transcript::{
 };
 use crate::window::WindowRuntimeSnapshot;
 
-const MEETING_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use the transcript as the primary source of truth. If a shared screen image is provided, use it only when it materially helps answer the current question. Never invent facts. If transcript and screen context disagree, say so explicitly. Cite transcript snippets using labels like [S14]. If you used the shared screen, cite it as [Screen]. Keep spoken answers concise enough for the user to read aloud in a meeting.";
+const MEETING_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use the transcript as the primary source of truth. Code evidence is supplemental and may clarify implementation details when it materially helps. Never invent facts. Code can show what the system does, but it does not prove team intent or why a decision was made unless the transcript confirms that rationale. If transcript and code disagree, say so explicitly. If code evidence looks partial, stale, or weak, say that plainly instead of over-claiming. Cite transcript snippets using labels like [S14]. Cite code evidence using labels like [C1]. If you used the shared screen, cite it as [Screen]. Keep spoken answers concise enough for the user to read aloud in a meeting.";
 const ACTION_ASSISTANT_SYSTEM_PROMPT: &str = "You are TPMCluely, a real-time meeting copilot for engineering conversations. Use the transcript as the primary source of truth. If a shared screen image is provided, use it only when it materially helps answer the current question. Be specific, concise, and grounded. If evidence is weak or missing, say that clearly instead of guessing. Cite transcript snippets using labels like [S14]. If you used the shared screen, cite it as [Screen].";
 const MAX_ASSISTANT_TRANSCRIPT_CHARS: usize = 18_000;
 const ASK_MAX_OUTPUT_TOKENS: u32 = 160;
@@ -73,6 +76,7 @@ pub struct BootstrapPayload {
     pub runtime: RuntimeSnapshot,
     pub prompts: Vec<PromptRecord>,
     pub knowledge_files: Vec<KnowledgeFileRecord>,
+    pub repo_status: RepoSyncStatusPayload,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,9 +139,39 @@ pub struct SessionRecordPayload {
     pub action_items_md: Option<String>,
     pub follow_up_email_md: Option<String>,
     pub notes_md: Option<String>,
+    pub repo_context: Option<RepoContextPayload>,
     pub ticket_generation_state: String,
     pub ticket_generation_error: Option<String>,
     pub ticket_generated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RepoSyncStatusPayload {
+    pub owner_repo: Option<String>,
+    pub branch: String,
+    pub live_search_enabled: bool,
+    pub status: String,
+    pub last_synced_commit: Option<String>,
+    pub last_synced_at: Option<String>,
+    pub current_commit: Option<String>,
+    pub changed_file_count: usize,
+    pub indexed_file_count: usize,
+    pub indexed_chunk_count: usize,
+    pub last_error: Option<String>,
+    pub sync_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RepoContextPayload {
+    pub owner_repo: String,
+    pub owner: String,
+    pub repo_name: String,
+    pub branch: String,
+    pub snapshot_commit: Option<String>,
+    pub snapshot_synced_at: Option<String>,
+    pub live_search_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -207,6 +241,41 @@ pub struct MessageMetadataPayload {
     pub screen_capture_wait_ms: Option<u64>,
     pub used_screen_context: bool,
     pub citations: Vec<String>,
+    pub repo_search: Option<RepoSearchStatusPayload>,
+    pub repo_citations: Vec<RepoCitationPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RepoSearchStatusPayload {
+    pub attempted: bool,
+    pub used: bool,
+    pub mode: Option<String>,
+    pub reason: Option<String>,
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    pub snapshot_commit: Option<String>,
+    pub resolved_commit: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub result_count: usize,
+    pub freshness: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RepoCitationPayload {
+    pub label: String,
+    pub repo: String,
+    pub branch: String,
+    pub commit: String,
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub symbol_name: Option<String>,
+    pub source: String,
+    pub score: f32,
+    pub snippet: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -497,7 +566,85 @@ fn secret_snapshot(presence: &SecretPresence) -> SecretSnapshot {
     }
 }
 
+fn map_repo_sync_status(status: RepoSyncStatus) -> RepoSyncStatusPayload {
+    RepoSyncStatusPayload {
+        owner_repo: status.owner_repo,
+        branch: status.branch,
+        live_search_enabled: status.live_search_enabled,
+        status: status.status,
+        last_synced_commit: status.last_synced_commit,
+        last_synced_at: status.last_synced_at,
+        current_commit: status.current_commit,
+        changed_file_count: status.changed_file_count,
+        indexed_file_count: status.indexed_file_count,
+        indexed_chunk_count: status.indexed_chunk_count,
+        last_error: status.last_error,
+        sync_source: status.sync_source,
+    }
+}
+
+fn map_repo_context(row: &SessionRow) -> Option<RepoContextPayload> {
+    let owner = row.repo_owner.as_deref()?;
+    let repo_name = row.repo_name.as_deref()?;
+    let branch = row.repo_branch.as_deref()?;
+    Some(RepoContextPayload {
+        owner_repo: format!("{owner}/{repo_name}"),
+        owner: owner.to_string(),
+        repo_name: repo_name.to_string(),
+        branch: branch.to_string(),
+        snapshot_commit: row.repo_snapshot_commit.clone(),
+        snapshot_synced_at: row.repo_snapshot_synced_at.clone(),
+        live_search_enabled: row.repo_live_search_enabled_snapshot,
+    })
+}
+
+fn repo_context_to_runtime(context: Option<&RepoContextPayload>) -> Option<RepoContext> {
+    context.map(|context| RepoContext {
+        owner_repo: context.owner_repo.clone(),
+        owner: context.owner.clone(),
+        repo_name: context.repo_name.clone(),
+        branch: context.branch.clone(),
+        snapshot_commit: context.snapshot_commit.clone(),
+        snapshot_synced_at: context.snapshot_synced_at.clone(),
+        live_search_enabled: context.live_search_enabled,
+    })
+}
+
+fn map_repo_search_status(status: RepoSearchStatus) -> RepoSearchStatusPayload {
+    RepoSearchStatusPayload {
+        attempted: status.attempted,
+        used: status.used,
+        mode: status.mode,
+        reason: status.reason,
+        repo: status.repo,
+        branch: status.branch,
+        snapshot_commit: status.snapshot_commit,
+        resolved_commit: status.resolved_commit,
+        latency_ms: status.latency_ms,
+        result_count: status.result_count,
+        freshness: status.freshness,
+    }
+}
+
+fn map_repo_citation(citation: RepoCitation) -> RepoCitationPayload {
+    RepoCitationPayload {
+        label: citation.label,
+        repo: citation.repo,
+        branch: citation.branch,
+        commit: citation.commit,
+        path: citation.path,
+        start_line: citation.start_line,
+        end_line: citation.end_line,
+        symbol_name: citation.symbol_name,
+        source: citation.source,
+        score: citation.score,
+        snippet: citation.snippet,
+        url: citation.url,
+    }
+}
+
 pub(crate) fn map_session(row: SessionRow) -> SessionRecordPayload {
+    let repo_context = map_repo_context(&row);
     SessionRecordPayload {
         id: row.id,
         title: row.title,
@@ -514,6 +661,7 @@ pub(crate) fn map_session(row: SessionRow) -> SessionRecordPayload {
         action_items_md: row.action_items_md,
         follow_up_email_md: row.follow_up_email_md,
         notes_md: row.notes_md,
+        repo_context,
         ticket_generation_state: row.ticket_generation_state,
         ticket_generation_error: row.ticket_generation_error,
         ticket_generated_at: row.ticket_generated_at,
@@ -859,10 +1007,12 @@ fn build_question_prompt(
 ) -> String {
     let snippets = snippet_lines.join("\n");
     let recent_messages = format_recent_messages(messages, prompt);
-    let repo_section = repo_context.map(|c| format!("Relevant codebase context:\n{}\n\n", c)).unwrap_or_default();
+    let repo_section = repo_context
+        .map(|c| format!("{}\n\n", c))
+        .unwrap_or_default();
     
     format!(
-        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\n{}Shared screen context:\n{}\n\nQuestion to answer aloud:\n{}\n\nAnswer in 2-4 spoken sentences. Answer primarily from the transcript. Use the shared screen or codebase context if it materially improves the answer. Cite only the transcript snippets you actually relied on using their [S#] or [S#-S#] labels. Cite [Screen] only if the image materially informed the answer. Cite codebase cleanly if used.",
+        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\n{}Shared screen context:\n{}\n\nQuestion to answer aloud:\n{}\n\nAnswer in 2-4 spoken sentences. Answer primarily from the transcript. Use the shared screen or code evidence only if it materially improves the answer. Code evidence can confirm implementation details, but it cannot by itself prove the team's rationale; for why/decision questions, distinguish observed implementation from confirmed intent. If the code evidence packet says the repo evidence is stale, live-only, or otherwise partial, mention that uncertainty instead of sounding certain. Cite only the transcript snippets you actually relied on using their [S#] or [S#-S#] labels. Cite [Screen] only if the image materially informed the answer. Cite code evidence with its [C#] labels only when you actually relied on it.",
         derived
             .rolling_summary
             .as_deref()
@@ -877,65 +1027,25 @@ fn build_question_prompt(
     )
 }
 
-async fn execute_preflight_repo_search(
+async fn search_repo_context(
     state: &AppState,
-    gemini_api_key: &str,
+    session: &SessionRow,
     question: &str,
-) -> Option<String> {
-    let settings = state.database().list_settings().unwrap_or_default();
-    let repo_name = settings.into_iter().find(|(k, _)| k == "github_repo")?.1;
-    if repo_name.is_empty() {
-        return None;
-    }
-
-    let tools = serde_json::json!({
-        "functionDeclarations": [{
-            "name": "search_codebase",
-            "description": "Searches the connected GitHub repository codebase for context relevant to the user question.",
-            "parameters": {
-                "type": "OBJECT",
-                "properties": {
-                    "query": { "type": "STRING", "description": "Semantic query to find relevant codebase documentation or source code." }
-                },
-                "required": ["query"]
-            }
-        }]
-    });
-
-    let options = crate::providers::llm::LlmGenerationOptions {
-        tools: Some(tools),
-        ..Default::default()
-    };
-
-    let system_prompt = "You are a routing assistant. Decide if the user's question requires searching the connected codebase to answer accurately. If so, call the search_codebase tool. If not, output nothing.";
-    
-    if let Ok(Some((name, args))) = crate::providers::llm::check_for_tool_call(
-        gemini_api_key,
-        system_prompt,
-        question,
-        &options
-    ).await {
-        if name == "search_codebase" {
-            if let Some(query) = args.get("query").and_then(|q| q.as_str()) {
-                if let Ok(embedding) = crate::providers::llm::generate_embedding(
-                    gemini_api_key,
-                    query,
-                    crate::providers::llm::EmbeddingTaskType::RetrievalQuery
-                ).await {
-                    if let Ok(results) = state.database().search_repo_chunks(&repo_name, &embedding, 5) {
-                        let mut combined = String::from("Codebase Search Results:\n\n");
-                        for r in results {
-                            combined.push_str(&r.text);
-                            combined.push_str("\n\n");
-                        }
-                        return Some(combined);
-                    }
-                }
-            }
-        }
-    }
-    
-    None
+    snippet_lines: &[String],
+    messages: &[MessageRow],
+    derived: &SessionDerivedUpdate,
+) -> crate::repo_search::RepoSearchOutcome {
+    state
+        .repo_search_runtime()
+        .search_context(RepoSearchRequest {
+            repo_context: repo_context_to_runtime(map_repo_context(session).as_ref()),
+            question: question.to_string(),
+            transcript_context: snippet_lines.join("\n"),
+            recent_messages: format_recent_messages(messages, question),
+            rolling_summary: derived.rolling_summary.clone().or_else(|| session.rolling_summary.clone()),
+        })
+        .await
+        .unwrap_or_default()
 }
 
 fn build_action_prompt(
@@ -1012,7 +1122,7 @@ fn insufficient_transcript_message() -> String {
 fn extract_citations(content: &str) -> Vec<String> {
     static CITATION_REGEX: OnceLock<Regex> = OnceLock::new();
     let regex = CITATION_REGEX.get_or_init(|| {
-        Regex::new(r"\[(Screen|S\d+(?:-S?\d+)?)\]").expect("citation regex should compile")
+        Regex::new(r"\[(Screen|S\d+(?:-S?\d+)?|C\d+)\]").expect("citation regex should compile")
     });
 
     let mut citations = Vec::new();
@@ -1031,6 +1141,15 @@ fn extract_citations(content: &str) -> Vec<String> {
 fn citation_sort_key(citation: &str) -> (u8, i64, i64) {
     if citation == "[Screen]" {
         return (0, 0, 0);
+    }
+
+    if citation.starts_with("[C") {
+        let value = citation
+            .trim_matches(['[', ']'])
+            .trim_start_matches('C')
+            .parse::<i64>()
+            .unwrap_or_default();
+        return (1, value, value);
     }
 
     let normalized = citation.trim_matches(['[', ']']);
@@ -1069,6 +1188,8 @@ fn build_message_metadata(
         screen_capture_wait_ms,
         used_screen_context,
         citations: extract_citations(content),
+        repo_search: None,
+        repo_citations: Vec::new(),
     }
 }
 
@@ -2233,6 +2354,7 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
         .is_ok();
     let prompts = list_prompts(state.database().as_ref(), load_active_prompt_id(&settings))?;
     let knowledge_files = list_files(state.database().as_ref())?;
+    let repo_status = state.repo_search_runtime().configured_status()?;
 
     let secrets = state
         .secret_store()
@@ -2271,7 +2393,16 @@ pub fn bootstrap_app(state: State<'_, AppState>) -> Result<BootstrapPayload, Str
         },
         prompts,
         knowledge_files,
+        repo_status: map_repo_sync_status(repo_status),
     })
+}
+
+#[tauri::command]
+pub fn get_repo_sync_status(state: State<'_, AppState>) -> Result<RepoSyncStatusPayload, String> {
+    state
+        .repo_search_runtime()
+        .configured_status()
+        .map(map_repo_sync_status)
 }
 
 #[tauri::command]
@@ -2772,6 +2903,10 @@ pub async fn ask_assistant(
 ) -> Result<Option<SessionDetailPayload>, String> {
     let state = state.inner().clone();
     let database = state.database();
+    let session = database
+        .get_session(&input.session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Session {} could not be found.", input.session_id))?;
     let transcripts = database
         .list_transcript_segments(&input.session_id)
         .map_err(|error| error.to_string())?;
@@ -2813,12 +2948,10 @@ pub async fn ask_assistant(
         let snippets =
             load_question_snippets(&state, &input.session_id, &input.prompt, &transcripts).await;
             
+        let repo_outcome =
+            search_repo_context(&state, &session, &input.prompt, &snippets, &messages, &derived)
+                .await;
         let gemini_api_key = load_gemini_api_key(&state)?;
-        let repo_context = if let Some(key) = &gemini_api_key {
-            execute_preflight_repo_search(&state, key, &input.prompt).await
-        } else {
-            None
-        };
 
         let prompt = build_question_prompt(
             &input.prompt,
@@ -2828,9 +2961,9 @@ pub async fn ask_assistant(
             input.screen_context.as_ref(),
             prompt_snapshot.as_deref(),
             &output_language,
-            repo_context.as_deref()
+            repo_outcome.prompt_context.as_deref()
         );
-        generate_grounded_response(
+        let (response, mut metadata) = generate_grounded_response(
             gemini_api_key,
             MEETING_ASSISTANT_SYSTEM_PROMPT,
             prompt,
@@ -2838,7 +2971,15 @@ pub async fn ask_assistant(
             fallback_response,
             &ask_generation_options(),
         )
-        .await
+        .await;
+        metadata.repo_search = Some(map_repo_search_status(repo_outcome.repo_search));
+        metadata.repo_citations = repo_outcome
+            .repo_citations
+            .into_iter()
+            .map(map_repo_citation)
+            .collect();
+        metadata.citations = extract_citations(&response);
+        (response, metadata)
     };
     metadata.screen_capture_wait_ms = input.screen_capture_wait_ms;
     append_assistant_message_with_metadata(
@@ -2897,6 +3038,10 @@ pub fn start_ask_assistant_stream(
 
         let outcome = async {
             let database = state.database();
+            let session = database
+                .get_session(&input.session_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Session {} could not be found.", input.session_id))?;
             let transcripts = database
                 .list_transcript_segments(&input.session_id)
                 .map_err(|error| error.to_string())?;
@@ -2931,12 +3076,10 @@ pub fn start_ask_assistant_stream(
                 )
                 .await;
                 
+                let repo_outcome =
+                    search_repo_context(&state, &session, &input.prompt, &snippets, &messages, &derived)
+                        .await;
                 let gemini_api_key = load_gemini_api_key(&state)?;
-                let repo_context = if let Some(key) = &gemini_api_key {
-                    execute_preflight_repo_search(&state, key, &input.prompt).await
-                } else {
-                    None
-                };
 
                 let prompt = build_question_prompt(
                     &input.prompt,
@@ -2946,9 +3089,9 @@ pub fn start_ask_assistant_stream(
                     input.screen_context.as_ref(),
                     prompt_snapshot.as_deref(),
                     &output_language,
-                    repo_context.as_deref()
+                    repo_outcome.prompt_context.as_deref()
                 );
-                generate_streamed_ask_response(
+                let (response, mut metadata) = generate_streamed_ask_response(
                     &app_handle,
                     &request_id,
                     &input.session_id,
@@ -2958,7 +3101,15 @@ pub fn start_ask_assistant_stream(
                     fallback_response,
                     input.screen_capture_wait_ms,
                 )
-                .await
+                .await;
+                metadata.repo_search = Some(map_repo_search_status(repo_outcome.repo_search));
+                metadata.repo_citations = repo_outcome
+                    .repo_citations
+                    .into_iter()
+                    .map(map_repo_citation)
+                    .collect();
+                metadata.citations = extract_citations(&response);
+                (response, metadata)
             };
 
             append_assistant_message_with_metadata(
@@ -3276,33 +3427,9 @@ pub async fn sync_github_repo(
     state: State<'_, AppState>,
     owner_repo: String,
     branch: String,
-) -> Result<usize, String> {
-    let pat = state
-        .secret_store()
-        .read_secret("github_pat")
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "GitHub PAT not configured".to_string())?;
-
-    let gemini_api_key = state
-        .secret_store()
-        .read_secret("gemini_api_key")
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Gemini API Key not configured".to_string())?;
-
-    let tarball_bytes = crate::github::download_tarball(&owner_repo, &branch, &pat)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let chunks_inserted = crate::rag::ingest_repository_tarball(
-        state.database().as_ref(),
-        &owner_repo,
-        &tarball_bytes,
-        &gemini_api_key,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(chunks_inserted)
+) -> Result<RepoSyncStatusPayload, String> {
+    let status = state.repo_search_runtime().enqueue_sync(&owner_repo, &branch)?;
+    Ok(map_repo_sync_status(status))
 }
 
 #[cfg(test)]
@@ -3348,6 +3475,7 @@ mod tests {
             }),
             Some("Favor concise, risk-aware answers."),
             "en",
+            Some("Repo evidence status: mode=hybrid; freshness=live_head; commit=abc1234. Treat code as implementation evidence, not proof of team intent or architecture rationale.\n\n[C1] acme/widgets@abc1234 src/auth.rs#L12-L28 [snapshot score 0.91]\nfn refresh_token() {}"),
         );
 
         assert!(prompt.contains("Shared screen context"));
@@ -3355,6 +3483,10 @@ mod tests {
         assert!(prompt.contains("[Screen]"));
         assert!(prompt.contains("[S#]"));
         assert!(prompt.contains("[S#-S#]"));
+        assert!(prompt.contains("[C#]"));
+        assert!(prompt.contains("implementation evidence"));
+        assert!(prompt.contains("why/decision questions"));
+        assert!(prompt.contains("stale, live-only, or otherwise partial"));
         assert!(prompt.contains("Favor concise, risk-aware answers."));
     }
 

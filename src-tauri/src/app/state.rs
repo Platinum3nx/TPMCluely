@@ -5,6 +5,7 @@ use crate::audio::AudioRuntime;
 use crate::db::AppDatabase;
 use crate::permissions::PermissionService;
 use crate::providers::ProviderCatalog;
+use crate::repo_search::RepoSearchRuntime;
 use crate::search::SearchRuntime;
 use crate::secrets::{AppSecretStore, KeychainSecretStore};
 use crate::session::manager::SessionManager;
@@ -18,6 +19,7 @@ pub struct AppState {
     permissions: PermissionService,
     providers: ProviderCatalog,
     search_runtime: SearchRuntime,
+    repo_search_runtime: RepoSearchRuntime,
     audio_runtime: AudioRuntime,
     session_manager: SessionManager,
     window_controller: WindowController,
@@ -50,6 +52,7 @@ impl AppState {
         Ok(Self {
             app_dir: Arc::new(app_dir),
             search_runtime: SearchRuntime::new(Arc::clone(&database), Arc::clone(&secret_store)),
+            repo_search_runtime: RepoSearchRuntime::new(Arc::clone(&database), Arc::clone(&secret_store)),
             database,
             secret_store,
             permissions: PermissionService::new(),
@@ -82,6 +85,10 @@ impl AppState {
 
     pub fn search_runtime(&self) -> &SearchRuntime {
         &self.search_runtime
+    }
+
+    pub fn repo_search_runtime(&self) -> &RepoSearchRuntime {
+        &self.repo_search_runtime
     }
 
     pub fn audio_runtime(&self) -> &AudioRuntime {

@@ -7,6 +7,7 @@ pub mod knowledge;
 pub mod permissions;
 pub mod prompts;
 pub mod providers;
+pub mod repo_search;
 pub mod screenshot;
 pub mod search;
 pub mod secrets;
@@ -21,7 +22,7 @@ use std::fs;
 use app::commands::{
     append_transcript_segment, ask_assistant, bootstrap_app, complete_session,
     delete_knowledge_file, delete_system_prompt, export_session_markdown, generate_session_tickets,
-    get_capture_status, get_runtime_state, get_session_detail, list_knowledge_files, list_sessions,
+    get_capture_status, get_repo_sync_status, get_runtime_state, get_session_detail, list_knowledge_files, list_sessions,
     list_system_audio_sources, list_system_prompts, mark_generated_ticket_pushed, pause_session,
     push_generated_ticket, push_generated_tickets, read_secret_value, resume_session,
     rename_session_speaker, run_dynamic_action, run_preflight_checks, save_generated_tickets, save_knowledge_file,
@@ -49,6 +50,7 @@ pub fn run() {
                     Box::new(std::io::Error::other(error))
                 })?;
             state.search_runtime().start();
+            state.repo_search_runtime().start();
             app.manage(state);
 
             Ok(())
@@ -59,6 +61,7 @@ pub fn run() {
             get_session_detail,
             list_system_audio_sources,
             get_capture_status,
+            get_repo_sync_status,
             start_session,
             update_browser_capture_session,
             start_system_audio_capture,

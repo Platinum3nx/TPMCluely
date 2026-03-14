@@ -9,6 +9,7 @@ import {
   deleteMockPrompt,
   exportMockSession,
   getMockCaptureStatus,
+  getMockRepoSyncStatus,
   getMockRuntimeState,
   getMockSessionDetail,
   getMockSecretValue,
@@ -33,6 +34,7 @@ import {
   searchMockSessions,
   setMockGeneratedTicketReviewState,
   setMockOverlayOpen,
+  syncMockGithubRepo,
   streamMockAssistant,
   startMockSession,
   startMockSystemAudioCapture,
@@ -59,6 +61,7 @@ import type {
   PromptRecord,
   PushGeneratedTicketInput,
   RenameSessionSpeakerInput,
+  RepoSyncStatus,
   RunDynamicActionInput,
   RuntimeSnapshot,
   SaveGeneratedTicketsInput,
@@ -435,6 +438,14 @@ export async function getRuntimeState(): Promise<RuntimeSnapshot> {
   return invoke<RuntimeSnapshot>("get_runtime_state");
 }
 
+export async function getRepoSyncStatus(): Promise<RepoSyncStatus> {
+  if (assertSupportedRuntime() === "browser-mock") {
+    return getMockRepoSyncStatus();
+  }
+
+  return invoke<RepoSyncStatus>("get_repo_sync_status");
+}
+
 export async function setOverlayOpen(open: boolean): Promise<RuntimeSnapshot> {
   if (assertSupportedRuntime() === "browser-mock") {
     return setMockOverlayOpen(open);
@@ -518,10 +529,10 @@ export async function deleteKnowledgeFile(knowledgeFileId: string): Promise<Know
   return invoke<KnowledgeFileRecord[]>("delete_knowledge_file", { knowledgeFileId });
 }
 
-export async function syncGithubRepo(ownerRepo: string, branch: string): Promise<number> {
+export async function syncGithubRepo(ownerRepo: string, branch: string): Promise<RepoSyncStatus> {
   if (assertSupportedRuntime() === "browser-mock") {
-    return Promise.resolve(0);
+    return syncMockGithubRepo(ownerRepo, branch);
   }
 
-  return invoke<number>("sync_github_repo", { ownerRepo, branch });
+  return invoke<RepoSyncStatus>("sync_github_repo", { ownerRepo, branch });
 }
