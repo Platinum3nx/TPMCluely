@@ -8,10 +8,15 @@ function displaySpeakerLabel(label: string | null): string {
 
 interface TranscriptViewProps {
   transcripts: TranscriptSegment[];
-  highlightedSequenceNo?: number | null;
+  highlightedSequenceStart?: number | null;
+  highlightedSequenceEnd?: number | null;
 }
 
-export function TranscriptView({ transcripts, highlightedSequenceNo = null }: TranscriptViewProps) {
+export function TranscriptView({
+  transcripts,
+  highlightedSequenceStart = null,
+  highlightedSequenceEnd = null,
+}: TranscriptViewProps) {
   return (
     <article className="card">
       <div className="section-header">
@@ -22,7 +27,14 @@ export function TranscriptView({ transcripts, highlightedSequenceNo = null }: Tr
         {transcripts.map((segment) => (
           <div
             key={segment.id}
-            className={`transcript-line ${highlightedSequenceNo === segment.sequenceNo ? "session-list-item-active" : ""}`}
+            className={`transcript-line ${
+              highlightedSequenceStart != null &&
+              highlightedSequenceEnd != null &&
+              segment.sequenceNo >= highlightedSequenceStart &&
+              segment.sequenceNo <= highlightedSequenceEnd
+                ? "session-list-item-active"
+                : ""
+            }`}
           >
             <span>
               {displaySpeakerLabel(segment.speakerLabel)}

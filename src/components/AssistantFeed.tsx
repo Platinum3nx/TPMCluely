@@ -1,6 +1,7 @@
-import type { ChatMessage } from "../lib/types";
+import type { ChatMessage, StreamingAssistantDraft } from "../lib/types";
 
 interface AssistantFeedProps {
+  draft?: StreamingAssistantDraft | null;
   emptyDetail?: string;
   emptyTitle?: string;
   maxItems?: number;
@@ -33,6 +34,7 @@ function formatLatency(latencyMs?: number | null): string | null {
 }
 
 export function AssistantFeed({
+  draft = null,
   emptyDetail = "Run an action or ask a question to create the first response.",
   emptyTitle = "No assistant output yet",
   maxItems,
@@ -49,12 +51,12 @@ export function AssistantFeed({
         <span className="section-meta">{messages.length} messages</span>
       </div>
       <div className="message-feed">
-        {visibleMessages.length === 0 ? (
+        {visibleMessages.length === 0 && !draft ? (
           <div className="empty-block">
             <strong>{emptyTitle}</strong>
             <p>{emptyDetail}</p>
           </div>
-        ) : (
+        ) : visibleMessages.length > 0 ? (
           visibleMessages.map((message) => {
             const chips = Array.from(
               new Set(
@@ -98,7 +100,19 @@ export function AssistantFeed({
               </div>
             );
           })
-        )}
+        ) : null}
+        {draft ? (
+          <div className="message-card message-assistant">
+            <div className="message-card-header">
+              <span>assistant</span>
+            </div>
+            <div className="message-chip-row">
+              <span className="message-chip">Drafting answer</span>
+              {draft.requestedScreenContext ? <span className="message-chip">Screen requested</span> : null}
+            </div>
+            <p>{draft.content || "Drafting answer..."}</p>
+          </div>
+        ) : null}
       </div>
     </article>
   );

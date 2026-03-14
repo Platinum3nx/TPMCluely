@@ -8,10 +8,17 @@ interface SessionsListProps {
     updatedAt: string;
     snippet: string | null;
     matchedField: string | null;
-    transcriptSequenceNo: number | null;
+    matchLabel: string | null;
+    retrievalMode: "lexical" | "hybrid" | null;
+    transcriptSequenceStart: number | null;
+    transcriptSequenceEnd: number | null;
   }>;
   selectedSessionId: string | null;
-  onSelectSession: (sessionId: string, transcriptSequenceNo?: number | null) => void;
+  onSelectSession: (
+    sessionId: string,
+    transcriptSequenceStart?: number | null,
+    transcriptSequenceEnd?: number | null
+  ) => void;
 }
 
 export function SessionsList({ sessions, selectedSessionId, onSelectSession }: SessionsListProps) {
@@ -33,13 +40,20 @@ export function SessionsList({ sessions, selectedSessionId, onSelectSession }: S
               type="button"
               key={session.sessionId}
               className={`session-list-item ${selectedSessionId === session.sessionId ? "session-list-item-active" : ""}`}
-              onClick={() => onSelectSession(session.sessionId, session.transcriptSequenceNo)}
+              onClick={() =>
+                onSelectSession(
+                  session.sessionId,
+                  session.transcriptSequenceStart,
+                  session.transcriptSequenceEnd
+                )
+              }
             >
               <strong>{session.title}</strong>
               <span>{session.status}</span>
               <p>{new Date(session.updatedAt).toLocaleString()}</p>
               {session.snippet ? <p>{session.snippet}</p> : null}
-              {session.matchedField ? <span>Matched: {session.matchedField.replaceAll("_", " ")}</span> : null}
+              {session.matchLabel ? <span>{session.matchLabel}</span> : null}
+              {session.retrievalMode ? <span>Mode: {session.retrievalMode}</span> : null}
             </button>
           ))
         )}

@@ -5,14 +5,16 @@ import { NotesView } from "./NotesView";
 import { TranscriptView } from "./TranscriptView";
 
 interface SessionDetailProps {
-  highlightedSequenceNo?: number | null;
+  highlightedSequenceStart?: number | null;
+  highlightedSequenceEnd?: number | null;
   onExportSession: (sessionDetail: SessionDetailModel) => void;
   onRenameSpeaker: (sessionId: string, speakerId: string, displayLabel: string) => Promise<void>;
   sessionDetail: SessionDetailModel | null;
 }
 
 export function SessionDetail({
-  highlightedSequenceNo = null,
+  highlightedSequenceStart = null,
+  highlightedSequenceEnd = null,
   onExportSession,
   onRenameSpeaker,
   sessionDetail,
@@ -63,7 +65,11 @@ export function SessionDetail({
         emptyTitle="No assistant trace yet"
         emptyDetail="Ask TPMCluely or run a dynamic action during the meeting to capture grounded responses here."
       />
-      <TranscriptView transcripts={sessionDetail.transcripts} highlightedSequenceNo={highlightedSequenceNo} />
+      <TranscriptView
+        transcripts={sessionDetail.transcripts}
+        highlightedSequenceStart={highlightedSequenceStart}
+        highlightedSequenceEnd={highlightedSequenceEnd}
+      />
     </div>
   );
 }

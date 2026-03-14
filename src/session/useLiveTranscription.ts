@@ -35,6 +35,9 @@ const MIN_SCREEN_HEIGHT = 270;
 const INITIAL_SCREEN_QUALITY = 0.82;
 const MIN_SCREEN_QUALITY = 0.56;
 const SCREEN_COMPRESSION_ATTEMPTS = 6;
+const SCREEN_CONTEXT_PREWARM_INTERVAL_MS = 1_500;
+const SCREEN_CONTEXT_UNHEALTHY_FAILURE_COUNT = 2;
+const SCREEN_CONTEXT_UNHEALTHY_WINDOW_MS = 12_000;
 const TRANSCRIPT_STALE_WARNING_MS = 20_000;
 const MICROPHONE_RECONNECT_DELAYS_MS = [1_000, 2_500, 5_000];
 
@@ -60,6 +63,17 @@ interface UseLiveTranscriptionOptions {
   onNativeCaptureSegment: (payload: CaptureSegmentEventPayload) => void;
   onCaptureSessionStateChanged: (sessionId: string) => Promise<void>;
   preferredMicrophoneDeviceId?: string;
+}
+
+interface ScreenContextRequestOptions {
+  maxStaleMs?: number;
+  refreshBudgetMs?: number;
+  skipRefreshIfUnhealthy?: boolean;
+}
+
+interface ScreenContextHealthState {
+  consecutiveFailures: number;
+  lastFailureAt: number | null;
 }
 
 interface DeepgramResultsMessage {
@@ -678,6 +692,12 @@ export function useLiveTranscription({
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
   const screenContextCacheRef = useRef<ScreenContextInput | null>(null);
+  const screenContextCapturePromiseRef = useRef<Promise<ScreenContextInput | null> | null>(null);
+  const screenContextPrewarmTimerRef = useRef<number | null>(null);
+  const screenContextHealthRef = useRef<ScreenContextHealthState>({
+    consecutiveFailures: 0,
+    lastFailureAt: null,
+  });
   const browserCaptureOptionsRef = useRef<StartCaptureOptions | null>(null);
   const listeningStartedAtRef = useRef<number | null>(null);
   const lastTranscriptFinalizedAtRef = useRef<number | null>(null);
@@ -966,10 +986,46 @@ export function useLiveTranscription({
     screenContextCacheRef.current = null;
   });
 
+  const clearScreenContextPrewarmTimer = useEffectEvent(() => {
+    if (screenContextPrewarmTimerRef.current !== null) {
+      window.clearInterval(screenContextPrewarmTimerRef.current);
+      screenContextPrewarmTimerRef.current = null;
+    }
+  });
+
+  const markScreenContextHealthy = useEffectEvent(() => {
+    screenContextHealthRef.current = {
+      consecutiveFailures: 0,
+      lastFailureAt: null,
+    };
+  });
+
+  const markScreenContextFailure = useEffectEvent(() => {
+    screenContextHealthRef.current = {
+      consecutiveFailures: screenContextHealthRef.current.consecutiveFailures + 1,
+      lastFailureAt: Date.now(),
+    };
+  });
+
+  const screenContextIsUnhealthy = useEffectEvent(() => {
+    const lastFailureAt = screenContextHealthRef.current.lastFailureAt;
+    if (lastFailureAt == null) {
+      return false;
+    }
+
+    return (
+      screenContextHealthRef.current.consecutiveFailures >= SCREEN_CONTEXT_UNHEALTHY_FAILURE_COUNT &&
+      Date.now() - lastFailureAt <= SCREEN_CONTEXT_UNHEALTHY_WINDOW_MS
+    );
+  });
+
   const clearDisplayStream = useEffectEvent(async (stopTracks: boolean) => {
     const displayStream = displayStreamRef.current;
     displayStreamRef.current = null;
+    clearScreenContextPrewarmTimer();
+    screenContextCapturePromiseRef.current = null;
     resetScreenContextCache();
+    markScreenContextHealthy();
 
     if (videoElementRef.current) {
       videoElementRef.current.pause();
@@ -1480,15 +1536,18 @@ export function useLiveTranscription({
     }
   });
 
-  const captureScreenContext = useEffectEvent(async (): Promise<ScreenContextInput | null> => {
+  const captureFreshScreenContext = useEffectEvent(async (): Promise<ScreenContextInput | null> => {
     const displayStream = displayStreamRef.current;
     if (!displayStream || screenShareState !== "active") {
       return null;
     }
 
-    const cached = screenContextCacheRef.current;
-    const now = Date.now();
-    try {
+    if (screenContextCapturePromiseRef.current) {
+      return screenContextCapturePromiseRef.current;
+    }
+
+    const capturePromise = (async () => {
+      const now = Date.now();
       const { video, canvas } = ensureFrameElements(videoElementRef, canvasElementRef);
       video.srcObject = displayStream;
       await video.play().catch(() => undefined);
@@ -1535,11 +1594,10 @@ export function useLiveTranscription({
         throw new Error("Screen frame could not be encoded.");
       }
 
-      const capturedAt = new Date(now).toISOString();
       const screenContext: ScreenContextInput = {
         mimeType: blob.type || "image/jpeg",
         dataBase64: await blobToBase64(blob),
-        capturedAt,
+        capturedAt: new Date(now).toISOString(),
         width: targetWidth,
         height: targetHeight,
         sourceLabel: describeDisplaySource(displayStream),
@@ -1547,25 +1605,112 @@ export function useLiveTranscription({
       };
 
       screenContextCacheRef.current = screenContext;
+      markScreenContextHealthy();
       setScreenShareError(null);
       return screenContext;
-    } catch (error) {
+    })()
+      .catch((error) => {
+        markScreenContextFailure();
+        throw error;
+      })
+      .finally(() => {
+        screenContextCapturePromiseRef.current = null;
+      });
+
+    screenContextCapturePromiseRef.current = capturePromise;
+    return capturePromise;
+  });
+
+  const captureScreenContext = useEffectEvent(
+    async (options: ScreenContextRequestOptions = {}): Promise<ScreenContextInput | null> => {
+      const displayStream = displayStreamRef.current;
+      if (!displayStream || screenShareState !== "active") {
+        return null;
+      }
+
+      const {
+        maxStaleMs = MAX_SCREEN_CONTEXT_STALE_MS,
+        refreshBudgetMs,
+        skipRefreshIfUnhealthy = false,
+      } = options;
+      const cached = screenContextCacheRef.current;
+      const now = Date.now();
       const cachedAge = cached ? now - Date.parse(cached.capturedAt) : Number.POSITIVE_INFINITY;
-      if (cached && cachedAge <= MAX_SCREEN_CONTEXT_STALE_MS) {
+
+      if (cached && cachedAge <= maxStaleMs) {
         return {
           ...cached,
           staleMs: cachedAge,
         };
       }
 
-      setScreenShareError(
-        error instanceof Error
-          ? `${error.message} TPMCluely will answer from transcript only until screen sharing is healthy again.`
-          : "Shared screen is unavailable. TPMCluely will answer from transcript only."
-      );
-      return null;
+      if (skipRefreshIfUnhealthy && screenContextIsUnhealthy()) {
+        if (cached && cachedAge <= MAX_SCREEN_CONTEXT_STALE_MS) {
+          return {
+            ...cached,
+            staleMs: cachedAge,
+          };
+        }
+        return null;
+      }
+
+      try {
+        const freshCapture =
+          typeof refreshBudgetMs === "number" && refreshBudgetMs >= 0
+            ? await Promise.race([
+                captureFreshScreenContext(),
+                new Promise<null>((resolve) => {
+                  window.setTimeout(() => resolve(null), refreshBudgetMs);
+                }),
+              ])
+            : await captureFreshScreenContext();
+
+        if (freshCapture) {
+          return freshCapture;
+        }
+
+        if (cached && cachedAge <= MAX_SCREEN_CONTEXT_STALE_MS) {
+          return {
+            ...cached,
+            staleMs: cachedAge,
+          };
+        }
+
+        return null;
+      } catch (error) {
+        if (cached && cachedAge <= MAX_SCREEN_CONTEXT_STALE_MS) {
+          return {
+            ...cached,
+            staleMs: cachedAge,
+          };
+        }
+
+        setScreenShareError(
+          error instanceof Error
+            ? `${error.message} TPMCluely will answer from transcript only until screen sharing is healthy again.`
+            : "Shared screen is unavailable. TPMCluely will answer from transcript only."
+        );
+        return null;
+      }
     }
-  });
+  );
+
+  useEffect(() => {
+    clearScreenContextPrewarmTimer();
+
+    if (screenShareState !== "active" || !displayStreamRef.current) {
+      return undefined;
+    }
+
+    void captureFreshScreenContext().catch(() => undefined);
+    screenContextPrewarmTimerRef.current = window.setInterval(() => {
+      void captureFreshScreenContext().catch(() => undefined);
+    }, SCREEN_CONTEXT_PREWARM_INTERVAL_MS);
+
+    return () => {
+      clearScreenContextPrewarmTimer();
+    };
+  }, [captureFreshScreenContext, clearScreenContextPrewarmTimer, screenShareState]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {

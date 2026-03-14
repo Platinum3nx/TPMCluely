@@ -7,6 +7,7 @@ pub mod permissions;
 pub mod prompts;
 pub mod providers;
 pub mod screenshot;
+pub mod search;
 pub mod secrets;
 pub mod session;
 pub mod tickets;
@@ -23,9 +24,9 @@ use app::commands::{
     push_generated_ticket, push_generated_tickets, read_secret_value, resume_session,
     rename_session_speaker, run_dynamic_action, run_preflight_checks, save_generated_tickets, save_knowledge_file,
     save_secret, save_setting, save_system_prompt, search_sessions,
-    set_generated_ticket_review_state, set_overlay_open, set_stealth_mode, start_session,
-    start_system_audio_capture, stop_system_audio_capture, update_browser_capture_session,
-    update_generated_ticket_draft,
+    set_generated_ticket_review_state, set_overlay_open, set_stealth_mode, start_ask_assistant_stream,
+    start_session, start_system_audio_capture, stop_system_audio_capture,
+    update_browser_capture_session, update_generated_ticket_draft,
 };
 use app::state::AppState;
 use tauri::Manager;
@@ -45,6 +46,7 @@ pub fn run() {
                 AppState::initialize(app_dir).map_err(|error| -> Box<dyn std::error::Error> {
                     Box::new(std::io::Error::other(error))
                 })?;
+            state.search_runtime().start();
             app.manage(state);
 
             Ok(())
@@ -69,6 +71,7 @@ pub fn run() {
             rename_session_speaker,
             run_dynamic_action,
             ask_assistant,
+            start_ask_assistant_stream,
             run_preflight_checks,
             save_setting,
             save_secret,

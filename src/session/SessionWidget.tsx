@@ -10,6 +10,7 @@ import type {
   PreflightModeState,
   ScreenShareState,
   SessionDetail,
+  StreamingAssistantDraft,
   SystemAudioSource,
 } from "../lib/types";
 import { AskBar } from "./AskBar";
@@ -50,6 +51,7 @@ interface SessionWidgetProps {
   screenShareOwnedByCapture: boolean;
   screenShareState: ScreenShareState;
   selectedMicrophoneDeviceId: string;
+  streamingAssistantDraft: StreamingAssistantDraft | null;
   stealthMode?: boolean;
   systemAudioPickerError: string | null;
   systemAudioPickerLoading: boolean;
@@ -194,6 +196,7 @@ export function SessionWidget({
   screenShareOwnedByCapture,
   screenShareState,
   selectedMicrophoneDeviceId,
+  streamingAssistantDraft,
   stealthMode = false,
   systemAudioPickerError,
   systemAudioPickerLoading,
@@ -261,6 +264,7 @@ export function SessionWidget({
       listeningLabel={listeningLabel}
       partialTranscript={partialTranscript}
       status={status}
+      streamingAssistantDraft={streamingAssistantDraft}
       onAsk={onAsk}
       onCompleteSession={onCompleteSession}
       onDynamicAction={onDynamicAction}
@@ -546,7 +550,11 @@ export function SessionWidget({
                     onAppendTranscript={onAppendTranscript}
                     onRenameSpeaker={onRenameSpeaker}
                   />
-                  <AssistantFeed messages={activeSession.messages} maxItems={5} />
+                  <AssistantFeed
+                    draft={streamingAssistantDraft?.sessionId === activeSession.session.id ? streamingAssistantDraft : null}
+                    messages={activeSession.messages}
+                    maxItems={5}
+                  />
                 </div>
               </section>
             )}
@@ -646,7 +654,14 @@ export function SessionWidget({
             onRenameSpeaker={onRenameSpeaker}
           />
 
-          <AssistantFeed messages={activeSession?.messages ?? []} />
+          <AssistantFeed
+            draft={
+              activeSession && streamingAssistantDraft?.sessionId === activeSession.session.id
+                ? streamingAssistantDraft
+                : null
+            }
+            messages={activeSession?.messages ?? []}
+          />
         </div>
       </div>
     </section>
@@ -665,6 +680,7 @@ interface StealthOverlayProps {
   listeningLabel: string;
   partialTranscript: string;
   status: string;
+  streamingAssistantDraft: StreamingAssistantDraft | null;
   onAsk: (prompt: string) => Promise<void>;
   onCompleteSession: (sessionId: string) => Promise<void>;
   onDynamicAction: (action: DynamicActionKey) => Promise<void>;
@@ -689,6 +705,7 @@ function StealthOverlay({
   listeningLabel,
   partialTranscript,
   status,
+  streamingAssistantDraft,
   onAsk,
   onCompleteSession,
   onDynamicAction,
@@ -704,6 +721,7 @@ function StealthOverlay({
   const [expanded, setExpanded] = useState(false);
   const isLoading = askInFlight || assistantInFlightAction !== null;
   const lastMessage = activeSession?.messages.filter((m) => m.role === "assistant").slice(-1)[0];
+  const liveDraft = streamingAssistantDraft?.sessionId === activeSession?.session.id ? streamingAssistantDraft : null;
 
   if (!activeSession) {
     return (
@@ -788,7 +806,12 @@ function StealthOverlay({
             </div>
           ) : null}
 
-          {lastMessage ? (
+          {liveDraft ? (
+            <div className="message-card message-assistant" style={{ marginBottom: 8, fontSize: "0.85rem" }}>
+              <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>Drafting answer</span>
+              <p>{liveDraft.content || "Drafting answer..."}</p>
+            </div>
+          ) : lastMessage ? (
             <div className="message-card message-assistant" style={{ marginBottom: 8, fontSize: "0.85rem" }}>
               <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>Last response</span>
               <p>{lastMessage.content}</p>

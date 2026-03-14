@@ -1,7 +1,6 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
   appendTranscriptSegment,
-  askAssistant,
   bootstrapApp,
   completeSession,
   deleteKnowledgeFile,
@@ -27,6 +26,7 @@ import {
   setOverlayOpen as persistOverlayOpen,
   setStealthMode as persistStealthMode,
   startSession,
+  streamAskAssistant,
   updateBrowserCaptureSession,
   updateGeneratedTicketDraft,
 } from "./lib/tauri";
@@ -53,12 +53,14 @@ import type {
   PromptRecord,
   SaveKnowledgeFileInput,
   SavePromptInput,
+  SearchMode,
   SecretKey,
   SessionDetail,
   SessionRecord,
   SearchSessionResult,
   ScreenContextInput,
   SettingRecord,
+  StreamingAssistantDraft,
   SystemAudioSource,
   TicketType,
 } from "./lib/types";
@@ -96,6 +98,9 @@ interface SystemAudioPickerRequest {
 type AssistantRequest =
   | { action: DynamicActionKey; kind: "action" }
   | { kind: "ask"; prompt: string };
+
+const ASK_SCREEN_CONTEXT_BUDGET_MS = 250;
+const ASK_SCREEN_CONTEXT_FRESH_MS = 2_500;
 
 function getSettingValue(settings: SettingRecord[], key: string, fallback: string): string {
   return settings.find((setting) => setting.key === key)?.value ?? fallback;
@@ -140,7 +145,8 @@ export default function App() {
   const [globalShortcutReady, setGlobalShortcutReady] = useState(false);
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchSessionResult[] | null>(null);
-  const [highlightedSequenceNo, setHighlightedSequenceNo] = useState<number | null>(null);
+  const [highlightedSequenceStart, setHighlightedSequenceStart] = useState<number | null>(null);
+  const [highlightedSequenceEnd, setHighlightedSequenceEnd] = useState<number | null>(null);
   const [prompts, setPrompts] = useState<PromptRecord[]>([]);
   const [knowledgeFiles, setKnowledgeFiles] = useState<KnowledgeFileRecord[]>([]);
   const [selectedCaptureMode, setSelectedCaptureMode] = useState<CaptureMode>("manual");
@@ -149,6 +155,7 @@ export default function App() {
   const [assistantError, setAssistantError] = useState<string | null>(null);
   const [assistantInFlightAction, setAssistantInFlightAction] = useState<DynamicActionKey | null>(null);
   const [askInFlight, setAskInFlight] = useState(false);
+  const [streamingAssistantDraft, setStreamingAssistantDraft] = useState<StreamingAssistantDraft | null>(null);
   const [lastAssistantRequest, setLastAssistantRequest] = useState<AssistantRequest | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [basePreflightReport, setBasePreflightReport] = useState<PreflightReport | null>(null);
@@ -162,6 +169,7 @@ export default function App() {
   const previousWindowFrameRef = useRef<WindowFrame | null>(null);
   const overlayOpenRef = useRef(false);
   const activeSessionRef = useRef<SessionDetail | null>(null);
+  const latestSearchRequestIdRef = useRef<string | null>(null);
   const stealthModeRef = useRef(false);
 
   function applySessionDetail(detail: SessionDetail | null) {
@@ -204,6 +212,19 @@ export default function App() {
     setActiveSessionDetail((current) => mergeCaptureSegment(current, payload));
     setSelectedSessionDetail((current) => mergeCaptureSegment(current, payload));
     void refreshSessionDetail(payload.session.id);
+  }
+
+  function updateStreamingAssistantDraft(
+    requestId: string,
+    update: (current: StreamingAssistantDraft) => StreamingAssistantDraft
+  ) {
+    setStreamingAssistantDraft((current) => {
+      if (!current || current.requestId !== requestId) {
+        return current;
+      }
+
+      return update(current);
+    });
   }
 
   async function refreshSessionDetail(sessionId: string) {
@@ -810,7 +831,7 @@ export default function App() {
       setError(null);
       setAssistantError(null);
       if (selectedCaptureMode === "manual") {
-        const detail = await createSessionRecord(title);
+        await createSessionRecord(title);
         if (sessionWidgetEnabled) {
           await syncOverlayWindow(true);
         }
@@ -952,7 +973,7 @@ export default function App() {
       setAssistantError(null);
       setAssistantInFlightAction(action);
       const screenContext =
-        action === "follow_up" && screenContextEnabled ? await captureScreenContextSafely() : null;
+        action === "follow_up" && screenContextEnabled ? (await captureScreenContextSafely()).screenContext : null;
       const detail = await runDynamicAction({
         sessionId: activeSessionRef.current.session.id,
         action,
@@ -977,14 +998,52 @@ export default function App() {
     try {
       setAssistantError(null);
       setAskInFlight(true);
-      const detail = await askAssistant({
+      setStreamingAssistantDraft(null);
+      const { screenContext, waitMs } = await captureScreenContextSafely({
+        maxStaleMs: ASK_SCREEN_CONTEXT_FRESH_MS,
+        refreshBudgetMs: ASK_SCREEN_CONTEXT_BUDGET_MS,
+        skipRefreshIfUnhealthy: true,
+      });
+      await streamAskAssistant(
+        {
         sessionId: activeSessionRef.current.session.id,
         prompt,
-        screenContext: screenContextEnabled ? await captureScreenContextSafely() : null,
-      });
+          screenContext,
+          screenCaptureWaitMs: waitMs,
+        },
+        {
+          onStarted: (event) => {
+            setStreamingAssistantDraft({
+              requestId: event.requestId,
+              sessionId: event.sessionId,
+              prompt: event.prompt,
+              content: "",
+              startedAt: event.startedAt,
+              requestedScreenContext: event.requestedScreenContext,
+            });
+          },
+          onChunk: (event) => {
+            updateStreamingAssistantDraft(event.requestId, (current) => ({
+              ...current,
+              content: event.content,
+            }));
+          },
+          onCompleted: (event) => {
+            setStreamingAssistantDraft((current) =>
+              current?.requestId === event.requestId ? null : current
+            );
+            applySessionDetail(event.detail);
+          },
+          onFailed: (event) => {
+            setStreamingAssistantDraft((current) =>
+              current?.requestId === event.requestId ? null : current
+            );
+          },
+        }
+      );
       setLastAssistantRequest({ kind: "ask", prompt });
-      applySessionDetail(detail);
     } catch (unknownError) {
+      setStreamingAssistantDraft(null);
       const message = unknownError instanceof Error ? unknownError.message : "Ask TPMCluely failed.";
       setAssistantError(message);
       setError(message);
@@ -1006,9 +1065,14 @@ export default function App() {
     await handleDynamicAction(lastAssistantRequest.action);
   }
 
-  async function handleSelectSession(sessionId: string, transcriptSequenceNo?: number | null) {
+  async function handleSelectSession(
+    sessionId: string,
+    transcriptSequenceStart?: number | null,
+    transcriptSequenceEnd?: number | null
+  ) {
     setSelectedSessionId(sessionId);
-    setHighlightedSequenceNo(transcriptSequenceNo ?? null);
+    setHighlightedSequenceStart(transcriptSequenceStart ?? null);
+    setHighlightedSequenceEnd(transcriptSequenceEnd ?? null);
     setSelectedSessionDetail(await getSessionDetail(sessionId));
   }
 
@@ -1071,25 +1135,56 @@ export default function App() {
     await stopCapture(activeSessionRef.current?.session.id);
   }
 
-  async function captureScreenContextSafely(): Promise<ScreenContextInput | null> {
+  async function captureScreenContextSafely({
+    maxStaleMs,
+    refreshBudgetMs,
+    skipRefreshIfUnhealthy = false,
+  }: {
+    maxStaleMs?: number;
+    refreshBudgetMs?: number;
+    skipRefreshIfUnhealthy?: boolean;
+  } = {}): Promise<{ screenContext: ScreenContextInput | null; waitMs: number }> {
     if (!screenContextEnabled || screenShareState !== "active") {
-      return null;
+      return { screenContext: null, waitMs: 0 };
     }
 
+    const startedAt =
+      typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
     try {
-      return await captureScreenContext();
+      const screenContext = await captureScreenContext({
+        maxStaleMs,
+        refreshBudgetMs,
+        skipRefreshIfUnhealthy,
+      });
+      const endedAt =
+        typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+      return {
+        screenContext,
+        waitMs: Math.max(0, Math.round(endedAt - startedAt)),
+      };
     } catch {
-      return null;
+      const endedAt =
+        typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+      return {
+        screenContext: null,
+        waitMs: Math.max(0, Math.round(endedAt - startedAt)),
+      };
     }
   }
 
-  const handleSearchSessions = useEffectEvent(async (query: string) => {
+  const handleSearchSessions = useEffectEvent(async (query: string, mode: SearchMode, requestId: string) => {
+    latestSearchRequestIdRef.current = requestId;
     if (!query.trim()) {
       setSearchResults(null);
       return;
     }
 
-    setSearchResults(await searchSessions(query));
+    const results = await searchSessions(query, mode);
+    if (latestSearchRequestIdRef.current !== requestId) {
+      return;
+    }
+
+    setSearchResults(results);
   });
 
   async function handleSavePrompt(input: SavePromptInput) {
@@ -1217,6 +1312,7 @@ export default function App() {
           screenShareOwnedByCapture={screenShareOwnedByCapture}
           screenShareState={screenShareState}
           selectedMicrophoneDeviceId={selectedMicrophoneDeviceId}
+          streamingAssistantDraft={streamingAssistantDraft}
           stealthMode={stealthMode}
           systemAudioPickerError={systemAudioPickerError}
           systemAudioPickerLoading={systemAudioPickerLoading}
@@ -1395,6 +1491,7 @@ export default function App() {
               screenShareOwnedByCapture={screenShareOwnedByCapture}
               screenShareState={screenShareState}
               selectedMicrophoneDeviceId={selectedMicrophoneDeviceId}
+              streamingAssistantDraft={streamingAssistantDraft}
               systemAudioPickerError={systemAudioPickerError}
               systemAudioPickerLoading={systemAudioPickerLoading}
               systemAudioPickerOpen={systemAudioPickerOpen}
@@ -1429,7 +1526,9 @@ export default function App() {
               selectedSessionId={selectedSessionId}
               sessionDetail={selectedSessionDetail}
               searchResults={searchResults}
-              highlightedSequenceNo={highlightedSequenceNo}
+              highlightedSequenceStart={highlightedSequenceStart}
+              highlightedSequenceEnd={highlightedSequenceEnd}
+              semanticSearchReady={bootstrap.diagnostics.semanticSearchReady}
               onSearchSessions={handleSearchSessions}
               onSelectSession={handleSelectSession}
               onExportSession={handleExportSession}

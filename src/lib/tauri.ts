@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   appendMockTranscriptSegment,
   askMockAssistant,
@@ -32,6 +33,7 @@ import {
   searchMockSessions,
   setMockGeneratedTicketReviewState,
   setMockOverlayOpen,
+  streamMockAssistant,
   startMockSession,
   startMockSystemAudioCapture,
   stopMockSystemAudioCapture,
@@ -41,6 +43,12 @@ import {
 import type {
   AppendTranscriptInput,
   AskSessionInput,
+  AskAssistantStreamStartPayload,
+  AskSessionStreamInput,
+  AssistantChunkEvent,
+  AssistantCompletedEvent,
+  AssistantFailedEvent,
+  AssistantStartedEvent,
   BrowserCaptureSessionUpdateInput,
   BootstrapPayload,
   CaptureStatePayload,
@@ -58,6 +66,7 @@ import type {
   SavePromptInput,
   SaveSecretInput,
   SaveSettingInput,
+  SearchMode,
   SearchSessionResult,
   SecretKey,
   SessionDetail,
@@ -66,9 +75,38 @@ import type {
   SettingRecord,
   StartSessionInput,
   StartSystemAudioCaptureInput,
+  StreamingAssistantDraft,
   SystemAudioSourceListPayload,
   UpdateGeneratedTicketDraftInput,
 } from "./types";
+
+interface AskAssistantStreamHandlers {
+  onChunk?: (event: AssistantChunkEvent) => void;
+  onCompleted?: (event: AssistantCompletedEvent) => void;
+  onFailed?: (event: AssistantFailedEvent) => void;
+  onStarted?: (event: AssistantStartedEvent) => void;
+}
+
+function createAskRequestId(): string {
+  return `ask_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function buildStreamingAssistantDraft(
+  event: AssistantStartedEvent | StreamingAssistantDraft
+): StreamingAssistantDraft {
+  if ("content" in event) {
+    return event;
+  }
+
+  return {
+    requestId: event.requestId,
+    sessionId: event.sessionId,
+    prompt: event.prompt,
+    content: "",
+    startedAt: event.startedAt,
+    requestedScreenContext: event.requestedScreenContext,
+  };
+}
 
 function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -256,6 +294,75 @@ export async function askAssistant(input: AskSessionInput): Promise<SessionDetai
   return invoke<SessionDetail | null>("ask_assistant", { input });
 }
 
+export async function streamAskAssistant(
+  input: AskSessionInput,
+  handlers: AskAssistantStreamHandlers = {}
+): Promise<SessionDetail | null> {
+  const streamInput: AskSessionStreamInput = {
+    ...input,
+    requestId: createAskRequestId(),
+  };
+
+  if (assertSupportedRuntime() === "browser-mock") {
+    return streamMockAssistant(streamInput, handlers);
+  }
+
+  const requestId = streamInput.requestId;
+  let settled = false;
+  let resolvePromise: (detail: SessionDetail | null) => void = () => undefined;
+  let rejectPromise: (error: Error) => void = () => undefined;
+  const result = new Promise<SessionDetail | null>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = (error) => reject(error);
+  });
+
+  const unlisteners = await Promise.all([
+    listen<AssistantStartedEvent>("assistant:started", (event) => {
+      if (event.payload.requestId !== requestId || settled) {
+        return;
+      }
+      handlers.onStarted?.(event.payload);
+    }),
+    listen<AssistantChunkEvent>("assistant:chunk", (event) => {
+      if (event.payload.requestId !== requestId || settled) {
+        return;
+      }
+      handlers.onChunk?.(event.payload);
+    }),
+    listen<AssistantCompletedEvent>("assistant:completed", (event) => {
+      if (event.payload.requestId !== requestId || settled) {
+        return;
+      }
+      settled = true;
+      handlers.onCompleted?.(event.payload);
+      resolvePromise(event.payload.detail);
+    }),
+    listen<AssistantFailedEvent>("assistant:failed", (event) => {
+      if (event.payload.requestId !== requestId || settled) {
+        return;
+      }
+      settled = true;
+      handlers.onFailed?.(event.payload);
+      rejectPromise(new Error(event.payload.error));
+    }),
+  ]);
+
+  const cleanup = () => {
+    for (const unlisten of unlisteners) {
+      unlisten();
+    }
+  };
+
+  try {
+    await invoke<AskAssistantStreamStartPayload>("start_ask_assistant_stream", { input: streamInput });
+    return await result.finally(cleanup);
+  } catch (error) {
+    settled = true;
+    cleanup();
+    throw error;
+  }
+}
+
 export async function saveGeneratedTickets(input: SaveGeneratedTicketsInput): Promise<SessionDetail | null> {
   if (assertSupportedRuntime() === "browser-mock") {
     return replaceMockGeneratedTickets(input);
@@ -344,12 +451,15 @@ export async function setStealthMode(enabled: boolean): Promise<RuntimeSnapshot>
   return invoke<RuntimeSnapshot>("set_stealth_mode", { enabled });
 }
 
-export async function searchSessions(query: string): Promise<SearchSessionResult[]> {
+export async function searchSessions(
+  query: string,
+  mode: SearchMode = "lexical"
+): Promise<SearchSessionResult[]> {
   if (assertSupportedRuntime() === "browser-mock") {
-    return searchMockSessions(query);
+    return searchMockSessions(query, mode);
   }
 
-  return invoke<SearchSessionResult[]>("search_sessions", { query });
+  return invoke<SearchSessionResult[]>("search_sessions", { query, mode });
 }
 
 export async function exportSessionMarkdown(sessionId: string): Promise<ExportedSessionPayload | null> {

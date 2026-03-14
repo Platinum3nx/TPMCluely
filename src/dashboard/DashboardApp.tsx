@@ -1,5 +1,11 @@
-import { useEffect, useState } from "react";
-import type { SearchSessionResult, SessionDetail as SessionDetailModel, SessionRecord, TicketType } from "../lib/types";
+import { useEffect, useRef, useState } from "react";
+import type {
+  SearchMode,
+  SearchSessionResult,
+  SessionDetail as SessionDetailModel,
+  SessionRecord,
+  TicketType,
+} from "../lib/types";
 import { SearchBar } from "../components/SearchBar";
 import { SessionDetail } from "./SessionDetail";
 import { SessionsList } from "./SessionsList";
@@ -10,9 +16,15 @@ interface DashboardAppProps {
   selectedSessionId: string | null;
   sessionDetail: SessionDetailModel | null;
   searchResults: SearchSessionResult[] | null;
-  highlightedSequenceNo: number | null;
-  onSearchSessions: (query: string) => Promise<void>;
-  onSelectSession: (sessionId: string, transcriptSequenceNo?: number | null) => Promise<void>;
+  highlightedSequenceStart: number | null;
+  highlightedSequenceEnd: number | null;
+  semanticSearchReady: boolean;
+  onSearchSessions: (query: string, mode: SearchMode, requestId: string) => Promise<void>;
+  onSelectSession: (
+    sessionId: string,
+    transcriptSequenceStart?: number | null,
+    transcriptSequenceEnd?: number | null
+  ) => Promise<void>;
   onExportSession: (sessionDetail: SessionDetailModel) => void;
   onRenameSpeaker: (sessionId: string, speakerId: string, displayLabel: string) => Promise<void>;
   onGenerateTickets: (sessionId: string) => Promise<void>;
@@ -37,7 +49,9 @@ export function DashboardApp({
   selectedSessionId,
   sessionDetail,
   searchResults,
-  highlightedSequenceNo,
+  highlightedSequenceStart,
+  highlightedSequenceEnd,
+  semanticSearchReady,
   onSearchSessions,
   onSelectSession,
   onExportSession,
@@ -50,10 +64,25 @@ export function DashboardApp({
   allowTicketPreview,
 }: DashboardAppProps) {
   const [query, setQuery] = useState("");
+  const requestSequenceRef = useRef(0);
 
   useEffect(() => {
-    void onSearchSessions(query);
-  }, [onSearchSessions, query]);
+    requestSequenceRef.current += 1;
+    const searchKey = `search-${requestSequenceRef.current}`;
+    void onSearchSessions(query, "lexical", `${searchKey}:lexical`);
+
+    if (!semanticSearchReady || !query.trim()) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void onSearchSessions(query, "hybrid", `${searchKey}:hybrid`);
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [onSearchSessions, query, semanticSearchReady]);
 
   const sessionItems = query.trim()
     ? (searchResults ?? []).map((result) => ({
@@ -63,7 +92,10 @@ export function DashboardApp({
         updatedAt: result.updatedAt,
         snippet: result.snippet,
         matchedField: result.matchedField,
-        transcriptSequenceNo: result.transcriptSequenceNo,
+        matchLabel: result.matchLabel,
+        retrievalMode: result.retrievalMode,
+        transcriptSequenceStart: result.transcriptSequenceStart,
+        transcriptSequenceEnd: result.transcriptSequenceEnd,
       }))
     : sessions.map((session) => ({
         sessionId: session.id,
@@ -72,7 +104,10 @@ export function DashboardApp({
         updatedAt: session.updatedAt,
         snippet: session.finalSummary ?? session.notesMd ?? null,
         matchedField: null,
-        transcriptSequenceNo: null,
+        matchLabel: null,
+        retrievalMode: null,
+        transcriptSequenceStart: null,
+        transcriptSequenceEnd: null,
       }));
 
   return (
@@ -89,12 +124,15 @@ export function DashboardApp({
         <SessionsList
           sessions={sessionItems}
           selectedSessionId={selectedSessionId}
-          onSelectSession={(sessionId, transcriptSequenceNo) => void onSelectSession(sessionId, transcriptSequenceNo)}
+          onSelectSession={(sessionId, transcriptSequenceStart, transcriptSequenceEnd) =>
+            void onSelectSession(sessionId, transcriptSequenceStart, transcriptSequenceEnd)
+          }
         />
         <div className="card-stack">
           <SessionDetail
             sessionDetail={sessionDetail}
-            highlightedSequenceNo={highlightedSequenceNo}
+            highlightedSequenceStart={highlightedSequenceStart}
+            highlightedSequenceEnd={highlightedSequenceEnd}
             onExportSession={onExportSession}
             onRenameSpeaker={onRenameSpeaker}
           />

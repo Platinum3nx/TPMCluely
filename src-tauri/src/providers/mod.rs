@@ -15,9 +15,11 @@ pub struct ProviderSnapshot {
     pub llm_provider: &'static str,
     pub stt_provider: &'static str,
     pub ticket_provider: &'static str,
+    pub embedding_provider: &'static str,
     pub llm_ready: bool,
     pub stt_ready: bool,
     pub linear_ready: bool,
+    pub embedding_ready: bool,
 }
 
 impl ProviderCatalog {
@@ -26,9 +28,11 @@ impl ProviderCatalog {
             llm_provider: "Gemini",
             stt_provider: "Deepgram",
             ticket_provider: "Gemini + Linear",
+            embedding_provider: "Gemini Embeddings",
             llm_ready: presence.gemini_configured,
             stt_ready: presence.deepgram_configured,
             linear_ready: presence.linear_configured,
+            embedding_ready: presence.gemini_configured,
         }
     }
 }
