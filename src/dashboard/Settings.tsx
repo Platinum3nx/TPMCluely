@@ -9,6 +9,8 @@ import type {
   SettingRecord,
   TicketPushMode,
 } from "../lib/types";
+import { syncGithubRepo } from "../lib/tauri";
+import { useState } from "react";
 
 interface SettingsProps {
   bootstrap: BootstrapPayload;
@@ -84,6 +86,26 @@ export function Settings({
   const overlayShortcut = getSetting(bootstrap.settings, "overlay_shortcut", "CmdOrCtrl+Shift+K");
   const ticketPushMode = getSetting(bootstrap.settings, "ticket_push_mode", "review_before_push") as TicketPushMode;
   const preferredMicrophoneDeviceId = getSetting(bootstrap.settings, "preferred_microphone_device_id", "");
+  const githubRepo = getSetting(bootstrap.settings, "github_repo", "");
+  const [syncingRepo, setSyncingRepo] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
+
+  const handleSyncRepo = async () => {
+    if (!githubRepo.includes("/")) {
+      setSyncMessage("Invalid format. Use owner/repo.");
+      return;
+    }
+    setSyncingRepo(true);
+    setSyncMessage("Syncing codebase...");
+    try {
+      const chunks = await syncGithubRepo(githubRepo, "main");
+      setSyncMessage(`Synced ${chunks} chunks successfully.`);
+    } catch (error) {
+      setSyncMessage(`Error: ${String(error)}`);
+    } finally {
+      setSyncingRepo(false);
+    }
+  };
 
   return (
     <section className="panel panel-settings">
@@ -143,6 +165,33 @@ export function Settings({
             Ticket drafts always stay local until they are explicitly approved. Choose the preferred microphone from the
             Session tab so preflight can validate it before the meeting begins.
           </p>
+        </article>
+
+        <article className="card">
+          <p className="card-title">Connected Repositories</p>
+          <div className="field">
+            <span>Codebase (owner/repo)</span>
+            <div className="field-row">
+              <input
+                value={githubRepo}
+                placeholder="facebook/react"
+                onChange={(event) => void onUpdateSetting("github_repo", event.target.value)}
+              />
+              <button type="button" onClick={handleSyncRepo} disabled={syncingRepo || !bootstrap.secrets.githubConfigured}>
+                {syncingRepo ? "Syncing..." : "Sync"}
+              </button>
+            </div>
+          </div>
+          {syncMessage && (
+            <p className="card-detail" style={{ color: syncMessage.startsWith("Error") ? "var(--color-danger)" : "var(--color-success)" }}>
+              {syncMessage}
+            </p>
+          )}
+          {!bootstrap.secrets.githubConfigured && (
+            <p className="card-detail" style={{ color: "var(--color-danger)" }}>
+              Please configure your GitHub PAT in the Onboarding screen first.
+            </p>
+          )}
         </article>
 
         <article className="card">

@@ -908,6 +908,7 @@ export async function bootstrapMockApp(): Promise<BootstrapPayload> {
       geminiConfigured: Boolean(secrets.gemini_api_key),
       deepgramConfigured: Boolean(secrets.deepgram_api_key),
       linearConfigured: Boolean(secrets.linear_api_key && secrets.linear_team_id),
+      githubConfigured: Boolean(secrets.github_pat),
     },
     providers: {
       llmProvider: "Gemini",
