@@ -6,6 +6,7 @@ pub struct SecretPresence {
     pub gemini_configured: bool,
     pub deepgram_configured: bool,
     pub linear_configured: bool,
+    pub github_configured: bool,
 }
 
 #[derive(Debug, Error)]
@@ -23,11 +24,13 @@ pub trait AppSecretStore: Send + Sync {
         let deepgram = self.read_secret("deepgram_api_key")?.is_some();
         let linear_key = self.read_secret("linear_api_key")?.is_some();
         let linear_team = self.read_secret("linear_team_id")?.is_some();
+        let github = self.read_secret("github_pat")?.is_some();
 
         Ok(SecretPresence {
             gemini_configured: gemini,
             deepgram_configured: deepgram,
             linear_configured: linear_key && linear_team,
+            github_configured: github,
         })
     }
 }

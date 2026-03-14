@@ -2,6 +2,7 @@ pub mod app;
 pub mod audio;
 pub mod db;
 pub mod exports;
+pub mod github;
 pub mod knowledge;
 pub mod permissions;
 pub mod prompts;
@@ -12,6 +13,7 @@ pub mod secrets;
 pub mod session;
 pub mod tickets;
 pub mod transcript;
+pub mod rag;
 pub mod window;
 
 use std::fs;
@@ -26,7 +28,7 @@ use app::commands::{
     save_secret, save_setting, save_system_prompt, search_sessions,
     set_generated_ticket_review_state, set_overlay_open, set_stealth_mode, start_ask_assistant_stream,
     start_session, start_system_audio_capture, stop_system_audio_capture,
-    update_browser_capture_session, update_generated_ticket_draft,
+    update_browser_capture_session, update_generated_ticket_draft, sync_github_repo,
 };
 use app::state::AppState;
 use tauri::Manager;
@@ -90,7 +92,8 @@ pub fn run() {
             delete_system_prompt,
             list_knowledge_files,
             save_knowledge_file,
-            delete_knowledge_file
+            delete_knowledge_file,
+            sync_github_repo
         ])
         .run(tauri::generate_context!())
         .expect("failed to run TPMCluely");

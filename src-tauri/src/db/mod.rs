@@ -1,4 +1,5 @@
 pub mod migrations;
+pub mod rag;
 
 use std::path::PathBuf;
 
