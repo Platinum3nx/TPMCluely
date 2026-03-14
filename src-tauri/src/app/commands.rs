@@ -88,6 +88,7 @@ pub struct SecretSnapshot {
     pub gemini_configured: bool,
     pub deepgram_configured: bool,
     pub linear_configured: bool,
+    pub github_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -492,6 +493,7 @@ fn secret_snapshot(presence: &SecretPresence) -> SecretSnapshot {
         gemini_configured: presence.gemini_configured,
         deepgram_configured: presence.deepgram_configured,
         linear_configured: presence.linear_configured,
+        github_configured: presence.github_configured,
     }
 }
 
@@ -752,6 +754,7 @@ fn ask_generation_options() -> LlmGenerationOptions {
     LlmGenerationOptions {
         response_mime_type: None,
         max_output_tokens: Some(ASK_MAX_OUTPUT_TOKENS),
+        tools: None,
     }
 }
 
@@ -852,11 +855,14 @@ fn build_question_prompt(
     screen_context: Option<&ScreenContextInput>,
     prompt_snapshot: Option<&str>,
     output_language: &str,
+    repo_context: Option<&str>,
 ) -> String {
     let snippets = snippet_lines.join("\n");
     let recent_messages = format_recent_messages(messages, prompt);
+    let repo_section = repo_context.map(|c| format!("Relevant codebase context:\n{}\n\n", c)).unwrap_or_default();
+    
     format!(
-        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\nShared screen context:\n{}\n\nQuestion to answer aloud:\n{}\n\nAnswer in 2-4 spoken sentences. Answer primarily from the transcript. Use the shared screen only if it materially improves the answer. If the transcript does not contain the answer, say that clearly. If transcript and screen disagree, call that out. Cite only the transcript snippets you actually relied on using their [S#] or [S#-S#] labels. Cite [Screen] only if the image materially informed the answer.",
+        "Rolling summary:\n{}\n\nPrompt snapshot:\n{}\n\nOutput language:\n{}\n\nRecent Ask TPMCluely conversation:\n{}\n\nRelevant transcript snippets:\n{}\n\n{}Shared screen context:\n{}\n\nQuestion to answer aloud:\n{}\n\nAnswer in 2-4 spoken sentences. Answer primarily from the transcript. Use the shared screen or codebase context if it materially improves the answer. Cite only the transcript snippets you actually relied on using their [S#] or [S#-S#] labels. Cite [Screen] only if the image materially informed the answer. Cite codebase cleanly if used.",
         derived
             .rolling_summary
             .as_deref()
@@ -865,9 +871,71 @@ fn build_question_prompt(
         output_language,
         recent_messages,
         snippets,
+        repo_section,
         format_screen_context_note(screen_context),
         prompt
     )
+}
+
+async fn execute_preflight_repo_search(
+    state: &AppState,
+    gemini_api_key: &str,
+    question: &str,
+) -> Option<String> {
+    let settings = state.database().list_settings().unwrap_or_default();
+    let repo_name = settings.into_iter().find(|(k, _)| k == "github_repo")?.1;
+    if repo_name.is_empty() {
+        return None;
+    }
+
+    let tools = serde_json::json!({
+        "functionDeclarations": [{
+            "name": "search_codebase",
+            "description": "Searches the connected GitHub repository codebase for context relevant to the user question.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "query": { "type": "STRING", "description": "Semantic query to find relevant codebase documentation or source code." }
+                },
+                "required": ["query"]
+            }
+        }]
+    });
+
+    let options = crate::providers::llm::LlmGenerationOptions {
+        tools: Some(tools),
+        ..Default::default()
+    };
+
+    let system_prompt = "You are a routing assistant. Decide if the user's question requires searching the connected codebase to answer accurately. If so, call the search_codebase tool. If not, output nothing.";
+    
+    if let Ok(Some((name, args))) = crate::providers::llm::check_for_tool_call(
+        gemini_api_key,
+        system_prompt,
+        question,
+        &options
+    ).await {
+        if name == "search_codebase" {
+            if let Some(query) = args.get("query").and_then(|q| q.as_str()) {
+                if let Ok(embedding) = crate::providers::llm::generate_embedding(
+                    gemini_api_key,
+                    query,
+                    crate::providers::llm::EmbeddingTaskType::RetrievalQuery
+                ).await {
+                    if let Ok(results) = state.database().search_repo_chunks(&repo_name, &embedding, 5) {
+                        let mut combined = String::from("Codebase Search Results:\n\n");
+                        for r in results {
+                            combined.push_str(&r.text);
+                            combined.push_str("\n\n");
+                        }
+                        return Some(combined);
+                    }
+                }
+            }
+        }
+    }
+    
+    None
 }
 
 fn build_action_prompt(
@@ -2744,6 +2812,14 @@ pub async fn ask_assistant(
     } else {
         let snippets =
             load_question_snippets(&state, &input.session_id, &input.prompt, &transcripts).await;
+            
+        let gemini_api_key = load_gemini_api_key(&state)?;
+        let repo_context = if let Some(key) = &gemini_api_key {
+            execute_preflight_repo_search(&state, key, &input.prompt).await
+        } else {
+            None
+        };
+
         let prompt = build_question_prompt(
             &input.prompt,
             &snippets,
@@ -2752,9 +2828,10 @@ pub async fn ask_assistant(
             input.screen_context.as_ref(),
             prompt_snapshot.as_deref(),
             &output_language,
+            repo_context.as_deref()
         );
         generate_grounded_response(
-            load_gemini_api_key(&state)?,
+            gemini_api_key,
             MEETING_ASSISTANT_SYSTEM_PROMPT,
             prompt,
             input.screen_context.as_ref(),
@@ -2853,6 +2930,14 @@ pub fn start_ask_assistant_stream(
                     &transcripts,
                 )
                 .await;
+                
+                let gemini_api_key = load_gemini_api_key(&state)?;
+                let repo_context = if let Some(key) = &gemini_api_key {
+                    execute_preflight_repo_search(&state, key, &input.prompt).await
+                } else {
+                    None
+                };
+
                 let prompt = build_question_prompt(
                     &input.prompt,
                     &snippets,
@@ -2861,12 +2946,13 @@ pub fn start_ask_assistant_stream(
                     input.screen_context.as_ref(),
                     prompt_snapshot.as_deref(),
                     &output_language,
+                    repo_context.as_deref()
                 );
                 generate_streamed_ask_response(
                     &app_handle,
                     &request_id,
                     &input.session_id,
-                    load_gemini_api_key(&state)?,
+                    gemini_api_key,
                     prompt,
                     input.screen_context.as_ref(),
                     fallback_response,
@@ -3183,6 +3269,40 @@ pub fn delete_knowledge_file(
 ) -> Result<Vec<KnowledgeFileRecord>, String> {
     delete_file(state.database().as_ref(), &knowledge_file_id)?;
     list_knowledge_files(state)
+}
+
+#[tauri::command]
+pub async fn sync_github_repo(
+    state: State<'_, AppState>,
+    owner_repo: String,
+    branch: String,
+) -> Result<usize, String> {
+    let pat = state
+        .secret_store()
+        .read_secret("github_pat")
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "GitHub PAT not configured".to_string())?;
+
+    let gemini_api_key = state
+        .secret_store()
+        .read_secret("gemini_api_key")
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Gemini API Key not configured".to_string())?;
+
+    let tarball_bytes = crate::github::download_tarball(&owner_repo, &branch, &pat)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let chunks_inserted = crate::rag::ingest_repository_tarball(
+        state.database().as_ref(),
+        &owner_repo,
+        &tarball_bytes,
+        &gemini_api_key,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(chunks_inserted)
 }
 
 #[cfg(test)]

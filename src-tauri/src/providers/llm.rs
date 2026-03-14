@@ -52,6 +52,7 @@ pub enum LlmPart {
 pub struct LlmGenerationOptions {
     pub response_mime_type: Option<String>,
     pub max_output_tokens: Option<u32>,
+    pub tools: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +129,23 @@ fn extract_response_text(value: &serde_json::Value) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+pub fn extract_function_call(value: &serde_json::Value) -> Option<(String, serde_json::Value)> {
+    let part = value
+        .get("candidates")?
+        .as_array()?
+        .first()?
+        .get("content")?
+        .get("parts")?
+        .as_array()?
+        .first()?;
+        
+    let call = part.get("functionCall")?;
+    let name = call.get("name")?.as_str()?.to_string();
+    let args = call.get("args")?.clone();
+    
+    Some((name, args))
 }
 
 fn extract_embedding_values(value: &serde_json::Value) -> Option<Vec<f32>> {
@@ -385,7 +403,7 @@ fn build_request_payload(
         generation_config["maxOutputTokens"] = json!(max_output_tokens);
     }
 
-    json!({
+    let mut payload = json!({
         "systemInstruction": {
             "parts": [{ "text": system_prompt }]
         },
@@ -394,7 +412,13 @@ fn build_request_payload(
             "parts": build_user_parts(user_parts)
         }],
         "generationConfig": generation_config
-    })
+    });
+
+    if let Some(tools) = &options.tools {
+        payload["tools"] = json!([tools]);
+    }
+
+    payload
 }
 
 pub async fn generate_text(
@@ -422,6 +446,32 @@ pub async fn generate_text_with_options(
         .build()?;
 
     request_with_retry(&client, api_key, system_prompt, &[LlmPart::Text(user_prompt.to_string())], options).await
+}
+
+pub async fn check_for_tool_call(
+    api_key: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    options: &LlmGenerationOptions,
+) -> Result<Option<(String, serde_json::Value)>, LlmProviderError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .build()?;
+        
+    let endpoint = gemini_generate_content_endpoint(api_key);
+    let response = client
+        .post(&endpoint)
+        .json(&build_request_payload(system_prompt, &[LlmPart::Text(user_prompt.to_string())], options))
+        .send()
+        .await?;
+        
+    let status = response.status();
+    if !status.is_success() {
+         return Err(LlmProviderError::HttpStatus(status.as_u16(), response.text().await.unwrap_or_default()));
+    }
+    
+    let value: serde_json::Value = response.json().await?;
+    Ok(extract_function_call(&value))
 }
 
 pub async fn generate_text_multimodal(
@@ -485,6 +535,7 @@ pub async fn generate_json(
         &LlmGenerationOptions {
             response_mime_type: Some("application/json".to_string()),
             max_output_tokens: None,
+            tools: None,
         },
     )
     .await

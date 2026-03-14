@@ -333,6 +333,19 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
         CREATE INDEX IF NOT EXISTS idx_search_index_jobs_status_next_run
           ON search_index_jobs(status, next_run_at, updated_at);
 
+        CREATE TABLE IF NOT EXISTS repo_chunks (
+          id                    TEXT PRIMARY KEY,
+          repo_name             TEXT NOT NULL,
+          file_path             TEXT NOT NULL,
+          chunk_index           INTEGER NOT NULL,
+          text                  TEXT NOT NULL,
+          embedding_blob        BLOB,
+          created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_chunks_repo_file_chunk
+          ON repo_chunks(repo_name, file_path, chunk_index);
+
         INSERT OR IGNORE INTO settings (key, value) VALUES
           ('theme', 'system'),
           ('session_widget_enabled', 'true'),
