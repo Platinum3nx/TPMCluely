@@ -41,6 +41,8 @@ import {
   stopMockSystemAudioCapture,
   updateMockBrowserCaptureSession,
   updateMockGeneratedTicketDraft,
+  askMockCrossSession,
+  getCrossSessionMockInsights,
 } from "./mock-backend";
 import type {
   AppendTranscriptInput,
@@ -81,6 +83,12 @@ import type {
   StreamingAssistantDraft,
   SystemAudioSourceListPayload,
   UpdateGeneratedTicketDraftInput,
+  AskCrossSessionInput,
+  AskCrossSessionStreamInput,
+  CrossSessionCompletedEvent,
+  CrossSessionFailedEvent,
+  CrossSessionStartedEvent,
+  InsightsPayload,
 } from "./types";
 
 interface AskAssistantStreamHandlers {
@@ -535,4 +543,82 @@ export async function syncGithubRepo(ownerRepo: string, branch: string): Promise
   }
 
   return invoke<RepoSyncStatus>("sync_github_repo", { ownerRepo, branch });
+}
+
+export async function askCrossSession(
+  input: AskCrossSessionInput
+): Promise<string> {
+  assertSupportedRuntime();
+  if (assertSupportedRuntime() === "browser-mock") {
+    return askMockCrossSession(input);
+  }
+  return invoke<string>("ask_cross_session", { input });
+}
+
+interface CrossSessionStreamHandlers {
+  onStarted?: (event: CrossSessionStartedEvent) => void;
+  onChunk?: (event: AssistantChunkEvent) => void;
+  onCompleted?: (event: CrossSessionCompletedEvent) => void;
+  onFailed?: (event: CrossSessionFailedEvent) => void;
+}
+
+export async function streamAskCrossSession(
+  input: Omit<AskCrossSessionStreamInput, "requestId">,
+  handlers: CrossSessionStreamHandlers = {}
+): Promise<string | null> {
+  assertSupportedRuntime();
+
+  const requestId = createAskRequestId();
+  const fullInput: AskCrossSessionStreamInput = { ...input, requestId };
+
+  if (assertSupportedRuntime() === "browser-mock") {
+    const answer = await askMockCrossSession(input);
+    handlers.onCompleted?.({ requestId, answer });
+    return answer;
+  }
+
+  return new Promise<string | null>((resolve) => {
+    const unlisteners: Array<() => void> = [];
+
+    function cleanup() {
+      for (const fn of unlisteners) fn();
+    }
+
+    listen<CrossSessionStartedEvent>("cross_session:started", (event) => {
+      if (event.payload.requestId !== requestId) return;
+      handlers.onStarted?.(event.payload);
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<AssistantChunkEvent>("assistant:chunk", (event) => {
+      if (event.payload.requestId !== requestId) return;
+      handlers.onChunk?.(event.payload);
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<CrossSessionCompletedEvent>("cross_session:completed", (event) => {
+      if (event.payload.requestId !== requestId) return;
+      handlers.onCompleted?.(event.payload);
+      cleanup();
+      resolve(event.payload.answer);
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<CrossSessionFailedEvent>("cross_session:failed", (event) => {
+      if (event.payload.requestId !== requestId) return;
+      handlers.onFailed?.(event.payload);
+      cleanup();
+      resolve(null);
+    }).then((fn) => unlisteners.push(fn));
+
+    invoke("start_ask_cross_session_stream", { input: fullInput }).catch(() => {
+      cleanup();
+      resolve(null);
+    });
+  });
+}
+
+export async function getCrossSessionInsights(): Promise<InsightsPayload> {
+  assertSupportedRuntime();
+  if (assertSupportedRuntime() === "browser-mock") {
+    return getCrossSessionMockInsights();
+  }
+  return invoke<InsightsPayload>("get_cross_session_insights");
 }

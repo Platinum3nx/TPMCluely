@@ -117,6 +117,75 @@ fn add_column_if_missing(
     Ok(())
 }
 
+fn ensure_global_chat_tables(connection: &Connection) -> Result<(), DatabaseError> {
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS global_chat_messages (
+          id          TEXT PRIMARY KEY,
+          role        TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+          content     TEXT NOT NULL,
+          metadata_json TEXT,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+fn ensure_insights_tables(connection: &Connection) -> Result<(), DatabaseError> {
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS insights_topics (
+          id                    TEXT PRIMARY KEY,
+          topic                 TEXT NOT NULL,
+          representative_snippet TEXT,
+          first_seen_at         TEXT NOT NULL,
+          last_seen_at          TEXT NOT NULL,
+          occurrence_count      INTEGER NOT NULL DEFAULT 1,
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS insights_topic_sessions (
+          topic_id    TEXT NOT NULL REFERENCES insights_topics(id) ON DELETE CASCADE,
+          session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          session_title TEXT NOT NULL,
+          session_date TEXT NOT NULL,
+          PRIMARY KEY (topic_id, session_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS insights_blockers (
+          id                    TEXT PRIMARY KEY,
+          description           TEXT NOT NULL,
+          first_mentioned_at    TEXT NOT NULL,
+          last_mentioned_at     TEXT NOT NULL,
+          occurrence_count      INTEGER NOT NULL DEFAULT 1,
+          resolved              INTEGER NOT NULL DEFAULT 0,
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS insights_blocker_sessions (
+          blocker_id  TEXT NOT NULL REFERENCES insights_blockers(id) ON DELETE CASCADE,
+          session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          session_title TEXT NOT NULL,
+          session_date TEXT NOT NULL,
+          PRIMARY KEY (blocker_id, session_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS insights_jobs (
+          session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+          status      TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed')),
+          attempts    INTEGER NOT NULL DEFAULT 0,
+          last_error  TEXT,
+          queued_at   TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        ",
+    )?;
+    Ok(())
+}
+
 fn ensure_repo_search_tables(connection: &Connection) -> Result<(), DatabaseError> {
     let repo_chunks_ready = if column_exists(connection, "repo_chunks", "file_id")? {
         column_exists(connection, "repo_chunks", "indexed_commit")?
@@ -691,6 +760,8 @@ pub fn run_migrations(connection: &Connection) -> Result<(), DatabaseError> {
           ON generated_tickets(session_id, idempotency_key);
         ",
     )?;
+    ensure_global_chat_tables(connection)?;
+    ensure_insights_tables(connection)?;
     ensure_repo_search_tables(connection)?;
     backfill_session_speakers(connection)?;
 

@@ -10,6 +10,8 @@ import { SearchBar } from "../components/SearchBar";
 import { SessionDetail } from "./SessionDetail";
 import { SessionsList } from "./SessionsList";
 import { TicketDashboard } from "./TicketDashboard";
+import { CrossSessionAskBar } from "./CrossSessionAskBar";
+import { InsightsDashboard } from "./InsightsDashboard";
 
 interface DashboardAppProps {
   sessions: SessionRecord[];
@@ -64,6 +66,7 @@ export function DashboardApp({
   allowTicketPreview,
 }: DashboardAppProps) {
   const [query, setQuery] = useState("");
+  const [activeTab, setActiveTab] = useState<"sessions" | "insights">("sessions");
   const requestSequenceRef = useRef(0);
 
   useEffect(() => {
@@ -118,35 +121,65 @@ export function DashboardApp({
         <p className="muted">Search sessions, inspect the evidence, then approve only the ticket drafts that should leave the desktop app.</p>
       </div>
 
-      <SearchBar value={query} onChange={setQuery} />
+      <CrossSessionAskBar
+        currentSessionId={selectedSessionId}
+        onNavigateToSession={(sessionId) => void onSelectSession(sessionId)}
+      />
 
-      <div className="dashboard-grid-body">
-        <SessionsList
-          sessions={sessionItems}
-          selectedSessionId={selectedSessionId}
-          onSelectSession={(sessionId, transcriptSequenceStart, transcriptSequenceEnd) =>
-            void onSelectSession(sessionId, transcriptSequenceStart, transcriptSequenceEnd)
-          }
-        />
-        <div className="card-stack">
-          <SessionDetail
-            sessionDetail={sessionDetail}
-            highlightedSequenceStart={highlightedSequenceStart}
-            highlightedSequenceEnd={highlightedSequenceEnd}
-            onExportSession={onExportSession}
-            onRenameSpeaker={onRenameSpeaker}
-          />
-          <TicketDashboard
-            sessionDetail={sessionDetail}
-            allowPreview={allowTicketPreview}
-            onGenerateTickets={onGenerateTickets}
-            onPushGeneratedTicket={onPushGeneratedTicket}
-            onPushGeneratedTickets={onPushGeneratedTickets}
-            onSetGeneratedTicketReviewState={onSetGeneratedTicketReviewState}
-            onUpdateGeneratedTicketDraft={onUpdateGeneratedTicketDraft}
-          />
-        </div>
+      <div className="dashboard-tab-bar">
+        <button
+          className={`dashboard-tab ${activeTab === "sessions" ? "active" : ""}`}
+          onClick={() => setActiveTab("sessions")}
+        >
+          Sessions
+        </button>
+        <button
+          className={`dashboard-tab ${activeTab === "insights" ? "active" : ""}`}
+          onClick={() => setActiveTab("insights")}
+        >
+          Insights
+        </button>
       </div>
+
+      {activeTab === "sessions" ? (
+        <>
+          <SearchBar value={query} onChange={setQuery} />
+          <div className="dashboard-grid-body">
+            <SessionsList
+              sessions={sessionItems}
+              selectedSessionId={selectedSessionId}
+              onSelectSession={(sessionId, transcriptSequenceStart, transcriptSequenceEnd) =>
+                void onSelectSession(sessionId, transcriptSequenceStart, transcriptSequenceEnd)
+              }
+            />
+            <div className="card-stack">
+              <SessionDetail
+                sessionDetail={sessionDetail}
+                highlightedSequenceStart={highlightedSequenceStart}
+                highlightedSequenceEnd={highlightedSequenceEnd}
+                onExportSession={onExportSession}
+                onRenameSpeaker={onRenameSpeaker}
+              />
+              <TicketDashboard
+                sessionDetail={sessionDetail}
+                allowPreview={allowTicketPreview}
+                onGenerateTickets={onGenerateTickets}
+                onPushGeneratedTicket={onPushGeneratedTicket}
+                onPushGeneratedTickets={onPushGeneratedTickets}
+                onSetGeneratedTicketReviewState={onSetGeneratedTicketReviewState}
+                onUpdateGeneratedTicketDraft={onUpdateGeneratedTicketDraft}
+              />
+            </div>
+          </div>
+        </>
+      ) : (
+        <InsightsDashboard
+          onSelectSession={(sessionId) => {
+            setActiveTab("sessions");
+            void onSelectSession(sessionId);
+          }}
+        />
+      )}
     </section>
   );
 }

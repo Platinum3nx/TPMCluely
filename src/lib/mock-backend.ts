@@ -49,6 +49,7 @@ import type {
   StartSessionInput,
   SystemAudioSourceListPayload,
   TranscriptSegment,
+  InsightsPayload,
 } from "./types";
 import { buildSessionMarkdown } from "./export";
 import { generateTicketsFromSession } from "./ticket-engine";
@@ -2245,4 +2246,95 @@ export async function streamMockAssistant(
   });
 
   return finalDetail;
+}
+
+export async function askMockCrossSession(
+  input: { prompt: string; currentSessionId?: string }
+): Promise<string> {
+  const prompt = input.prompt.toLowerCase();
+
+  if (prompt.includes("decision") || prompt.includes("decide")) {
+    return 'Based on past sessions, the team decided to use TypeScript for the frontend (Sprint 12 Standup [Past: "Sprint 12 Standup" S4-S6]) and migrate the auth middleware to comply with session token storage requirements ([Past: "Security Review" S12]).';
+  }
+  if (prompt.includes("blocker") || prompt.includes("block")) {
+    return 'Recurring blockers found across sessions: 1) CI pipeline timeouts (mentioned in 3 sessions), 2) Unclear ownership of the auth migration ([Past: "Sprint 11 Retro" S8]).';
+  }
+  if (prompt.includes("action") || prompt.includes("next step")) {
+    return 'From the last 3 sessions, unresolved action items include: schedule the database migration window, finalize API contract with the mobile team, and review the Linear integration ticket flow.';
+  }
+
+  return `Based on ${Math.floor(Math.random() * 5) + 2} past sessions, I found relevant context for "${input.prompt}". The team has discussed this topic multiple times, with the most recent mention in the last standup where they agreed to revisit it in the next sprint planning.`;
+}
+
+export function getCrossSessionMockInsights(): InsightsPayload {
+  return {
+    topics: [
+      {
+        id: "topic-auth-migration",
+        topic: "Auth middleware migration",
+        representativeSnippet: "We need to rip out the old auth middleware due to compliance requirements.",
+        occurrenceCount: 4,
+        firstSeenAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        lastSeenAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+        sessions: [
+          { sessionId: "mock-1", sessionTitle: "Security Review", sessionDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-2", sessionTitle: "Sprint 12 Planning", sessionDate: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-3", sessionTitle: "Sprint 12 Standup", sessionDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-4", sessionTitle: "Sprint 13 Planning", sessionDate: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() },
+        ],
+      },
+      {
+        id: "topic-ci-performance",
+        topic: "CI pipeline performance",
+        representativeSnippet: "Build times are averaging 18 minutes, blocking the team.",
+        occurrenceCount: 3,
+        firstSeenAt: new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString(),
+        lastSeenAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+        sessions: [
+          { sessionId: "mock-2", sessionTitle: "Sprint 12 Planning", sessionDate: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-3", sessionTitle: "Sprint 12 Standup", sessionDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-5", sessionTitle: "Infra Review", sessionDate: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() },
+        ],
+      },
+      {
+        id: "topic-mobile-api",
+        topic: "Mobile API contract",
+        representativeSnippet: "Need to finalize the API contract before the mobile team cuts their release branch.",
+        occurrenceCount: 2,
+        firstSeenAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+        lastSeenAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
+        sessions: [
+          { sessionId: "mock-3", sessionTitle: "Sprint 12 Standup", sessionDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-4", sessionTitle: "Sprint 13 Planning", sessionDate: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString() },
+        ],
+      },
+    ],
+    blockers: [
+      {
+        id: "blocker-ci-timeout",
+        description: "CI pipeline timeouts blocking merges",
+        occurrenceCount: 3,
+        firstMentionedAt: new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString(),
+        lastMentionedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+        resolved: false,
+        sessions: [
+          { sessionId: "mock-2", sessionTitle: "Sprint 12 Planning", sessionDate: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-3", sessionTitle: "Sprint 12 Standup", sessionDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-5", sessionTitle: "Infra Review", sessionDate: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() },
+        ],
+      },
+      {
+        id: "blocker-auth-ownership",
+        description: "No clear owner for auth migration",
+        occurrenceCount: 2,
+        firstMentionedAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
+        lastMentionedAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+        resolved: false,
+        sessions: [
+          { sessionId: "mock-2", sessionTitle: "Sprint 12 Planning", sessionDate: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString() },
+          { sessionId: "mock-3", sessionTitle: "Sprint 12 Standup", sessionDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() },
+        ],
+      },
+    ],
+  };
 }

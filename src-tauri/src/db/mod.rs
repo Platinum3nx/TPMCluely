@@ -176,6 +176,51 @@ pub struct SessionDerivedUpdate {
     pub notes_md: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct GlobalMessageRow {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub metadata_json: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsightTopicRow {
+    pub id: String,
+    pub topic: String,
+    pub representative_snippet: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub occurrence_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsightTopicSessionRow {
+    pub topic_id: String,
+    pub session_id: String,
+    pub session_title: String,
+    pub session_date: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsightBlockerRow {
+    pub id: String,
+    pub description: String,
+    pub first_mentioned_at: String,
+    pub last_mentioned_at: String,
+    pub occurrence_count: i64,
+    pub resolved: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct InsightBlockerSessionRow {
+    pub blocker_id: String,
+    pub session_id: String,
+    pub session_title: String,
+    pub session_date: String,
+}
+
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
@@ -2081,6 +2126,274 @@ impl AppDatabase {
 
             rows.collect::<Result<Vec<_>, _>>()
         })
+    }
+
+    pub fn append_global_message(
+        &self,
+        role: &str,
+        content: &str,
+        metadata_json: Option<&str>,
+    ) -> Result<String, DatabaseError> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO global_chat_messages (id, role, content, metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, role, content, metadata_json, now],
+        )?;
+        Ok(id)
+    }
+
+    pub fn list_global_messages(&self, limit: usize) -> Result<Vec<GlobalMessageRow>, DatabaseError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, role, content, metadata_json, created_at
+             FROM global_chat_messages
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit as i64], |row| {
+            Ok(GlobalMessageRow {
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                metadata_json: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut messages: Vec<GlobalMessageRow> = rows.collect::<Result<Vec<_>, _>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    pub fn upsert_insight_topic(
+        &self,
+        id: &str,
+        topic: &str,
+        representative_snippet: Option<&str>,
+        first_seen_at: &str,
+        last_seen_at: &str,
+        occurrence_count: i64,
+    ) -> Result<(), DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO insights_topics
+               (id, topic, representative_snippet, first_seen_at, last_seen_at, occurrence_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               topic = excluded.topic,
+               representative_snippet = excluded.representative_snippet,
+               last_seen_at = excluded.last_seen_at,
+               occurrence_count = excluded.occurrence_count,
+               updated_at = excluded.updated_at",
+            params![id, topic, representative_snippet, first_seen_at, last_seen_at, occurrence_count, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn link_topic_to_session(
+        &self,
+        topic_id: &str,
+        session_id: &str,
+        session_title: &str,
+        session_date: &str,
+    ) -> Result<(), DatabaseError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO insights_topic_sessions
+               (topic_id, session_id, session_title, session_date)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![topic_id, session_id, session_title, session_date],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_insight_blocker(
+        &self,
+        id: &str,
+        description: &str,
+        first_mentioned_at: &str,
+        last_mentioned_at: &str,
+        occurrence_count: i64,
+        resolved: bool,
+    ) -> Result<(), DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO insights_blockers
+               (id, description, first_mentioned_at, last_mentioned_at, occurrence_count, resolved, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               description = excluded.description,
+               last_mentioned_at = excluded.last_mentioned_at,
+               occurrence_count = excluded.occurrence_count,
+               resolved = excluded.resolved,
+               updated_at = excluded.updated_at",
+            params![id, description, first_mentioned_at, last_mentioned_at, occurrence_count, resolved as i64, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn link_blocker_to_session(
+        &self,
+        blocker_id: &str,
+        session_id: &str,
+        session_title: &str,
+        session_date: &str,
+    ) -> Result<(), DatabaseError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO insights_blocker_sessions
+               (blocker_id, session_id, session_title, session_date)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![blocker_id, session_id, session_title, session_date],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_insight_topics(&self) -> Result<Vec<InsightTopicRow>, DatabaseError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, topic, representative_snippet, first_seen_at, last_seen_at, occurrence_count
+             FROM insights_topics
+             ORDER BY occurrence_count DESC, last_seen_at DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(InsightTopicRow {
+                id: row.get(0)?,
+                topic: row.get(1)?,
+                representative_snippet: row.get(2)?,
+                first_seen_at: row.get(3)?,
+                last_seen_at: row.get(4)?,
+                occurrence_count: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DatabaseError::from)
+    }
+
+    pub fn list_insight_topic_sessions(
+        &self,
+        topic_id: &str,
+    ) -> Result<Vec<InsightTopicSessionRow>, DatabaseError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT topic_id, session_id, session_title, session_date
+             FROM insights_topic_sessions
+             WHERE topic_id = ?1
+             ORDER BY session_date DESC",
+        )?;
+        let rows = statement.query_map(params![topic_id], |row| {
+            Ok(InsightTopicSessionRow {
+                topic_id: row.get(0)?,
+                session_id: row.get(1)?,
+                session_title: row.get(2)?,
+                session_date: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DatabaseError::from)
+    }
+
+    pub fn list_insight_blockers(&self) -> Result<Vec<InsightBlockerRow>, DatabaseError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, description, first_mentioned_at, last_mentioned_at, occurrence_count, resolved
+             FROM insights_blockers
+             ORDER BY resolved ASC, occurrence_count DESC, last_mentioned_at DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(InsightBlockerRow {
+                id: row.get(0)?,
+                description: row.get(1)?,
+                first_mentioned_at: row.get(2)?,
+                last_mentioned_at: row.get(3)?,
+                occurrence_count: row.get(4)?,
+                resolved: row.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DatabaseError::from)
+    }
+
+    pub fn list_insight_blocker_sessions(
+        &self,
+        blocker_id: &str,
+    ) -> Result<Vec<InsightBlockerSessionRow>, DatabaseError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT blocker_id, session_id, session_title, session_date
+             FROM insights_blocker_sessions
+             WHERE blocker_id = ?1
+             ORDER BY session_date DESC",
+        )?;
+        let rows = statement.query_map(params![blocker_id], |row| {
+            Ok(InsightBlockerSessionRow {
+                blocker_id: row.get(0)?,
+                session_id: row.get(1)?,
+                session_title: row.get(2)?,
+                session_date: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DatabaseError::from)
+    }
+
+    pub fn enqueue_insights_job(&self, session_id: &str) -> Result<(), DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT INTO insights_jobs (session_id, status, attempts, queued_at, updated_at)
+             VALUES (?1, 'queued', 0, ?2, ?2)
+             ON CONFLICT(session_id) DO UPDATE SET
+               status = 'queued',
+               attempts = 0,
+               last_error = NULL,
+               queued_at = excluded.queued_at,
+               updated_at = excluded.updated_at",
+            params![session_id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn take_next_insights_job(&self) -> Result<Option<String>, DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connect()?;
+        let session_id: Option<String> = connection
+            .query_row(
+                "SELECT session_id FROM insights_jobs
+                 WHERE status IN ('queued', 'failed') AND attempts < 5
+                 ORDER BY queued_at ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(ref id) = session_id {
+            connection.execute(
+                "UPDATE insights_jobs SET status = 'running', updated_at = ?2 WHERE session_id = ?1",
+                params![id, now],
+            )?;
+        }
+        Ok(session_id)
+    }
+
+    pub fn complete_insights_job(&self, session_id: &str) -> Result<(), DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE insights_jobs SET status = 'completed', updated_at = ?2 WHERE session_id = ?1",
+            params![session_id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn fail_insights_job(&self, session_id: &str, error: &str) -> Result<(), DatabaseError> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE insights_jobs SET status = 'failed', attempts = attempts + 1, last_error = ?3, updated_at = ?2
+             WHERE session_id = ?1",
+            params![session_id, now, error],
+        )?;
+        Ok(())
     }
 }
 

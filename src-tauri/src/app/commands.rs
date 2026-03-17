@@ -45,7 +45,7 @@ use crate::screenshot::ScreenshotStore;
 use crate::secrets::SecretPresence;
 use crate::session::manager::SessionRuntimeSnapshot;
 use crate::session::state_machine::SessionStatus;
-use crate::search::RetrievedContextChunk;
+use crate::search::{CrossSessionContextChunk, RetrievedContextChunk};
 use crate::tickets::generate_tickets;
 use crate::transcript::{
     format_transcript_document, select_relevant_transcript_snippets, truncate_context_middle,
@@ -61,6 +61,10 @@ pub const EVENT_ASSISTANT_STARTED: &str = "assistant:started";
 pub const EVENT_ASSISTANT_CHUNK: &str = "assistant:chunk";
 pub const EVENT_ASSISTANT_COMPLETED: &str = "assistant:completed";
 pub const EVENT_ASSISTANT_FAILED: &str = "assistant:failed";
+pub const EVENT_CROSS_SESSION_STARTED: &str = "cross_session:started";
+pub const EVENT_CROSS_SESSION_CHUNK: &str = "cross_session:chunk";
+pub const EVENT_CROSS_SESSION_COMPLETED: &str = "cross_session:completed";
+pub const EVENT_CROSS_SESSION_FAILED: &str = "cross_session:failed";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -440,6 +444,21 @@ pub struct AskSessionStreamInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AskCrossSessionInput {
+    pub prompt: String,
+    pub current_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskCrossSessionStreamInput {
+    pub request_id: String,
+    pub prompt: String,
+    pub current_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunDynamicActionInput {
     pub session_id: String,
     pub action: String,
@@ -485,6 +504,52 @@ pub struct AssistantFailedPayload {
     pub request_id: String,
     pub session_id: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossSessionCompletedPayload {
+    pub request_id: String,
+    pub answer: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightTopicPayload {
+    pub id: String,
+    pub topic: String,
+    pub representative_snippet: Option<String>,
+    pub occurrence_count: i64,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub sessions: Vec<InsightSessionRefPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightBlockerPayload {
+    pub id: String,
+    pub description: String,
+    pub occurrence_count: i64,
+    pub first_mentioned_at: String,
+    pub last_mentioned_at: String,
+    pub resolved: bool,
+    pub sessions: Vec<InsightSessionRefPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightSessionRefPayload {
+    pub session_id: String,
+    pub session_title: String,
+    pub session_date: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightsPayload {
+    pub topics: Vec<InsightTopicPayload>,
+    pub blockers: Vec<InsightBlockerPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -975,6 +1040,46 @@ fn format_context_chunk(chunk: RetrievedContextChunk) -> String {
             chunk.text.trim()
         )
     }
+}
+
+fn format_cross_session_chunk(chunk: &CrossSessionContextChunk) -> String {
+    let seq = if chunk.sequence_start == chunk.sequence_end {
+        format!("[S{}]", chunk.sequence_start)
+    } else {
+        format!("[S{}-S{}]", chunk.sequence_start, chunk.sequence_end)
+    };
+    format!("[Past: \"{}\" {}] {}", chunk.session_title, seq, chunk.text.trim())
+}
+
+fn build_cross_session_question_prompt(
+    prompt: &str,
+    cross_snippets: &[CrossSessionContextChunk],
+    current_snippets: &[String],
+    recent_messages: &[crate::db::GlobalMessageRow],
+) -> String {
+    let cross_section = if cross_snippets.is_empty() {
+        "No relevant cross-session context found.".to_string()
+    } else {
+        cross_snippets.iter().map(format_cross_session_chunk).collect::<Vec<_>>().join("\n")
+    };
+
+    let current_section = if current_snippets.is_empty() {
+        "No current session context.".to_string()
+    } else {
+        current_snippets.join("\n")
+    };
+
+    let history = recent_messages
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .take(6)
+        .map(|m| format!("{}: {}", m.role, m.content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "You are TPMCluely, a meeting intelligence assistant. Answer the question using context from past sessions. Cite past sessions using the [Past: \"Session Title\" S#] labels.\n\nRecent conversation:\n{history}\n\nRelevant context from past sessions:\n{cross_section}\n\nCurrent session context:\n{current_section}\n\nQuestion: {prompt}\n\nAnswer concisely and cite your sources."
+    )
 }
 
 async fn load_question_snippets(
@@ -2718,6 +2823,7 @@ pub async fn complete_session(
         .update_session_derived(&session_id, &derived)
         .map_err(|error| error.to_string())?;
     enqueue_search_reindex(&state, &session_id);
+    state.insights_engine().enqueue_analysis(&session_id);
     database
         .append_message(
             &session_id,
@@ -3430,6 +3536,249 @@ pub async fn sync_github_repo(
 ) -> Result<RepoSyncStatusPayload, String> {
     let status = state.repo_search_runtime().enqueue_sync(&owner_repo, &branch)?;
     Ok(map_repo_sync_status(status))
+}
+
+#[tauri::command]
+pub async fn ask_cross_session(
+    state: State<'_, AppState>,
+    input: AskCrossSessionInput,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+
+    let cross_chunks = state
+        .search_runtime()
+        .retrieve_cross_session_context(
+            &input.prompt,
+            8,
+            input.current_session_id.as_deref(),
+        )
+        .await?
+        .unwrap_or_default();
+
+    let current_snippets: Vec<String> = if let Some(session_id) = &input.current_session_id {
+        match state
+            .search_runtime()
+            .retrieve_session_context(session_id, &input.prompt, 4)
+            .await
+        {
+            Ok(Some(chunks)) => chunks.into_iter().map(format_context_chunk).collect(),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    let recent_messages = state
+        .database()
+        .list_global_messages(12)
+        .map_err(|e| e.to_string())?;
+
+    let prompt_text = build_cross_session_question_prompt(
+        &input.prompt,
+        &cross_chunks,
+        &current_snippets,
+        &recent_messages,
+    );
+
+    state
+        .database()
+        .append_global_message("user", &input.prompt, None)
+        .map_err(|e| e.to_string())?;
+
+    let gemini_api_key = load_gemini_api_key(&state)?;
+    let (response, _) = generate_grounded_response(
+        gemini_api_key,
+        "You are TPMCluely, a meeting intelligence assistant with access to past session transcripts.",
+        prompt_text,
+        None,
+        "I could not find relevant context in past sessions to answer that question.".to_string(),
+        &LlmGenerationOptions {
+            max_output_tokens: Some(512),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    state
+        .database()
+        .append_global_message("assistant", &response, None)
+        .map_err(|e| e.to_string())?;
+
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn start_ask_cross_session_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: AskCrossSessionStreamInput,
+) -> Result<AskAssistantStreamStartPayload, String> {
+    let state = state.inner().clone();
+    let request_id = input.request_id.clone();
+    let response_request_id = request_id.clone();
+
+    state
+        .database()
+        .append_global_message("user", &input.prompt, None)
+        .map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        EVENT_CROSS_SESSION_STARTED,
+        &AssistantStartedPayload {
+            request_id: request_id.clone(),
+            session_id: input.current_session_id.clone().unwrap_or_default(),
+            prompt: input.prompt.clone(),
+            started_at: Utc::now().to_rfc3339(),
+            requested_screen_context: false,
+        },
+    );
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let request_id = request_id.clone();
+
+        let outcome = async {
+            let cross_chunks = state
+                .search_runtime()
+                .retrieve_cross_session_context(
+                    &input.prompt,
+                    8,
+                    input.current_session_id.as_deref(),
+                )
+                .await?
+                .unwrap_or_default();
+
+            let current_snippets: Vec<String> = if let Some(session_id) = &input.current_session_id {
+                match state
+                    .search_runtime()
+                    .retrieve_session_context(session_id, &input.prompt, 4)
+                    .await
+                {
+                    Ok(Some(chunks)) => chunks.into_iter().map(format_context_chunk).collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+
+            let recent_messages = state
+                .database()
+                .list_global_messages(12)
+                .map_err(|e| e.to_string())?;
+
+            let prompt_text = build_cross_session_question_prompt(
+                &input.prompt,
+                &cross_chunks,
+                &current_snippets,
+                &recent_messages,
+            );
+
+            let gemini_api_key = load_gemini_api_key(&state)?;
+            let (response, _) = generate_streamed_ask_response(
+                &app_handle,
+                &request_id,
+                &input.current_session_id.as_deref().unwrap_or("global"),
+                gemini_api_key,
+                prompt_text,
+                None,
+                "I could not find relevant context in past sessions.".to_string(),
+                None,
+            )
+            .await;
+
+            state
+                .database()
+                .append_global_message("assistant", &response, None)
+                .map_err(|e| e.to_string())?;
+
+            Ok::<String, String>(response)
+        }
+        .await;
+
+        match outcome {
+            Ok(answer) => {
+                let _ = app_handle.emit(
+                    EVENT_CROSS_SESSION_COMPLETED,
+                    &CrossSessionCompletedPayload { request_id, answer },
+                );
+            }
+            Err(error) => {
+                let _ = app_handle.emit(
+                    EVENT_CROSS_SESSION_FAILED,
+                    &AssistantFailedPayload {
+                        request_id,
+                        session_id: input.current_session_id.unwrap_or_default(),
+                        error,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(AskAssistantStreamStartPayload {
+        request_id: response_request_id,
+    })
+}
+
+#[tauri::command]
+pub fn get_cross_session_insights(
+    state: State<'_, AppState>,
+) -> Result<InsightsPayload, String> {
+    let database = state.database();
+
+    let topics = database.list_insight_topics().map_err(|e| e.to_string())?;
+    let blockers = database.list_insight_blockers().map_err(|e| e.to_string())?;
+
+    let mut topic_payloads = Vec::with_capacity(topics.len());
+    for topic in topics {
+        let sessions = database
+            .list_insight_topic_sessions(&topic.id)
+            .map_err(|e| e.to_string())?;
+        topic_payloads.push(InsightTopicPayload {
+            id: topic.id,
+            topic: topic.topic,
+            representative_snippet: topic.representative_snippet,
+            occurrence_count: topic.occurrence_count,
+            first_seen_at: topic.first_seen_at,
+            last_seen_at: topic.last_seen_at,
+            sessions: sessions
+                .into_iter()
+                .map(|s| InsightSessionRefPayload {
+                    session_id: s.session_id,
+                    session_title: s.session_title,
+                    session_date: s.session_date,
+                })
+                .collect(),
+        });
+    }
+
+    let mut blocker_payloads = Vec::with_capacity(blockers.len());
+    for blocker in blockers {
+        let sessions = database
+            .list_insight_blocker_sessions(&blocker.id)
+            .map_err(|e| e.to_string())?;
+        blocker_payloads.push(InsightBlockerPayload {
+            id: blocker.id,
+            description: blocker.description,
+            occurrence_count: blocker.occurrence_count,
+            first_mentioned_at: blocker.first_mentioned_at,
+            last_mentioned_at: blocker.last_mentioned_at,
+            resolved: blocker.resolved,
+            sessions: sessions
+                .into_iter()
+                .map(|s| InsightSessionRefPayload {
+                    session_id: s.session_id,
+                    session_title: s.session_title,
+                    session_date: s.session_date,
+                })
+                .collect(),
+        });
+    }
+
+    Ok(InsightsPayload {
+        topics: topic_payloads,
+        blockers: blocker_payloads,
+    })
 }
 
 #[cfg(test)]

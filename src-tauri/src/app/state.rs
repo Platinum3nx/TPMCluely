@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::audio::AudioRuntime;
 use crate::db::AppDatabase;
+use crate::insights::InsightsEngine;
 use crate::permissions::PermissionService;
 use crate::providers::ProviderCatalog;
 use crate::repo_search::RepoSearchRuntime;
@@ -23,6 +24,7 @@ pub struct AppState {
     audio_runtime: AudioRuntime,
     session_manager: SessionManager,
     window_controller: WindowController,
+    insights_engine: InsightsEngine,
 }
 
 impl AppState {
@@ -53,6 +55,7 @@ impl AppState {
             app_dir: Arc::new(app_dir),
             search_runtime: SearchRuntime::new(Arc::clone(&database), Arc::clone(&secret_store)),
             repo_search_runtime: RepoSearchRuntime::new(Arc::clone(&database), Arc::clone(&secret_store)),
+            insights_engine: InsightsEngine::new(Arc::clone(&database), Arc::clone(&secret_store)),
             database,
             secret_store,
             permissions: PermissionService::new(),
@@ -101,5 +104,9 @@ impl AppState {
 
     pub fn window_controller(&self) -> &WindowController {
         &self.window_controller
+    }
+
+    pub fn insights_engine(&self) -> &InsightsEngine {
+        &self.insights_engine
     }
 }

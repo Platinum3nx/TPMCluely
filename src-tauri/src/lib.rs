@@ -3,6 +3,7 @@ pub mod audio;
 pub mod db;
 pub mod exports;
 pub mod github;
+pub mod insights;
 pub mod knowledge;
 pub mod permissions;
 pub mod prompts;
@@ -20,15 +21,16 @@ pub mod window;
 use std::fs;
 
 use app::commands::{
-    append_transcript_segment, ask_assistant, bootstrap_app, complete_session,
+    append_transcript_segment, ask_assistant, ask_cross_session, bootstrap_app, complete_session,
     delete_knowledge_file, delete_system_prompt, export_session_markdown, generate_session_tickets,
-    get_capture_status, get_repo_sync_status, get_runtime_state, get_session_detail, list_knowledge_files, list_sessions,
+    get_capture_status, get_cross_session_insights, get_repo_sync_status, get_runtime_state,
+    get_session_detail, list_knowledge_files, list_sessions,
     list_system_audio_sources, list_system_prompts, mark_generated_ticket_pushed, pause_session,
     push_generated_ticket, push_generated_tickets, read_secret_value, resume_session,
     rename_session_speaker, run_dynamic_action, run_preflight_checks, save_generated_tickets, save_knowledge_file,
     save_secret, save_setting, save_system_prompt, search_sessions,
     set_generated_ticket_review_state, set_overlay_open, set_stealth_mode, start_ask_assistant_stream,
-    start_session, start_system_audio_capture, stop_system_audio_capture,
+    start_ask_cross_session_stream, start_session, start_system_audio_capture, stop_system_audio_capture,
     update_browser_capture_session, update_generated_ticket_draft, sync_github_repo,
 };
 use app::state::AppState;
@@ -51,6 +53,7 @@ pub fn run() {
                 })?;
             state.search_runtime().start();
             state.repo_search_runtime().start();
+            state.insights_engine().start();
             app.manage(state);
 
             Ok(())
@@ -96,7 +99,10 @@ pub fn run() {
             list_knowledge_files,
             save_knowledge_file,
             delete_knowledge_file,
-            sync_github_repo
+            sync_github_repo,
+            ask_cross_session,
+            start_ask_cross_session_stream,
+            get_cross_session_insights
         ])
         .run(tauri::generate_context!())
         .expect("failed to run TPMCluely");

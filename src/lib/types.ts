@@ -587,3 +587,65 @@ export interface SaveKnowledgeFileInput {
   mimeType: string;
   content: string;
 }
+
+// Cross-session Q&A types
+export interface AskCrossSessionInput {
+  prompt: string;
+  currentSessionId?: string;
+}
+
+export interface AskCrossSessionStreamInput {
+  requestId: string;
+  prompt: string;
+  currentSessionId?: string;
+}
+
+export interface CrossSessionStartedEvent {
+  requestId: string;
+  sessionId: string;
+  prompt: string;
+  startedAt: string;
+}
+
+export interface CrossSessionCompletedEvent {
+  requestId: string;
+  answer: string;
+}
+
+export interface CrossSessionFailedEvent {
+  requestId: string;
+  sessionId: string;
+  error: string;
+}
+
+// Insights types
+export interface InsightSessionRef {
+  sessionId: string;
+  sessionTitle: string;
+  sessionDate: string;
+}
+
+export interface RecurringTopicPayload {
+  id: string;
+  topic: string;
+  representativeSnippet: string | null;
+  occurrenceCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  sessions: InsightSessionRef[];
+}
+
+export interface RecurringBlockerPayload {
+  id: string;
+  description: string;
+  occurrenceCount: number;
+  firstMentionedAt: string;
+  lastMentionedAt: string;
+  resolved: boolean;
+  sessions: InsightSessionRef[];
+}
+
+export interface InsightsPayload {
+  topics: RecurringTopicPayload[];
+  blockers: RecurringBlockerPayload[];
+}

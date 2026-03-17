@@ -148,6 +148,16 @@ pub struct RetrievedContextChunk {
 }
 
 #[derive(Debug, Clone)]
+pub struct CrossSessionContextChunk {
+    pub session_id: String,
+    pub session_title: String,
+    pub text: String,
+    pub source_kind: String,
+    pub sequence_start: i64,
+    pub sequence_end: i64,
+}
+
+#[derive(Debug, Clone)]
 struct ContextChunkCandidate {
     chunk: ReadyChunk,
     rank_score: f32,
@@ -276,6 +286,61 @@ impl SearchRuntime {
         self.context_retriever()
             .retrieve(session_id, prompt, limit)
             .await
+    }
+
+    pub async fn retrieve_cross_session_context(
+        &self,
+        prompt: &str,
+        limit: usize,
+        exclude_session_id: Option<&str>,
+    ) -> Result<Option<Vec<CrossSessionContextChunk>>, String> {
+        let Some(query_embedding) = self.cached_query_embedding(prompt).await? else {
+            return Ok(None);
+        };
+
+        let all_chunks = load_ready_chunks(self.inner.database.as_ref(), None, Some("transcript"))?;
+        let chunks: Vec<ReadyChunk> = match exclude_session_id {
+            Some(exclude) => all_chunks.into_iter().filter(|c| c.session_id != exclude).collect(),
+            None => all_chunks,
+        };
+
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        let mut scored: Vec<(f32, ReadyChunk)> = chunks
+            .into_iter()
+            .filter_map(|chunk| {
+                let similarity = cosine_similarity(&query_embedding, &chunk.vector);
+                if !similarity.is_finite() || similarity < CONTEXT_MIN_SEMANTIC_SIMILARITY {
+                    return None;
+                }
+                Some((similarity, chunk))
+            })
+            .collect();
+
+        if scored.is_empty() {
+            return Ok(None);
+        }
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        scored.truncate(limit);
+
+        Ok(Some(
+            scored
+                .into_iter()
+                .map(|(_, chunk)| CrossSessionContextChunk {
+                    session_id: chunk.session_id,
+                    session_title: chunk.title,
+                    text: chunk.text,
+                    source_kind: chunk.source_kind,
+                    sequence_start: chunk.sequence_start.unwrap_or_default(),
+                    sequence_end: chunk
+                        .sequence_end
+                        .unwrap_or(chunk.sequence_start.unwrap_or_default()),
+                })
+                .collect(),
+        ))
     }
 
     async fn cached_query_embedding(&self, query: &str) -> Result<Option<Vec<f32>>, String> {
